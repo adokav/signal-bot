@@ -6,8 +6,13 @@ TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 print("BOT BAŞLADI")
-send_message("BOT BAŞLADI")
+send_message("BOT BAŞLADI 🔥")
+def send_message(text):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    data = {"chat_id": CHAT_ID, "text": text}
+    requests.post(url, data=data)
 
+send_message("BOT BAŞLADI 🔥")
 def send_message(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": text}
