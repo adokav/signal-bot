@@ -21,32 +21,49 @@ COINS = {
 }
 
 STATE_FILE = "state.json"
+
 SCAN_INTERVAL = 300
 COOLDOWN_SECONDS = 900
 SUMMARY_INTERVAL_SECONDS = 4 * 60 * 60
 
-WEIGHTS = {
-    "CORE": {
-        "macro": 0.35,
-        "market": 0.25,
-        "momentum": 0.15,
-        "volume": 0.10,
-        "liquidity": 0.10,
-        "derivatives": 0.05,
-    },
-    "HIGH_BETA": {
-        "macro": 0.20,
-        "market": 0.20,
-        "momentum": 0.25,
-        "volume": 0.15,
-        "liquidity": 0.10,
-        "derivatives": 0.10,
-    },
+MIN_SIGNAL_LEVEL = "MEDIUM"
+
+LEVEL_ORDER = {
+    "WEAK": 1,
+    "MEDIUM": 2,
+    "STRONG": 3,
 }
 
 THRESHOLDS = {
-    "CORE": 1.20,
-    "HIGH_BETA": 1.60,
+    "CORE": {
+        "long": 1.45,
+        "short": -1.45,
+        "strong": 2.10,
+    },
+    "HIGH_BETA": {
+        "long": 1.85,
+        "short": -1.85,
+        "strong": 2.55,
+    },
+}
+
+WEIGHTS = {
+    "CORE": {
+        "macro": 0.30,
+        "market": 0.25,
+        "trend": 0.20,
+        "momentum": 0.15,
+        "volume": 0.05,
+        "liquidity": 0.05,
+    },
+    "HIGH_BETA": {
+        "macro": 0.18,
+        "market": 0.20,
+        "trend": 0.20,
+        "momentum": 0.25,
+        "volume": 0.10,
+        "liquidity": 0.07,
+    },
 }
 
 app = Flask(__name__)
@@ -82,7 +99,7 @@ def request_json(url, params=None):
     return r.json()
 
 
-def get_klines(symbol, interval="5m", limit=60):
+def get_klines(symbol, interval="5m", limit=100):
     url = f"{MEXC_BASE}/api/v3/klines"
     return request_json(url, {"symbol": symbol, "interval": interval, "limit": limit})
 
@@ -107,6 +124,19 @@ def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
 
+def ema(values, period):
+    if len(values) < period:
+        return values[-1]
+
+    k = 2 / (period + 1)
+    result = values[0]
+
+    for price in values[1:]:
+        result = price * k + result * (1 - k)
+
+    return result
+
+
 def bar(value, max_abs, width=6):
     if max_abs <= 0:
         return "⬜" * width + "│" + "⬜" * width
@@ -118,6 +148,7 @@ def bar(value, max_abs, width=6):
         return "⬜" * width + "│" + "🟩" * filled + "⬜" * (width - filled)
     if ratio < 0:
         return "⬜" * (width - filled) + "🟥" * filled + "│" + "⬜" * width
+
     return "⬜" * width + "│" + "⬜" * width
 
 
@@ -136,9 +167,9 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-def feature_from_symbol(symbol):
-    k5 = get_klines(symbol, "5m", 60)
-    k15 = get_klines(symbol, "15m", 60)
+def get_features(symbol):
+    k5 = get_klines(symbol, "5m", 100)
+    k15 = get_klines(symbol, "15m", 100)
     ticker = get_ticker(symbol)
     book = get_book(symbol)
 
@@ -147,6 +178,15 @@ def feature_from_symbol(symbol):
     volumes_5 = [float(x[5]) for x in k5]
 
     last = closes_5[-1]
+
+    ema9 = ema(closes_5, 9)
+    ema21 = ema(closes_5, 21)
+    ema50 = ema(closes_5, 50)
+
+    ema9_15 = ema(closes_15, 9)
+    ema21_15 = ema(closes_15, 21)
+    ema50_15 = ema(closes_15, 50)
+
     ret_5m = pct(closes_5[-1], closes_5[-2])
     ret_15m = pct(closes_5[-1], closes_5[-4])
     ret_1h = pct(closes_5[-1], closes_5[-12])
@@ -164,6 +204,12 @@ def feature_from_symbol(symbol):
 
     return {
         "last": last,
+        "ema9": ema9,
+        "ema21": ema21,
+        "ema50": ema50,
+        "ema9_15": ema9_15,
+        "ema21_15": ema21_15,
+        "ema50_15": ema50_15,
         "ret_5m": ret_5m,
         "ret_15m": ret_15m,
         "ret_1h": ret_1h,
@@ -174,52 +220,71 @@ def feature_from_symbol(symbol):
     }
 
 
-def score_macro(btc_features):
+def score_macro(btc):
     score = 0
-    if btc_features["change_24h"] > 2:
-        score += 2
-    elif btc_features["change_24h"] < -2:
-        score -= 2
 
-    if btc_features["ret_4h"] > 1:
-        score += 1
-    elif btc_features["ret_4h"] < -1:
-        score -= 1
+    if btc["change_24h"] > 2:
+        score += 1.5
+    elif btc["change_24h"] < -2:
+        score -= 1.5
+
+    if btc["ret_4h"] > 1:
+        score += 1.5
+    elif btc["ret_4h"] < -1:
+        score -= 1.5
 
     return clamp(score, -3, 3)
 
 
 def score_market(btc, eth):
     score = 0
-    if btc["ret_1h"] > 0.4:
+
+    if btc["ret_1h"] > 0.5:
         score += 1
-    elif btc["ret_1h"] < -0.4:
+    elif btc["ret_1h"] < -0.5:
         score -= 1
 
-    if eth["ret_1h"] > 0.4:
+    if eth["ret_1h"] > 0.5:
         score += 1
-    elif eth["ret_1h"] < -0.4:
+    elif eth["ret_1h"] < -0.5:
         score -= 1
+
+    return clamp(score, -2, 2)
+
+
+def score_trend(f):
+    score = 0
+
+    if f["ema9"] > f["ema21"] > f["ema50"]:
+        score += 1.2
+    elif f["ema9"] < f["ema21"] < f["ema50"]:
+        score -= 1.2
+
+    if f["ema9_15"] > f["ema21_15"] > f["ema50_15"]:
+        score += 0.8
+    elif f["ema9_15"] < f["ema21_15"] < f["ema50_15"]:
+        score -= 0.8
 
     return clamp(score, -2, 2)
 
 
 def score_momentum(f):
     score = 0
+
     if f["ret_5m"] > 0.15:
-        score += 0.5
+        score += 0.4
     elif f["ret_5m"] < -0.15:
-        score -= 0.5
+        score -= 0.4
 
     if f["ret_15m"] > 0.35:
-        score += 0.7
+        score += 0.6
     elif f["ret_15m"] < -0.35:
-        score -= 0.7
+        score -= 0.6
 
     if f["ret_1h"] > 0.8:
-        score += 0.8
+        score += 1.0
     elif f["ret_1h"] < -0.8:
-        score -= 0.8
+        score -= 1.0
 
     return clamp(score, -2, 2)
 
@@ -236,7 +301,7 @@ def score_volume(f):
 
 def score_liquidity(f, group):
     spread = f["spread_bps"]
-    bad_limit = 15 if group == "CORE" else 30
+    bad_limit = 12 if group == "CORE" else 25
 
     if spread > bad_limit:
         return -2
@@ -245,30 +310,50 @@ def score_liquidity(f, group):
     return 0
 
 
-def score_derivatives_proxy(f):
-    score = 0
-    if f["change_24h"] > 3 and f["ret_1h"] > 0:
-        score += 1
-    elif f["change_24h"] < -3 and f["ret_1h"] < 0:
-        score -= 1
+def veto_signal(symbol, f, btc, eth):
+    group = COINS[symbol]
 
-    if abs(f["change_24h"]) > 8:
-        score -= 0.5
+    if group == "CORE" and f["spread_bps"] > 12:
+        return "Spread yüksek"
 
-    return clamp(score, -2, 2)
+    if group == "HIGH_BETA" and f["spread_bps"] > 25:
+        return "Spread yüksek"
+
+    if group == "HIGH_BETA" and f["vol_ratio"] < 0.7:
+        return "Hacim zayıf"
+
+    if symbol not in ["BTCUSDT", "ETHUSDT"]:
+        btc_unclear = abs(btc["ret_1h"]) < 0.25 and abs(btc["ret_4h"]) < 0.40
+        if btc_unclear:
+            return "BTC yönü belirsiz"
+
+    return None
+
+
+def classify_level(score_abs, group):
+    strong = THRESHOLDS[group]["strong"]
+    medium = THRESHOLDS[group]["long"]
+
+    if score_abs >= strong:
+        return "STRONG"
+    if score_abs >= medium:
+        return "MEDIUM"
+    return "WEAK"
 
 
 def weighted_signal(symbol, features, btc, eth):
     group = COINS[symbol]
     weights = WEIGHTS[group]
 
+    veto = veto_signal(symbol, features, btc, eth)
+
     raw = {
         "macro": score_macro(btc),
         "market": score_market(btc, eth),
+        "trend": score_trend(features),
         "momentum": score_momentum(features),
         "volume": score_volume(features),
         "liquidity": score_liquidity(features, group),
-        "derivatives": score_derivatives_proxy(features),
     }
 
     total = sum(raw[k] * weights[k] for k in raw)
@@ -276,32 +361,38 @@ def weighted_signal(symbol, features, btc, eth):
     max_total = (
         weights["macro"] * 3
         + weights["market"] * 2
+        + weights["trend"] * 2
         + weights["momentum"] * 2
         + weights["volume"] * 2
         + weights["liquidity"] * 2
-        + weights["derivatives"] * 2
     )
 
     confidence = round(abs(total) / max_total * 100, 1)
 
-    threshold = THRESHOLDS[group]
-
-    if total >= threshold:
+    if veto:
+        signal = "NO_TRADE"
+        level = "WEAK"
+    elif total >= THRESHOLDS[group]["long"]:
         signal = "LONG"
-    elif total <= -threshold:
+        level = classify_level(abs(total), group)
+    elif total <= THRESHOLDS[group]["short"]:
         signal = "SHORT"
+        level = classify_level(abs(total), group)
     else:
         signal = "NO_TRADE"
+        level = "WEAK"
 
     return {
         "symbol": symbol,
         "group": group,
         "signal": signal,
+        "level": level,
         "score": round(total, 3),
         "max_score": round(max_total, 3),
         "confidence": confidence,
         "raw": raw,
         "features": features,
+        "veto": veto,
     }
 
 
@@ -311,31 +402,46 @@ def format_signal(result, title):
 
     lines = [
         title,
-        f"{result['symbol']} → {result['signal']}",
+        f"{result['symbol']} → {result['signal']} / {result['level']}",
         f"Skor: {result['score']} / {result['max_score']} {bar(result['score'], result['max_score'])}",
         f"Güven: %{result['confidence']}",
         "",
         "Alt Skorlar:",
         f"Macro: {raw['macro']:+.2f} / 3 {bar(raw['macro'], 3)}",
         f"Market: {raw['market']:+.2f} / 2 {bar(raw['market'], 2)}",
+        f"Trend: {raw['trend']:+.2f} / 2 {bar(raw['trend'], 2)}",
         f"Momentum: {raw['momentum']:+.2f} / 2 {bar(raw['momentum'], 2)}",
         f"Volume: {raw['volume']:+.2f} / 2 {bar(raw['volume'], 2)}",
         f"Liquidity: {raw['liquidity']:+.2f} / 2 {bar(raw['liquidity'], 2)}",
-        f"DerivProxy: {raw['derivatives']:+.2f} / 2 {bar(raw['derivatives'], 2)}",
         "",
         f"Fiyat: {f['last']}",
-        f"5m: %{f['ret_5m']:.2f} | 15m: %{f['ret_15m']:.2f} | 1h: %{f['ret_1h']:.2f}",
+        f"5m: %{f['ret_5m']:.2f} | 15m: %{f['ret_15m']:.2f} | 1h: %{f['ret_1h']:.2f} | 4h: %{f['ret_4h']:.2f}",
         f"Hacim Oranı: {f['vol_ratio']:.2f}x | Spread: {f['spread_bps']:.2f} bps",
-        f"Zaman: {utc_now_text()}",
     ]
+
+    if result["veto"]:
+        lines.append(f"Veto: {result['veto']}")
+
+    lines.append(f"Zaman: {utc_now_text()}")
+
     return "\n".join(lines)
 
 
+def should_notify_signal(result):
+    if result["signal"] == "NO_TRADE":
+        return False
+
+    return LEVEL_ORDER[result["level"]] >= LEVEL_ORDER[MIN_SIGNAL_LEVEL]
+
+
 def decide_alert(old, new):
-    if not old:
-        if new["signal"] != "NO_TRADE":
-            return "🚀 YENİ SİNYAL"
+    if not should_notify_signal(new):
+        if old and old.get("signal") in ["LONG", "SHORT"] and new["signal"] == "NO_TRADE":
+            return "❌ SİNYAL İPTAL"
         return None
+
+    if not old:
+        return "🚀 YENİ SİNYAL"
 
     old_signal = old.get("signal")
     new_signal = new["signal"]
@@ -352,8 +458,10 @@ def decide_alert(old, new):
     if old_signal == new_signal and new_signal != "NO_TRADE":
         old_conf = float(old.get("confidence", 0))
         old_score = float(old.get("score", 0))
+
         if old_conf - new["confidence"] >= 20:
             return "⚠️ SİNYAL ZAYIFLADI"
+
         if abs(old_score) - abs(new["score"]) >= 1.0:
             return "⚠️ SKOR ZAYIFLADI"
 
@@ -368,8 +476,8 @@ def should_cooldown(old):
 
 
 def make_summary(results):
-    longs = [r["symbol"] for r in results if r["signal"] == "LONG"]
-    shorts = [r["symbol"] for r in results if r["signal"] == "SHORT"]
+    longs = [f"{r['symbol']}({r['level']})" for r in results if r["signal"] == "LONG"]
+    shorts = [f"{r['symbol']}({r['level']})" for r in results if r["signal"] == "SHORT"]
     neutral = [r["symbol"] for r in results if r["signal"] == "NO_TRADE"]
 
     return (
@@ -383,18 +491,25 @@ def make_summary(results):
 
 def bot_loop():
     print("BOT BAŞLADI")
-    send_message("BOT BAŞLADI 🚀 Gerçek sinyal motoru aktif.")
+    send_message("BOT BAŞLADI 🚀 Güçlendirilmiş sinyal motoru aktif.")
 
     state = load_state()
 
     while True:
         try:
             results = []
-            btc = feature_from_symbol("BTCUSDT")
-            eth = feature_from_symbol("ETHUSDT")
+
+            btc = get_features("BTCUSDT")
+            eth = get_features("ETHUSDT")
 
             for symbol in COINS:
-                features = btc if symbol == "BTCUSDT" else eth if symbol == "ETHUSDT" else feature_from_symbol(symbol)
+                if symbol == "BTCUSDT":
+                    features = btc
+                elif symbol == "ETHUSDT":
+                    features = eth
+                else:
+                    features = get_features(symbol)
+
                 result = weighted_signal(symbol, features, btc, eth)
                 results.append(result)
 
@@ -409,12 +524,14 @@ def bot_loop():
 
                 state[symbol] = {
                     "signal": result["signal"],
+                    "level": result["level"],
                     "score": result["score"],
                     "confidence": result["confidence"],
                     "last_alert_ts": result["last_alert_ts"],
                 }
 
             last_summary = state.get("_last_summary_ts", 0)
+
             if now_ts() - last_summary >= SUMMARY_INTERVAL_SECONDS:
                 send_message(make_summary(results))
                 state["_last_summary_ts"] = now_ts()
