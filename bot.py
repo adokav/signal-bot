@@ -5,26 +5,19 @@ import requests
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-print("BOT BAŞLADI")
-send_message("BOT BAŞLADI 🔥")
 def send_message(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": text}
     requests.post(url, data=data)
 
-send_message("BOT BAŞLADI 🔥")
-def send_message(text):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": text}
-    requests.post(url, data=data, timeout=10)
-
 def get_btc_price():
     url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
-    r = requests.get(url, timeout=10)
-    r.raise_for_status()
+    r = requests.get(url)
     return r.json()["price"]
 
-send_message("Bot aktif 🚀")
+print("BOT BAŞLADI")
+
+send_message("BOT BAŞLADI 🚀")
 
 while True:
     try:
