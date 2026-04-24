@@ -1,4 +1,5 @@
 print("BOT BAŞLADI")
+send_message("BOT BAŞLADI")
 import os
 import time
 import requests
