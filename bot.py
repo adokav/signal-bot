@@ -1,11 +1,12 @@
-print("BOT BAŞLADI")
-send_message("BOT BAŞLADI")
 import os
 import time
 import requests
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
+print("BOT BAŞLADI")
+send_message("BOT BAŞLADI")
 
 def send_message(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
