@@ -79,9 +79,11 @@ def now_ts():
     return int(time.time())
 
 
-def utc_now_text():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+from datetime import timedelta
 
+def utc_now_text():
+    tr_time = datetime.now(timezone.utc) + timedelta(hours=3)
+    return tr_time.strftime("%Y-%m-%d %H:%M:%S TR")
 
 def send_message(text):
     if not TOKEN or not CHAT_ID:
