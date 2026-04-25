@@ -2,6 +2,7 @@ import os
 import time
 import json
 import threading
+import statistics
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -39,21 +40,20 @@ LEVEL_ORDER = {
     "STRONG": 3,
 }
 
-US_MARKET_HOLIDAYS_2026 = {
-    "2026-01-01",
-    "2026-01-19",
-    "2026-02-16",
-    "2026-04-03",
-    "2026-05-25",
-    "2026-06-19",
-    "2026-07-03",
-    "2026-09-07",
-    "2026-11-26",
-    "2026-12-25",
+# Cooldown'a takılmaması gereken kritik alert tipleri
+CRITICAL_ALERTS = {"❌ SİNYAL İPTAL", "🔄 YÖN DEĞİŞTİ"}
+
+# ABD piyasa tatilleri — yıl bazlı tutuldu, yeni yıl geldiğinde eklenmeli
+US_MARKET_HOLIDAYS = {
+    2026: {
+        "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03",
+        "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
+        "2026-11-26", "2026-12-25",
+    },
 }
 
-US_EARLY_CLOSE_2026 = {
-    "2026-11-27",
+US_EARLY_CLOSE = {
+    2026: {"2026-11-27"},
 }
 
 THRESHOLDS = {
@@ -90,6 +90,40 @@ WEIGHTS = {
     },
 }
 
+# Macro/market skor eşikleri — tek yerden tune edilebilsin diye dışa alındı
+SCORE_PARAMS = {
+    "macro": {
+        "change_24h_strong": 2.0,
+        "ret_4h_strong": 1.0,
+        "weight_change_24h": 1.5,
+        "weight_ret_4h": 1.5,
+    },
+    "market": {
+        "ret_1h_strong": 0.5,
+    },
+    "momentum": {
+        "ret_5m_strong": 0.15,
+        "ret_15m_strong": 0.35,
+        "ret_1h_strong": 0.8,
+    },
+    "volume": {
+        "spike": 2.0,
+        "high": 1.3,
+        "low": 0.6,
+    },
+    "liquidity": {
+        "spread_bad_core": 12,
+        "spread_bad_high_beta": 25,
+    },
+    "veto": {
+        "spread_bad_core": 12,
+        "spread_bad_high_beta": 25,
+        "vol_low_high_beta": 0.7,
+        "btc_unclear_1h": 0.25,
+        "btc_unclear_4h": 0.40,
+    },
+}
+
 app = Flask(__name__)
 
 
@@ -111,6 +145,7 @@ def get_session_context():
     now_utc = datetime.now(timezone.utc)
     now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
 
+    year = now_et.year
     date_key = now_et.strftime("%Y-%m-%d")
     weekday = now_et.weekday()
     minutes = now_et.hour * 60 + now_et.minute
@@ -118,6 +153,13 @@ def get_session_context():
     regular_open = 9 * 60 + 30
     regular_close = 16 * 60
     early_close = 13 * 60
+
+    holidays = US_MARKET_HOLIDAYS.get(year, set())
+    early_closes = US_EARLY_CLOSE.get(year, set())
+
+    # Tatil listesi yok ise uyar — yıl bazlı listenin güncellenmesi gerekiyor
+    if year not in US_MARKET_HOLIDAYS:
+        print(f"UYARI: {year} yılı için ABD tatil listesi tanımlı değil.")
 
     if weekday >= 5:
         return {
@@ -127,7 +169,7 @@ def get_session_context():
             "note": "Hafta sonu: VIX/tahvil gibi ABD piyasa verileri bayat kabul edildi.",
         }
 
-    if date_key in US_MARKET_HOLIDAYS_2026:
+    if date_key in holidays:
         return {
             "session": "US_HOLIDAY",
             "macro_multiplier": 0.20,
@@ -135,7 +177,7 @@ def get_session_context():
             "note": "ABD piyasa tatili: makro/risk verilerinin etkisi azaltıldı.",
         }
 
-    close_time = early_close if date_key in US_EARLY_CLOSE_2026 else regular_close
+    close_time = early_close if date_key in early_closes else regular_close
 
     if regular_open <= minutes < close_time:
         return {
@@ -168,14 +210,26 @@ def send_message(text):
 
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": text}
-    r = requests.post(url, data=data, timeout=15)
-    print("Telegram:", r.status_code, r.text[:200])
+    try:
+        r = requests.post(url, data=data, timeout=15)
+        print("Telegram:", r.status_code, r.text[:200])
+    except Exception as e:
+        print("Telegram gönderim hatası:", e)
 
 
-def request_json(url, params=None):
-    r = requests.get(url, params=params, timeout=15)
-    r.raise_for_status()
-    return r.json()
+def request_json(url, params=None, retries=3, base_delay=1.5):
+    """Geçici 5xx/timeout hatalarına karşı exponential backoff'lu retry."""
+    last_err = None
+    for i in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=15)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            if i < retries - 1:
+                time.sleep(base_delay * (2 ** i))
+    raise last_err
 
 
 def to_futures_symbol(symbol):
@@ -233,19 +287,23 @@ def clamp(x, lo, hi):
 
 
 def ema(values, period):
+    """SMA-seed'li doğru EMA. Yetersiz veride basit ortalamaya düşer."""
+    if not values:
+        return 0
     if len(values) < period:
-        return values[-1]
+        return sum(values) / len(values)
 
+    sma = sum(values[:period]) / period
     k = 2 / (period + 1)
-    result = values[0]
+    result = sma
 
-    for price in values[1:]:
+    for price in values[period:]:
         result = price * k + result * (1 - k)
 
     return result
 
 
-def bar(value, max_abs, width=6):
+def bar(value, max_abs, width=4):
     if max_abs <= 0:
         return "⬜" * width + "│" + "⬜" * width
 
@@ -261,19 +319,44 @@ def bar(value, max_abs, width=6):
     return "⬜" * width + "│" + "⬜" * width
 
 
+def format_price(price):
+    """Fiyatın büyüklüğüne göre dinamik decimal."""
+    if price is None:
+        return "N/A"
+    if price >= 1000:
+        return f"{price:,.2f}"
+    if price >= 1:
+        return f"{price:.4f}"
+    if price >= 0.01:
+        return f"{price:.6f}"
+    return f"{price:.8f}"
+
+
 def load_state():
     if not os.path.exists(STATE_FILE):
-        return {}
+        return {"symbols": {}, "meta": {}}
     try:
         with open(STATE_FILE, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+        # Eski format uyumluluğu
+        if "symbols" not in data:
+            symbols = {k: v for k, v in data.items() if not k.startswith("_")}
+            meta = {
+                "last_summary_ts": data.get("_last_summary_ts", 0),
+                "last_heartbeat_ts": data.get("_last_heartbeat_ts", 0),
+            }
+            return {"symbols": symbols, "meta": meta}
+        return data
     except Exception:
-        return {}
+        return {"symbols": {}, "meta": {}}
 
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print("State kaydedilemedi:", e)
 
 
 def score_basis(basis_pct, f):
@@ -310,6 +393,9 @@ def get_features(symbol):
     closes_15 = [float(x[4]) for x in k15]
     volumes_5 = [float(x[5]) for x in k5]
 
+    if len(closes_5) < 13 or len(closes_15) < 17:
+        raise ValueError(f"{symbol} için yetersiz kline verisi (5m={len(closes_5)}, 15m={len(closes_15)})")
+
     last = closes_5[-1]
 
     ema9 = ema(closes_5, 9)
@@ -325,8 +411,13 @@ def get_features(symbol):
     ret_1h = pct(closes_5[-1], closes_5[-12])
     ret_4h = pct(closes_15[-1], closes_15[-16])
 
-    avg_vol = sum(volumes_5[-30:-1]) / max(1, len(volumes_5[-30:-1]))
-    vol_ratio = volumes_5[-1] / avg_vol if avg_vol else 1
+    # Spike'lara dayanıklı olsun diye median kullanılıyor (son bar dahil değil)
+    recent_vols = volumes_5[-30:-1]
+    if recent_vols:
+        median_vol = statistics.median(recent_vols)
+        vol_ratio = volumes_5[-1] / median_vol if median_vol > 0 else 1
+    else:
+        vol_ratio = 1
 
     bid = float(book["bidPrice"])
     ask = float(book["askPrice"])
@@ -368,32 +459,34 @@ def get_features(symbol):
 
 
 def score_macro(btc):
+    p = SCORE_PARAMS["macro"]
     score = 0
 
-    if btc["change_24h"] > 2:
-        score += 1.5
-    elif btc["change_24h"] < -2:
-        score -= 1.5
+    if btc["change_24h"] > p["change_24h_strong"]:
+        score += p["weight_change_24h"]
+    elif btc["change_24h"] < -p["change_24h_strong"]:
+        score -= p["weight_change_24h"]
 
-    if btc["ret_4h"] > 1:
-        score += 1.5
-    elif btc["ret_4h"] < -1:
-        score -= 1.5
+    if btc["ret_4h"] > p["ret_4h_strong"]:
+        score += p["weight_ret_4h"]
+    elif btc["ret_4h"] < -p["ret_4h_strong"]:
+        score -= p["weight_ret_4h"]
 
     return clamp(score, -3, 3)
 
 
 def score_market(btc, eth):
+    threshold = SCORE_PARAMS["market"]["ret_1h_strong"]
     score = 0
 
-    if btc["ret_1h"] > 0.5:
+    if btc["ret_1h"] > threshold:
         score += 1
-    elif btc["ret_1h"] < -0.5:
+    elif btc["ret_1h"] < -threshold:
         score -= 1
 
-    if eth["ret_1h"] > 0.5:
+    if eth["ret_1h"] > threshold:
         score += 1
-    elif eth["ret_1h"] < -0.5:
+    elif eth["ret_1h"] < -threshold:
         score -= 1
 
     return clamp(score, -2, 2)
@@ -416,39 +509,42 @@ def score_trend(f):
 
 
 def score_momentum(f):
+    p = SCORE_PARAMS["momentum"]
     score = 0
 
-    if f["ret_5m"] > 0.15:
+    if f["ret_5m"] > p["ret_5m_strong"]:
         score += 0.4
-    elif f["ret_5m"] < -0.15:
+    elif f["ret_5m"] < -p["ret_5m_strong"]:
         score -= 0.4
 
-    if f["ret_15m"] > 0.35:
+    if f["ret_15m"] > p["ret_15m_strong"]:
         score += 0.6
-    elif f["ret_15m"] < -0.35:
+    elif f["ret_15m"] < -p["ret_15m_strong"]:
         score -= 0.6
 
-    if f["ret_1h"] > 0.8:
+    if f["ret_1h"] > p["ret_1h_strong"]:
         score += 1.0
-    elif f["ret_1h"] < -0.8:
+    elif f["ret_1h"] < -p["ret_1h_strong"]:
         score -= 1.0
 
     return clamp(score, -2, 2)
 
 
 def score_volume(f):
-    if f["vol_ratio"] >= 2.0:
+    p = SCORE_PARAMS["volume"]
+    if f["vol_ratio"] >= p["spike"]:
         return 2
-    if f["vol_ratio"] >= 1.3:
+    if f["vol_ratio"] >= p["high"]:
         return 1
-    if f["vol_ratio"] < 0.6:
+    if f["vol_ratio"] < p["low"]:
         return -1
     return 0
 
 
 def score_liquidity(f, group):
     spread = f["spread_bps"]
-    bad_limit = 12 if group == "CORE" else 25
+    p = SCORE_PARAMS["liquidity"]
+    bad_limit = p["spread_bad_core"] if group == "CORE" else p["spread_bad_high_beta"]
 
     if spread > bad_limit:
         return -2
@@ -459,18 +555,22 @@ def score_liquidity(f, group):
 
 def veto_signal(symbol, f, btc, eth):
     group = COINS[symbol]
+    p = SCORE_PARAMS["veto"]
 
-    if group == "CORE" and f["spread_bps"] > 12:
+    if group == "CORE" and f["spread_bps"] > p["spread_bad_core"]:
         return "Spread yüksek"
 
-    if group == "HIGH_BETA" and f["spread_bps"] > 25:
+    if group == "HIGH_BETA" and f["spread_bps"] > p["spread_bad_high_beta"]:
         return "Spread yüksek"
 
-    if group == "HIGH_BETA" and f["vol_ratio"] < 0.7:
+    if group == "HIGH_BETA" and f["vol_ratio"] < p["vol_low_high_beta"]:
         return "Hacim zayıf"
 
     if symbol not in ["BTCUSDT", "ETHUSDT"]:
-        btc_unclear = abs(btc["ret_1h"]) < 0.25 and abs(btc["ret_4h"]) < 0.40
+        btc_unclear = (
+            abs(btc["ret_1h"]) < p["btc_unclear_1h"]
+            and abs(btc["ret_4h"]) < p["btc_unclear_4h"]
+        )
         if btc_unclear:
             return "BTC yönü belirsiz"
 
@@ -488,9 +588,25 @@ def classify_level(score_abs, group):
     return "WEAK"
 
 
+def normalize_weights_if_basis_missing(weights, features):
+    """Basis verisi yoksa ağırlığını diğer kategorilere yay."""
+    if features["basis_pct"] is not None:
+        return weights
+
+    active = {k: v for k, v in weights.items() if k != "basis"}
+    total_w = sum(active.values())
+    if total_w == 0:
+        return weights
+
+    redistributed = {k: v / total_w for k, v in active.items()}
+    redistributed["basis"] = 0
+    return redistributed
+
+
 def weighted_signal(symbol, features, btc, eth, session_context):
     group = COINS[symbol]
-    weights = WEIGHTS[group]
+    base_weights = WEIGHTS[group]
+    weights = normalize_weights_if_basis_missing(base_weights, features)
 
     veto = veto_signal(symbol, features, btc, eth)
 
@@ -519,7 +635,7 @@ def weighted_signal(symbol, features, btc, eth, session_context):
         + weights["basis"] * 2
     )
 
-    confidence = round(abs(total) / max_total * 100, 1)
+    confidence = round(abs(total) / max_total * 100, 1) if max_total > 0 else 0
 
     if veto:
         signal = "NO_TRADE"
@@ -546,6 +662,7 @@ def weighted_signal(symbol, features, btc, eth, session_context):
         "features": features,
         "veto": veto,
         "session_context": session_context,
+        "basis_missing": features["basis_pct"] is None,
     }
 
 
@@ -561,7 +678,7 @@ def format_signal(result, title):
         basis_text = f"{f['basis_pct']:+.3f}%"
 
     if f["futures_price"] is not None:
-        futures_text = str(f["futures_price"])
+        futures_text = format_price(f["futures_price"])
 
     lines = [
         title,
@@ -582,12 +699,15 @@ def format_signal(result, title):
         f"Liquidity: {raw['liquidity']:+.2f} / 2 {bar(raw['liquidity'], 2)}",
         f"Basis: {raw['basis']:+.2f} / 2 {bar(raw['basis'], 2)}",
         "",
-        f"Spot: {f['spot_price']}",
+        f"Spot: {format_price(f['spot_price'])}",
         f"Futures Fair: {futures_text}",
         f"Basis: {basis_text}",
         f"5m: %{f['ret_5m']:.2f} | 15m: %{f['ret_15m']:.2f} | 1h: %{f['ret_1h']:.2f} | 4h: %{f['ret_4h']:.2f}",
         f"Hacim Oranı: {f['vol_ratio']:.2f}x | Spread: {f['spread_bps']:.2f} bps",
     ]
+
+    if result.get("basis_missing"):
+        lines.append("Not: Basis verisi yok, ağırlıklar yeniden dağıtıldı.")
 
     if result["veto"]:
         lines.append(f"Veto: {result['veto']}")
@@ -638,7 +758,10 @@ def decide_alert(old, new):
     return None
 
 
-def should_cooldown(old):
+def should_cooldown(old, alert_type):
+    """Kritik alertler (iptal, yön değişimi) cooldown'a takılmaz."""
+    if alert_type in CRITICAL_ALERTS:
+        return False
     if not old:
         return False
     last_alert = old.get("last_alert_ts", 0)
@@ -669,50 +792,65 @@ def bot_loop():
 
     state = load_state()
 
+    # İlk açılışta hemen özet/heartbeat atmaması için zamanları şimdiye çek
+    if not state["meta"].get("last_summary_ts"):
+        state["meta"]["last_summary_ts"] = now_ts()
+    if not state["meta"].get("last_heartbeat_ts"):
+        state["meta"]["last_heartbeat_ts"] = now_ts()
+
     while True:
         try:
-            results = []
             session_context = get_session_context()
 
-            btc = get_features("BTCUSDT")
-            eth = get_features("ETHUSDT")
+            # BTC ve ETH temel referans — alınamazsa tüm tur anlamsız
+            try:
+                btc = get_features("BTCUSDT")
+                eth = get_features("ETHUSDT")
+            except Exception as e:
+                print("BTC/ETH features alınamadı, tur atlanıyor:", e)
+                time.sleep(60)
+                continue
+
+            results = []
+            features_cache = {"BTCUSDT": btc, "ETHUSDT": eth}
 
             for symbol in COINS:
-                if symbol == "BTCUSDT":
-                    features = btc
-                elif symbol == "ETHUSDT":
-                    features = eth
-                else:
-                    features = get_features(symbol)
+                try:
+                    if symbol in features_cache:
+                        features = features_cache[symbol]
+                    else:
+                        features = get_features(symbol)
 
-                result = weighted_signal(symbol, features, btc, eth, session_context)
-                results.append(result)
+                    result = weighted_signal(symbol, features, btc, eth, session_context)
+                    results.append(result)
 
-                old = state.get(symbol)
-                alert_type = decide_alert(old, result)
+                    old = state["symbols"].get(symbol)
+                    alert_type = decide_alert(old, result)
 
-                if alert_type and not should_cooldown(old):
-                    send_message(format_signal(result, alert_type))
-                    result["last_alert_ts"] = now_ts()
-                else:
-                    result["last_alert_ts"] = old.get("last_alert_ts", 0) if old else 0
+                    if alert_type and not should_cooldown(old, alert_type):
+                        send_message(format_signal(result, alert_type))
+                        last_alert_ts = now_ts()
+                    else:
+                        last_alert_ts = old.get("last_alert_ts", 0) if old else 0
 
-                state[symbol] = {
-                    "signal": result["signal"],
-                    "level": result["level"],
-                    "score": result["score"],
-                    "confidence": result["confidence"],
-                    "last_alert_ts": result["last_alert_ts"],
-                }
+                    state["symbols"][symbol] = {
+                        "signal": result["signal"],
+                        "level": result["level"],
+                        "score": result["score"],
+                        "confidence": result["confidence"],
+                        "last_alert_ts": last_alert_ts,
+                    }
 
-            last_summary = state.get("_last_summary_ts", 0)
+                except Exception as e:
+                    print(f"{symbol} bu turda atlandı:", e)
+                    continue
 
-            if now_ts() - last_summary >= SUMMARY_INTERVAL_SECONDS:
+            last_summary = state["meta"].get("last_summary_ts", 0)
+            if now_ts() - last_summary >= SUMMARY_INTERVAL_SECONDS and results:
                 send_message(make_summary(results, session_context))
-                state["_last_summary_ts"] = now_ts()
+                state["meta"]["last_summary_ts"] = now_ts()
 
-            last_heartbeat = state.get("_last_heartbeat_ts", 0)
-
+            last_heartbeat = state["meta"].get("last_heartbeat_ts", 0)
             if now_ts() - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
                 send_message(
                     f"✅ Bot aktif\n"
@@ -721,14 +859,17 @@ def bot_loop():
                     f"Makro Çarpan: x{session_context['macro_multiplier']}\n"
                     f"Mikro Çarpan: x{session_context['micro_multiplier']}"
                 )
-                state["_last_heartbeat_ts"] = now_ts()
+                state["meta"]["last_heartbeat_ts"] = now_ts()
 
             save_state(state)
             time.sleep(SCAN_INTERVAL)
 
         except Exception as e:
             print("ANA HATA:", e)
-            send_message(f"⚠️ Bot hata aldı:\n{e}\nZaman: {tr_now_text()}")
+            try:
+                send_message(f"⚠️ Bot hata aldı:\n{e}\nZaman: {tr_now_text()}")
+            except Exception:
+                pass
             time.sleep(60)
 
 
