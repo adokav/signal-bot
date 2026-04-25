@@ -3,13 +3,17 @@ import time
 import json
 import threading
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 from flask import Flask
 
+
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-MEXC_BASE = "https://api.mexc.com"
+
+MEXC_SPOT_BASE = "https://api.mexc.com"
+MEXC_FUTURES_BASE = "https://contract.mexc.com"
 
 COINS = {
     "BTCUSDT": "CORE",
@@ -35,35 +39,54 @@ LEVEL_ORDER = {
     "STRONG": 3,
 }
 
+US_MARKET_HOLIDAYS_2026 = {
+    "2026-01-01",
+    "2026-01-19",
+    "2026-02-16",
+    "2026-04-03",
+    "2026-05-25",
+    "2026-06-19",
+    "2026-07-03",
+    "2026-09-07",
+    "2026-11-26",
+    "2026-12-25",
+}
+
+US_EARLY_CLOSE_2026 = {
+    "2026-11-27",
+}
+
 THRESHOLDS = {
     "CORE": {
-        "long": 1.45,
-        "short": -1.45,
-        "strong": 2.10,
+        "long": 1.55,
+        "short": -1.55,
+        "strong": 2.25,
     },
     "HIGH_BETA": {
-        "long": 1.85,
-        "short": -1.85,
-        "strong": 2.55,
+        "long": 1.95,
+        "short": -1.95,
+        "strong": 2.70,
     },
 }
 
 WEIGHTS = {
     "CORE": {
-        "macro": 0.30,
-        "market": 0.25,
-        "trend": 0.20,
-        "momentum": 0.15,
+        "macro": 0.25,
+        "market": 0.22,
+        "trend": 0.18,
+        "momentum": 0.14,
         "volume": 0.05,
         "liquidity": 0.05,
+        "basis": 0.11,
     },
     "HIGH_BETA": {
-        "macro": 0.18,
-        "market": 0.20,
-        "trend": 0.20,
-        "momentum": 0.25,
+        "macro": 0.15,
+        "market": 0.18,
+        "trend": 0.18,
+        "momentum": 0.23,
         "volume": 0.10,
-        "liquidity": 0.07,
+        "liquidity": 0.06,
+        "basis": 0.10,
     },
 }
 
@@ -79,11 +102,64 @@ def now_ts():
     return int(time.time())
 
 
-from datetime import timedelta
-
-def utc_now_text():
-    tr_time = datetime.now(timezone.utc) + timedelta(hours=3)
+def tr_now_text():
+    tr_time = datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Istanbul"))
     return tr_time.strftime("%Y-%m-%d %H:%M:%S TR")
+
+
+def get_session_context():
+    now_utc = datetime.now(timezone.utc)
+    now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+
+    date_key = now_et.strftime("%Y-%m-%d")
+    weekday = now_et.weekday()
+    minutes = now_et.hour * 60 + now_et.minute
+
+    regular_open = 9 * 60 + 30
+    regular_close = 16 * 60
+    early_close = 13 * 60
+
+    if weekday >= 5:
+        return {
+            "session": "WEEKEND",
+            "macro_multiplier": 0.20,
+            "micro_multiplier": 1.20,
+            "note": "Hafta sonu: VIX/tahvil gibi ABD piyasa verileri bayat kabul edildi.",
+        }
+
+    if date_key in US_MARKET_HOLIDAYS_2026:
+        return {
+            "session": "US_HOLIDAY",
+            "macro_multiplier": 0.20,
+            "micro_multiplier": 1.20,
+            "note": "ABD piyasa tatili: makro/risk verilerinin etkisi azaltıldı.",
+        }
+
+    close_time = early_close if date_key in US_EARLY_CLOSE_2026 else regular_close
+
+    if regular_open <= minutes < close_time:
+        return {
+            "session": "US_OPEN",
+            "macro_multiplier": 1.00,
+            "micro_multiplier": 1.00,
+            "note": "ABD piyasası açık: makro/risk verileri normal ağırlıkta.",
+        }
+
+    if 4 * 60 <= minutes < regular_open or close_time <= minutes < 20 * 60:
+        return {
+            "session": "US_EXTENDED",
+            "macro_multiplier": 0.50,
+            "micro_multiplier": 1.10,
+            "note": "ABD pre/after-market: makro etkisi kısmen azaltıldı.",
+        }
+
+    return {
+        "session": "US_CLOSED",
+        "macro_multiplier": 0.35,
+        "micro_multiplier": 1.15,
+        "note": "ABD piyasası kapalı: kripto içi sinyallerin ağırlığı artırıldı.",
+    }
+
 
 def send_message(text):
     if not TOKEN or not CHAT_ID:
@@ -102,19 +178,48 @@ def request_json(url, params=None):
     return r.json()
 
 
+def to_futures_symbol(symbol):
+    return symbol.replace("USDT", "_USDT")
+
+
 def get_klines(symbol, interval="5m", limit=100):
-    url = f"{MEXC_BASE}/api/v3/klines"
+    url = f"{MEXC_SPOT_BASE}/api/v3/klines"
     return request_json(url, {"symbol": symbol, "interval": interval, "limit": limit})
 
 
 def get_ticker(symbol):
-    url = f"{MEXC_BASE}/api/v3/ticker/24hr"
+    url = f"{MEXC_SPOT_BASE}/api/v3/ticker/24hr"
     return request_json(url, {"symbol": symbol})
+
+
+def get_spot_price(symbol):
+    url = f"{MEXC_SPOT_BASE}/api/v3/ticker/price"
+    data = request_json(url, {"symbol": symbol})
+    return float(data["price"])
 
 
 def get_book(symbol):
-    url = f"{MEXC_BASE}/api/v3/ticker/bookTicker"
+    url = f"{MEXC_SPOT_BASE}/api/v3/ticker/bookTicker"
     return request_json(url, {"symbol": symbol})
+
+
+def get_futures_fair_price(symbol):
+    futures_symbol = to_futures_symbol(symbol)
+    url = f"{MEXC_FUTURES_BASE}/api/v1/contract/fair_price/{futures_symbol}"
+    data = request_json(url)
+
+    if isinstance(data, dict):
+        if "data" in data and isinstance(data["data"], dict):
+            if "fairPrice" in data["data"]:
+                return float(data["data"]["fairPrice"])
+            if "price" in data["data"]:
+                return float(data["data"]["price"])
+        if "fairPrice" in data:
+            return float(data["fairPrice"])
+        if "price" in data:
+            return float(data["price"])
+
+    return None
 
 
 def pct(a, b):
@@ -149,6 +254,7 @@ def bar(value, max_abs, width=6):
 
     if ratio > 0:
         return "⬜" * width + "│" + "🟩" * filled + "⬜" * (width - filled)
+
     if ratio < 0:
         return "⬜" * (width - filled) + "🟥" * filled + "│" + "⬜" * width
 
@@ -168,6 +274,30 @@ def load_state():
 def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
+
+
+def score_basis(basis_pct, f):
+    if basis_pct is None:
+        return 0
+
+    score = 0
+
+    if 0.05 <= basis_pct <= 0.35 and f["ret_1h"] > 0:
+        score += 1.2
+    elif basis_pct > 0.60:
+        score -= 1.0
+    elif basis_pct < -0.05 and f["ret_1h"] < 0:
+        score -= 1.2
+    elif basis_pct < -0.60:
+        score += 0.5
+
+    if basis_pct > 0 and f["ret_1h"] < -0.5:
+        score -= 0.5
+
+    if basis_pct < 0 and f["ret_1h"] > 0.5:
+        score += 0.5
+
+    return clamp(score, -2, 2)
 
 
 def get_features(symbol):
@@ -204,9 +334,23 @@ def get_features(symbol):
     spread_bps = ((ask - bid) / mid) * 10000 if mid else 999
 
     change_24h = float(ticker.get("priceChangePercent", 0))
+    spot_price = get_spot_price(symbol)
+
+    futures_price = None
+    basis_pct = None
+
+    try:
+        futures_price = get_futures_fair_price(symbol)
+        if futures_price:
+            basis_pct = pct(futures_price, spot_price)
+    except Exception as e:
+        print(f"{symbol} futures basis alınamadı:", e)
 
     return {
         "last": last,
+        "spot_price": spot_price,
+        "futures_price": futures_price,
+        "basis_pct": basis_pct,
         "ema9": ema9,
         "ema21": ema21,
         "ema50": ema50,
@@ -344,19 +488,23 @@ def classify_level(score_abs, group):
     return "WEAK"
 
 
-def weighted_signal(symbol, features, btc, eth):
+def weighted_signal(symbol, features, btc, eth, session_context):
     group = COINS[symbol]
     weights = WEIGHTS[group]
 
     veto = veto_signal(symbol, features, btc, eth)
 
+    macro_multiplier = session_context["macro_multiplier"]
+    micro_multiplier = session_context["micro_multiplier"]
+
     raw = {
-        "macro": score_macro(btc),
-        "market": score_market(btc, eth),
-        "trend": score_trend(features),
-        "momentum": score_momentum(features),
-        "volume": score_volume(features),
+        "macro": score_macro(btc) * macro_multiplier,
+        "market": score_market(btc, eth) * micro_multiplier,
+        "trend": score_trend(features) * micro_multiplier,
+        "momentum": score_momentum(features) * micro_multiplier,
+        "volume": score_volume(features) * micro_multiplier,
         "liquidity": score_liquidity(features, group),
+        "basis": score_basis(features["basis_pct"], features) * micro_multiplier,
     }
 
     total = sum(raw[k] * weights[k] for k in raw)
@@ -368,6 +516,7 @@ def weighted_signal(symbol, features, btc, eth):
         + weights["momentum"] * 2
         + weights["volume"] * 2
         + weights["liquidity"] * 2
+        + weights["basis"] * 2
     )
 
     confidence = round(abs(total) / max_total * 100, 1)
@@ -396,18 +545,33 @@ def weighted_signal(symbol, features, btc, eth):
         "raw": raw,
         "features": features,
         "veto": veto,
+        "session_context": session_context,
     }
 
 
 def format_signal(result, title):
     f = result["features"]
     raw = result["raw"]
+    session = result["session_context"]
+
+    basis_text = "N/A"
+    futures_text = "N/A"
+
+    if f["basis_pct"] is not None:
+        basis_text = f"{f['basis_pct']:+.3f}%"
+
+    if f["futures_price"] is not None:
+        futures_text = str(f["futures_price"])
 
     lines = [
         title,
         f"{result['symbol']} → {result['signal']} / {result['level']}",
         f"Skor: {result['score']} / {result['max_score']} {bar(result['score'], result['max_score'])}",
         f"Güven: %{result['confidence']}",
+        f"Seans: {session['session']}",
+        f"Makro Çarpan: x{session['macro_multiplier']}",
+        f"Mikro Çarpan: x{session['micro_multiplier']}",
+        f"Not: {session['note']}",
         "",
         "Alt Skorlar:",
         f"Macro: {raw['macro']:+.2f} / 3 {bar(raw['macro'], 3)}",
@@ -416,8 +580,11 @@ def format_signal(result, title):
         f"Momentum: {raw['momentum']:+.2f} / 2 {bar(raw['momentum'], 2)}",
         f"Volume: {raw['volume']:+.2f} / 2 {bar(raw['volume'], 2)}",
         f"Liquidity: {raw['liquidity']:+.2f} / 2 {bar(raw['liquidity'], 2)}",
+        f"Basis: {raw['basis']:+.2f} / 2 {bar(raw['basis'], 2)}",
         "",
-        f"Fiyat: {f['last']}",
+        f"Spot: {f['spot_price']}",
+        f"Futures Fair: {futures_text}",
+        f"Basis: {basis_text}",
         f"5m: %{f['ret_5m']:.2f} | 15m: %{f['ret_15m']:.2f} | 1h: %{f['ret_1h']:.2f} | 4h: %{f['ret_4h']:.2f}",
         f"Hacim Oranı: {f['vol_ratio']:.2f}x | Spread: {f['spread_bps']:.2f} bps",
     ]
@@ -425,7 +592,7 @@ def format_signal(result, title):
     if result["veto"]:
         lines.append(f"Veto: {result['veto']}")
 
-    lines.append(f"Zaman: {utc_now_text()}")
+    lines.append(f"Zaman: {tr_now_text()}")
 
     return "\n".join(lines)
 
@@ -478,29 +645,34 @@ def should_cooldown(old):
     return now_ts() - last_alert < COOLDOWN_SECONDS
 
 
-def make_summary(results):
+def make_summary(results, session_context):
     longs = [f"{r['symbol']}({r['level']})" for r in results if r["signal"] == "LONG"]
     shorts = [f"{r['symbol']}({r['level']})" for r in results if r["signal"] == "SHORT"]
     neutral = [r["symbol"] for r in results if r["signal"] == "NO_TRADE"]
 
     return (
         "📊 DURUM ÖZETİ\n\n"
+        f"Seans: {session_context['session']}\n"
+        f"Makro Çarpan: x{session_context['macro_multiplier']}\n"
+        f"Mikro Çarpan: x{session_context['micro_multiplier']}\n"
+        f"Not: {session_context['note']}\n\n"
         f"LONG: {', '.join(longs) if longs else '-'}\n"
         f"SHORT: {', '.join(shorts) if shorts else '-'}\n"
         f"NO_TRADE: {', '.join(neutral) if neutral else '-'}\n"
-        f"Zaman: {utc_now_text()}"
+        f"Zaman: {tr_now_text()}"
     )
 
 
 def bot_loop():
     print("BOT BAŞLADI")
-    send_message("BOT BAŞLADI 🚀 Güçlendirilmiş sinyal motoru aktif.")
+    send_message("BOT BAŞLADI 🚀 Session + basis katmanları aktif.")
 
     state = load_state()
 
     while True:
         try:
             results = []
+            session_context = get_session_context()
 
             btc = get_features("BTCUSDT")
             eth = get_features("ETHUSDT")
@@ -513,7 +685,7 @@ def bot_loop():
                 else:
                     features = get_features(symbol)
 
-                result = weighted_signal(symbol, features, btc, eth)
+                result = weighted_signal(symbol, features, btc, eth, session_context)
                 results.append(result)
 
                 old = state.get(symbol)
@@ -536,19 +708,27 @@ def bot_loop():
             last_summary = state.get("_last_summary_ts", 0)
 
             if now_ts() - last_summary >= SUMMARY_INTERVAL_SECONDS:
-                send_message(make_summary(results))
+                send_message(make_summary(results, session_context))
                 state["_last_summary_ts"] = now_ts()
+
             last_heartbeat = state.get("_last_heartbeat_ts", 0)
 
             if now_ts() - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
-                send_message(f"✅ Bot aktif\nSon kontrol: {utc_now_text()}")
-                state["_last_heartbeat_ts"] = now_ts()    
+                send_message(
+                    f"✅ Bot aktif\n"
+                    f"Son kontrol: {tr_now_text()}\n"
+                    f"Seans: {session_context['session']}\n"
+                    f"Makro Çarpan: x{session_context['macro_multiplier']}\n"
+                    f"Mikro Çarpan: x{session_context['micro_multiplier']}"
+                )
+                state["_last_heartbeat_ts"] = now_ts()
 
             save_state(state)
             time.sleep(SCAN_INTERVAL)
 
         except Exception as e:
             print("ANA HATA:", e)
+            send_message(f"⚠️ Bot hata aldı:\n{e}\nZaman: {tr_now_text()}")
             time.sleep(60)
 
 
