@@ -25,6 +25,7 @@ STATE_FILE = "state.json"
 SCAN_INTERVAL = 300
 COOLDOWN_SECONDS = 900
 SUMMARY_INTERVAL_SECONDS = 4 * 60 * 60
+HEARTBEAT_INTERVAL_SECONDS = 60 * 60
 
 MIN_SIGNAL_LEVEL = "MEDIUM"
 
@@ -535,6 +536,11 @@ def bot_loop():
             if now_ts() - last_summary >= SUMMARY_INTERVAL_SECONDS:
                 send_message(make_summary(results))
                 state["_last_summary_ts"] = now_ts()
+            last_heartbeat = state.get("_last_heartbeat_ts", 0)
+
+            if now_ts() - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
+                send_message(f"✅ Bot aktif\nSon kontrol: {utc_now_text()}")
+                state["_last_heartbeat_ts"] = now_ts()    
 
             save_state(state)
             time.sleep(SCAN_INTERVAL)
