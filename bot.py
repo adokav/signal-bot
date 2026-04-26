@@ -14,6 +14,7 @@ Mimari:
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -23,7 +24,7 @@ import statistics
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any, Optional
@@ -33,6 +34,8 @@ import requests
 from flask import Flask
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+__version__ = "1.1.0"
 
 # ============================================================
 # LOGGING
@@ -55,17 +58,21 @@ PORT = int(os.getenv("PORT", "10000"))
 
 
 def validate_env() -> None:
-    """Startup-time env validation. Eksik kritik değişkenleri logla."""
+    """Startup-time env validation. Eksik kritik değişkenleri logla.
+
+    STRICT_ENV=1 verilmişse kritik değişken eksikse exit eder (production).
+    """
     missing = []
     if not TOKEN:
         missing.append("TOKEN")
     if not CHAT_ID:
         missing.append("CHAT_ID")
     if missing:
-        log.warning(
-            "Eksik env değişkenleri: %s — Telegram mesajları gönderilemez.",
-            ", ".join(missing),
-        )
+        msg = f"Eksik env değişkenleri: {', '.join(missing)} — Telegram mesajları gönderilemez."
+        if os.getenv("STRICT_ENV") == "1":
+            log.error(msg)
+            raise SystemExit(1)
+        log.warning(msg)
     if not NEWS_API_KEY:
         log.info("NEWS_API_KEY eksik — sadece GDELT kullanılacak.")
 
@@ -146,6 +153,28 @@ MOVEMENT_ALERT_THRESHOLDS: dict[str, dict[str, float]] = {
     "CORE": {"ret_15m": 2.0, "ret_1h": 3.0, "volume_ratio": 2.5},
     "HIGH_BETA": {"ret_15m": 3.0, "ret_1h": 5.0, "volume_ratio": 2.0},
 }
+# ============================================================
+# TRADE PLAN CONFIG (sadece plan üretir, emir göndermez)
+# ============================================================
+
+ACCOUNT_SIZE_USD = float(os.getenv("ACCOUNT_SIZE_USD", "800"))
+RISK_PCT_PER_TRADE = float(os.getenv("RISK_PCT_PER_TRADE", "0.01"))
+
+TRADE_PLAN_CONFIG: dict[str, dict[str, float]] = {
+    "CORE": {
+        "stop_pct": 0.020,
+        "tp1_r": 1.0,
+        "tp2_r": 2.0,
+        "tp3_r": 3.0,
+    },
+    "HIGH_BETA": {
+        "stop_pct": 0.035,
+        "tp1_r": 1.0,
+        "tp2_r": 2.0,
+        "tp3_r": 3.0,
+    },
+}
+
 
 # ============================================================
 # SIGNAL CONFIG
@@ -306,18 +335,31 @@ def _build_session() -> requests.Session:
         backoff_factor=0,
         status_forcelist=[],
     )
+    # 9 coin × 5 endpoint = 45 paralel istek olabiliyor; pool buna göre.
     adapter = HTTPAdapter(
-        pool_connections=20,
-        pool_maxsize=50,
+        pool_connections=32,
+        pool_maxsize=128,
         max_retries=retry,
     )
     sess.mount("http://", adapter)
     sess.mount("https://", adapter)
-    sess.headers.update({"User-Agent": "signal-bot/1.0"})
+    sess.headers.update({"User-Agent": f"signal-bot/{__version__}"})
     return sess
 
 
 _HTTP = _build_session()
+
+# Feature engine için kalıcı thread pool (her get_features çağrısında yeni
+# pool yaratmamak için). Coin sayısı × endpoint sayısı kadar worker yeterli.
+_FEATURE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(16, len(COINS) * 5),
+    thread_name_prefix="feat",
+)
+# Coinler arası paralel feature çekimi için ayrı pool.
+_SYMBOL_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(4, len(COINS)),
+    thread_name_prefix="symbol",
+)
 
 # ============================================================
 # FLASK HEALTH SERVER
@@ -495,6 +537,7 @@ def request_json(
     retries: int = 3,
     base_delay: float = 1.5,
     timeout: float = 15.0,
+    headers: Optional[dict] = None,
 ) -> Any:
     """
     Akıllı HTTP retry:
@@ -506,7 +549,7 @@ def request_json(
 
     for attempt in range(retries):
         try:
-            r = _HTTP.get(url, params=params, timeout=timeout)
+            r = _HTTP.get(url, params=params, timeout=timeout, headers=headers)
         except (requests.Timeout, requests.ConnectionError) as e:
             last_err = e
             if attempt < retries - 1:
@@ -682,6 +725,12 @@ def format_price(price: Optional[float]) -> str:
     return f"{price:.8f}"
 
 
+def format_money(value: Optional[float]) -> str:
+    if value is None:
+        return "N/A"
+    return f"${value:,.2f}"
+
+
 # ============================================================
 # STATE MANAGEMENT (thread-safe)
 # ============================================================
@@ -748,7 +797,7 @@ class StateManager:
     def snapshot(self) -> dict:
         """Read-only kopya."""
         with self._lock:
-            return json.loads(json.dumps(self._state))
+            return copy.deepcopy(self._state)
 
     def get_meta(self, key: str, default=None):
         with self._lock:
@@ -846,13 +895,14 @@ def fetch_newsapi_headlines() -> list[dict]:
         try:
             data = request_json(
                 f"{NEWSAPI_BASE}/everything",
-                {
+                params={
                     "q": q,
                     "language": "en",
                     "sortBy": "publishedAt",
                     "pageSize": 15,
-                    "apiKey": NEWS_API_KEY,
                 },
+                # apiKey'i header'da göndermek log'larda görünmesini engeller
+                headers={"X-Api-Key": NEWS_API_KEY},
             )
             success_count += 1
         except (TransientHTTPError, PermanentHTTPError) as e:
@@ -942,6 +992,9 @@ def _compile_keyword_patterns() -> dict:
         patterns = []
         for kw in cfg["keywords"]:
             kw_lower = kw.lower().strip()
+            if not kw_lower:
+                log.warning("Boş keyword atlanıyor (kategori: %s)", category)
+                continue
             if " " in kw_lower:
                 patterns.append(("substring", kw_lower))
             else:
@@ -1097,22 +1150,21 @@ def get_features(symbol: str) -> dict:
     Spot endpoint'lerden biri fail olursa exception fırlatır (kritik).
     Futures fail olursa basis_pct=None (non-kritik).
     """
-    with ThreadPoolExecutor(max_workers=5, thread_name_prefix=f"feat-{symbol}") as ex:
-        futures = {
-            "k5": ex.submit(get_klines, symbol, "5m", KLINE_LIMIT),
-            "k15": ex.submit(get_klines, symbol, "15m", KLINE_LIMIT),
-            "ticker": ex.submit(get_ticker, symbol),
-            "book": ex.submit(get_book, symbol),
-            "spot": ex.submit(get_spot_price, symbol),
-        }
+    futures = {
+        "k5": _FEATURE_EXECUTOR.submit(get_klines, symbol, "5m", KLINE_LIMIT),
+        "k15": _FEATURE_EXECUTOR.submit(get_klines, symbol, "15m", KLINE_LIMIT),
+        "ticker": _FEATURE_EXECUTOR.submit(get_ticker, symbol),
+        "book": _FEATURE_EXECUTOR.submit(get_book, symbol),
+        "spot": _FEATURE_EXECUTOR.submit(get_spot_price, symbol),
+    }
 
-        results: dict[str, Any] = {}
-        errors: dict[str, Exception] = {}
-        for key, fut in futures.items():
-            try:
-                results[key] = fut.result()
-            except Exception as e:
-                errors[key] = e
+    results: dict[str, Any] = {}
+    errors: dict[str, Exception] = {}
+    for key, fut in futures.items():
+        try:
+            results[key] = fut.result()
+        except Exception as e:
+            errors[key] = e
 
     # Kritik endpoint'lerden biri bile fail ise exception
     critical = ("k5", "k15", "ticker", "book", "spot")
@@ -1453,7 +1505,11 @@ def weighted_signal(
             signal = "NO_TRADE"
             level = "WEAK"
 
-    confidence = round(abs(total) / max_total * 100, 1) if max_total > 0 else 0
+    # NO_TRADE için confidence yanıltıcı olmasın — sadece sinyal varken anlamlı
+    if signal in ("LONG", "SHORT") and max_total > 0:
+        confidence = round(abs(total) / max_total * 100, 1)
+    else:
+        confidence = 0.0
 
     return {
         "symbol": symbol,
@@ -1474,6 +1530,129 @@ def weighted_signal(
     }
 
 
+
+# ============================================================
+# TRADE PLAN ENGINE (bilgilendirme amaçlı, emir göndermez)
+# ============================================================
+
+def build_trade_plan(result: dict) -> Optional[dict]:
+    """Sinyal varsa entry/stop/TP/pozisyon büyüklüğü planı üretir.
+
+    Bu fonksiyon emir göndermez. Amaç: Telegram sinyalinde trader'a
+    uygulanabilir risk planı sunmak.
+
+    Pullback zone mantığı:
+      - LONG: Trader spot'tan girmek yerine EMA9/EMA21 bölgesine pullback
+        beklemeli. Bu yüzden zone, EMA'ların oluşturduğu aralık içinde ve
+        spot'a göre AŞAĞIDA (geri çekilme) olmalı.
+      - SHORT: Tam tersi — EMA bölgesi spot'a göre YUKARIDA (yukarı çekilme).
+      - EMA'lar yanlış tarafta ise (örn. LONG sinyalinde EMA'lar zaten
+        spot'un üstünde), spot'tan stop_pct/2 kadar uzakta synthetic zone üretilir.
+    """
+    signal = result.get("signal")
+    if signal not in ("LONG", "SHORT"):
+        return None
+
+    group = result["group"]
+    f = result["features"]
+    cfg = TRADE_PLAN_CONFIG[group]
+
+    spot = float(f["spot_price"])
+    ema9 = float(f["ema9"])
+    ema21 = float(f["ema21"])
+    stop_pct = float(cfg["stop_pct"])
+
+    if spot <= 0:
+        log.warning("%s build_trade_plan: spot=%s, plan üretilemiyor", result["symbol"], spot)
+        return None
+
+    # Referans entry: sinyal anındaki spot.
+    reference_entry = spot
+
+    if signal == "LONG":
+        # Pullback bölgesi: EMA9 ile EMA21 arası, spot'un altında olmalı.
+        ema_low = min(ema9, ema21)
+        ema_high = max(ema9, ema21)
+        if ema_high < spot and ema_low > 0:
+            # EMA'lar spot'un altında — sağlıklı pullback bölgesi
+            zone_low = ema_low
+            zone_high = ema_high
+        else:
+            # Synthetic zone: spot'un %0.5-1.0 altı
+            zone_high = spot * (1 - stop_pct / 4)
+            zone_low = spot * (1 - stop_pct / 2)
+
+        stop_price = reference_entry * (1 - stop_pct)
+        risk_per_unit = reference_entry - stop_price
+        tp1 = reference_entry + risk_per_unit * cfg["tp1_r"]
+        tp2 = reference_entry + risk_per_unit * cfg["tp2_r"]
+        tp3 = reference_entry + risk_per_unit * cfg["tp3_r"]
+
+    else:  # SHORT
+        # Pullback bölgesi: spot'un üstünde olmalı.
+        ema_low = min(ema9, ema21)
+        ema_high = max(ema9, ema21)
+        if ema_low > spot:
+            # EMA'lar spot'un üstünde — sağlıklı pullback bölgesi
+            zone_low = ema_low
+            zone_high = ema_high
+        else:
+            # Synthetic zone: spot'un %0.5-1.0 üstü
+            zone_low = spot * (1 + stop_pct / 4)
+            zone_high = spot * (1 + stop_pct / 2)
+
+        stop_price = reference_entry * (1 + stop_pct)
+        risk_per_unit = stop_price - reference_entry
+        tp1 = reference_entry - risk_per_unit * cfg["tp1_r"]
+        tp2 = reference_entry - risk_per_unit * cfg["tp2_r"]
+        tp3 = reference_entry - risk_per_unit * cfg["tp3_r"]
+
+    risk_amount = ACCOUNT_SIZE_USD * RISK_PCT_PER_TRADE
+    position_notional = risk_amount / stop_pct if stop_pct > 0 else 0
+    quantity = position_notional / reference_entry if reference_entry > 0 else 0
+
+    # R:R sanity check — trader'a görünür olsun
+    rr_ratio = cfg["tp2_r"]  # tp2'yi referans alıyoruz (hedef R:R)
+
+    return {
+        "direction": signal,
+        "account_size": ACCOUNT_SIZE_USD,
+        "risk_pct": RISK_PCT_PER_TRADE,
+        "risk_amount": risk_amount,
+        "reference_entry": reference_entry,
+        "entry_zone_low": zone_low,
+        "entry_zone_high": zone_high,
+        "stop_price": stop_price,
+        "stop_pct": stop_pct,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "rr_ratio": rr_ratio,
+        "position_notional": position_notional,
+        "quantity": quantity,
+    }
+
+
+def format_trade_plan_block(plan: Optional[dict]) -> list[str]:
+    if not plan:
+        return []
+
+    return [
+        "",
+        "📌 Trade Plan (emir göndermez)",
+        f"Yön: {plan['direction']}",
+        f"Referans Entry: {format_price(plan['reference_entry'])}",
+        f"Tercihli Entry Bölgesi: {format_price(plan['entry_zone_low'])} - {format_price(plan['entry_zone_high'])}",
+        f"Stop: {format_price(plan['stop_price'])} (%{plan['stop_pct'] * 100:.2f})",
+        f"TP1 (1R): {format_price(plan['tp1'])}",
+        f"TP2 (2R): {format_price(plan['tp2'])}",
+        f"TP3 / Runner (3R): {format_price(plan['tp3'])}",
+        f"Hesap: {format_money(plan['account_size'])}",
+        f"İşlem Riski: %{plan['risk_pct'] * 100:.2f} = {format_money(plan['risk_amount'])}",
+        f"Önerilen Notional: {format_money(plan['position_notional'])}",
+        f"Yaklaşık Miktar: {plan['quantity']:.6f}",
+        "Not: Sinyal geldi diye anlık piyasa emri şart değildir; entry bölgesine pullback beklemek daha sağlıklıdır.",
+    ]
 # ============================================================
 # MESSAGE FORMATTERS
 # ============================================================
@@ -1523,6 +1702,8 @@ def format_signal(result: dict, title: str) -> str:
         f"1h: %{f['ret_1h']:.2f} | 4h: %{f['ret_4h']:.2f}",
         f"Hacim Oranı: {f['vol_ratio']:.2f}x | Spread: {f['spread_bps']:.2f} bps",
     ]
+
+    lines.extend(format_trade_plan_block(build_trade_plan(result)))
 
     if result.get("basis_missing"):
         lines.append("Not: Basis verisi yok, ağırlıklar yeniden dağıtıldı.")
@@ -1619,6 +1800,12 @@ def decide_alert(old: Optional[dict], new: dict) -> Optional[str]:
 
 
 def should_cooldown(old: Optional[dict], alert_type: str) -> bool:
+    """Cooldown kararı.
+
+    Kritik alertler (NEWS VETO, SİNYAL İPTAL, YÖN DEĞİŞTİ) cooldown'a takılmaz —
+    kullanıcının ANLIK bilmesi gereken durumlar bunlar.
+    """
+    # Kritik alert ise cooldown bypass
     if alert_type in CRITICAL_ALERTS:
         return False
     if not old:
@@ -1765,14 +1952,17 @@ def _send_periodic_messages(
 ) -> None:
     """Özet ve heartbeat mesajları."""
     last_summary = state_mgr.get_meta("last_summary_ts", 0)
-    if now_ts() - last_summary >= SUMMARY_INTERVAL_SECONDS and results:
-        send_message(make_summary(results, session_ctx, news_ctx))
+    if now_ts() - last_summary >= SUMMARY_INTERVAL_SECONDS:
+        if results:
+            send_message(make_summary(results, session_ctx, news_ctx))
+        # results boş olsa bile ts ilerletilsin ki bir sonraki dilim
+        # SUMMARY_INTERVAL kadar sonraya kaysın (dakika dakika tekrar denemesin).
         state_mgr.set_meta("last_summary_ts", now_ts())
 
     last_heartbeat = state_mgr.get_meta("last_heartbeat_ts", 0)
     if now_ts() - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
         send_message(
-            f"✅ Bot aktif\n"
+            f"✅ Bot aktif (v{__version__})\n"
             f"Son kontrol: {tr_now_text()}\n"
             f"Seans: {session_ctx.session}\n"
             f"Makro: x{session_ctx.macro_multiplier} | "
@@ -1785,9 +1975,9 @@ def _send_periodic_messages(
 
 def bot_loop() -> None:
     """Ana bot döngüsü."""
-    log.info("BOT BAŞLADI")
+    log.info("BOT BAŞLADI v%s", __version__)
     send_message(
-        "BOT BAŞLADI 🚀 News (yön-bağımlı veto/dampener) + session + basis aktif."
+        f"BOT BAŞLADI 🚀 v{__version__} — News (yön-bağımlı veto/dampener) + session + basis aktif."
     )
 
     state_mgr = _STATE_MGR
@@ -1822,17 +2012,28 @@ def bot_loop() -> None:
 
             consecutive_failures = 0
 
-            results: list[dict] = []
-            features_cache = {"BTCUSDT": btc, "ETHUSDT": eth}
+            # Diğer coinleri paralel çek (BTC/ETH zaten var).
+            # Her coin için get_features kendi içinde 5 endpointi paralel çekiyor;
+            # coinler arası paralelizm scan turunu dramatik kısaltır.
+            features_cache: dict[str, dict] = {"BTCUSDT": btc, "ETHUSDT": eth}
+            other_symbols = [s for s in COINS if s not in features_cache]
 
+            if other_symbols:
+                future_to_symbol = {
+                    _SYMBOL_EXECUTOR.submit(get_features, sym): sym
+                    for sym in other_symbols
+                }
+                for fut in as_completed(future_to_symbol):
+                    sym = future_to_symbol[fut]
+                    try:
+                        features_cache[sym] = fut.result()
+                    except Exception as e:
+                        log.warning("%s features alınamadı: %s", sym, e)
+
+            results: list[dict] = []
             for symbol in COINS:
-                try:
-                    if symbol in features_cache:
-                        features = features_cache[symbol]
-                    else:
-                        features = get_features(symbol)
-                except Exception as e:
-                    log.warning("%s features alınamadı: %s", symbol, e)
+                features = features_cache.get(symbol)
+                if features is None:
                     continue
 
                 result = _process_symbol(
@@ -1852,6 +2053,10 @@ def bot_loop() -> None:
                 send_message(f"⚠️ Bot hata aldı:\n{e}\nZaman: {tr_now_text()}")
             except Exception:
                 pass
+            # Ana hata sonrası uzun backoff istemiyoruz; yine de consecutive
+            # sayacını da sıfırlayalım ki BTC/ETH başarısızlığı normalleşince
+            # hemen agresif backoff'a girilmesin.
+            consecutive_failures = 0
             time.sleep(ERROR_BACKOFF_SHORT)
 
 
@@ -1860,6 +2065,29 @@ def bot_loop() -> None:
 # ============================================================
 
 if __name__ == "__main__":
+    import atexit
+    import signal as _signal
+
     validate_env()
+
+    def _shutdown(*_args):
+        log.info("Shutdown sinyali alındı, kaynaklar kapatılıyor.")
+        try:
+            _STATE_MGR.save()
+        except Exception as e:
+            log.warning("Shutdown'da state kaydedilemedi: %s", e)
+        try:
+            _FEATURE_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+            _SYMBOL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
+    atexit.register(_shutdown)
+    try:
+        _signal.signal(_signal.SIGTERM, lambda *_: _shutdown())
+    except (ValueError, AttributeError):
+        # SIGTERM bazı platformlarda (Windows) yok, sorun değil
+        pass
+
     threading.Thread(target=bot_loop, daemon=True, name="bot-loop").start()
     app.run(host="0.0.0.0", port=PORT)
