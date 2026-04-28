@@ -212,6 +212,7 @@ BACKTEST_VALIDATION_REPORT_FILE = os.getenv(
 # Risk artık sadece sabit RISK_PCT_PER_TRADE değildir; sinyal kalitesi,
 # confidence, piyasa rejimi, sembol/grup edge'i ve loss-streak'e göre
 # kontrollü şekilde ölçeklenir.
+RISK_PCT_PER_TRADE = env_float("RISK_PCT_PER_TRADE", 0.01, min_value=0.0001)
 POSITION_SIZING_ENABLED = os.getenv("POSITION_SIZING_ENABLED", "1") == "1"
 POSITION_SIZING_MIN_RISK_PCT = env_float("POSITION_SIZING_MIN_RISK_PCT", 0.0025, min_value=0.0001)
 POSITION_SIZING_MAX_RISK_PCT = env_float("POSITION_SIZING_MAX_RISK_PCT", 0.03, min_value=0.001)
@@ -276,7 +277,6 @@ MOVEMENT_ALERT_THRESHOLDS: dict[str, dict[str, float]] = {
 # ============================================================
 
 ACCOUNT_SIZE_USD = env_float("ACCOUNT_SIZE_USD", 800.0, min_value=1.0)
-RISK_PCT_PER_TRADE = env_float("RISK_PCT_PER_TRADE", 0.01, min_value=0.0001)
 
 TRADE_PLAN_CONFIG: dict[str, dict[str, float]] = {
     "CORE": {
@@ -292,6 +292,17 @@ TRADE_PLAN_CONFIG: dict[str, dict[str, float]] = {
         "tp3_r": 3.0,
     },
 }
+
+if POSITION_SIZING_MIN_RISK_PCT > POSITION_SIZING_MAX_RISK_PCT:
+    log.warning(
+        "POSITION_SIZING_MIN_RISK_PCT (%s) > POSITION_SIZING_MAX_RISK_PCT (%s), degerler swap edildi.",
+        POSITION_SIZING_MIN_RISK_PCT,
+        POSITION_SIZING_MAX_RISK_PCT,
+    )
+    POSITION_SIZING_MIN_RISK_PCT, POSITION_SIZING_MAX_RISK_PCT = (
+        POSITION_SIZING_MAX_RISK_PCT,
+        POSITION_SIZING_MIN_RISK_PCT,
+    )
 
 
 # ============================================================
