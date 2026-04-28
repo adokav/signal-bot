@@ -36,7 +36,7 @@ from flask import Flask
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-__version__ = "1.4.1-tracking-edge"
+__version__ = "1.6.0-weight-learning"
 
 # ============================================================
 # LOGGING
@@ -163,6 +163,37 @@ SEND_SUMMARY_MESSAGES = os.getenv("SEND_SUMMARY_MESSAGES", "0") == "1"
 TRADE_TRACKING_ENABLED = os.getenv("TRADE_TRACKING_ENABLED", "1") == "1"
 TRADE_OPEN_COOLDOWN_SECONDS = env_int("TRADE_OPEN_COOLDOWN_SECONDS", 4 * 60 * 60, min_value=0)
 TRADE_ALERT_RETRY_SECONDS = env_int("TRADE_ALERT_RETRY_SECONDS", 5 * 60, min_value=30)
+
+# Feature Importance Analyzer v1
+FEATURE_IMPORTANCE_ENABLED = os.getenv("FEATURE_IMPORTANCE_ENABLED", "1") == "1"
+FEATURE_IMPORTANCE_MIN_TRADES = env_int("FEATURE_IMPORTANCE_MIN_TRADES", 12, min_value=3)
+FEATURE_IMPORTANCE_MIN_BUCKET_TRADES = env_int("FEATURE_IMPORTANCE_MIN_BUCKET_TRADES", 5, min_value=2)
+FEATURE_IMPORTANCE_COMPONENTS = (
+    "macro", "market", "mtf", "trend", "momentum",
+    "volume", "liquidity", "basis", "funding",
+)
+
+# Weight Learning Engine v1
+WEIGHT_LEARNING_ENABLED = os.getenv("WEIGHT_LEARNING_ENABLED", "1") == "1"
+WEIGHT_LEARNING_MIN_TRADES = env_int("WEIGHT_LEARNING_MIN_TRADES", 25, min_value=5)
+WEIGHT_LEARNING_MIN_BUCKET_TRADES = env_int("WEIGHT_LEARNING_MIN_BUCKET_TRADES", 8, min_value=3)
+WEIGHT_LEARNING_RATE = env_float("WEIGHT_LEARNING_RATE", 0.10, min_value=0.001)
+WEIGHT_LEARNING_MAX_DELTA = env_float("WEIGHT_LEARNING_MAX_DELTA", 0.15, min_value=0.01)
+WEIGHT_LEARNING_MIN_WEIGHT = env_float("WEIGHT_LEARNING_MIN_WEIGHT", 0.02, min_value=0.0)
+WEIGHT_LEARNING_MAX_WEIGHT = env_float("WEIGHT_LEARNING_MAX_WEIGHT", 0.35, min_value=0.05)
+WEIGHT_LEARNING_SUGGESTIONS_FILE = os.getenv("WEIGHT_LEARNING_SUGGESTIONS_FILE", "weight_suggestions.json")
+
+# Human-in-the-loop Parameter Approval v1
+PARAMETER_SUGGESTIONS_FILE = os.getenv("PARAMETER_SUGGESTIONS_FILE", "parameter_suggestions.json")
+ADAPTIVE_CONFIG_FILE = os.getenv("ADAPTIVE_CONFIG_FILE", "adaptive_config.json")
+PARAMETER_CHANGE_LOG_FILE = os.getenv("PARAMETER_CHANGE_LOG_FILE", "parameter_change_log.jsonl")
+TELEGRAM_COMMANDS_ENABLED = os.getenv("TELEGRAM_COMMANDS_ENABLED", "1") == "1"
+TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS = env_int(
+    "TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS", 60, min_value=10
+)
+PARAMETER_SUGGESTION_MIN_CONFIDENCE = env_float(
+    "PARAMETER_SUGGESTION_MIN_CONFIDENCE", 0.45, min_value=0.0
+)
 
 # Hata sonrası bekleme süreleri
 ERROR_BACKOFF_SHORT = env_int("ERROR_BACKOFF_SHORT", 60, min_value=1)
@@ -2520,6 +2551,7 @@ def open_trade(result: dict, plan: dict, state_mgr: StateManager = _STATE_MGR) -
     trade = {
         "id": trade_id,
         "symbol": result["symbol"],
+        "group": result.get("group", COINS.get(result.get("symbol"), "UNKNOWN")),
         "direction": result["signal"],
         "entry": float(plan["reference_entry"]),
         "entry_zone_low": float(plan.get("entry_zone_low", plan["reference_entry"])),
@@ -2744,6 +2776,196 @@ def edge_analysis(state_mgr: StateManager = _STATE_MGR) -> dict:
     }
 
 
+
+def _fi_trade_outcome(t: dict) -> Optional[int]:
+    """1 = profitable/winning, 0 = losing. EXIT trades use pnl sign."""
+    if t.get("result") is None:
+        return None
+    result = t.get("result")
+    pnl = float(t.get("pnl_pct", 0) or 0)
+    if result == "WIN":
+        return 1
+    if result == "LOSS":
+        return 0
+    return 1 if pnl > 0 else 0
+
+
+def _fi_aligned_raw_value(t: dict, component: str) -> Optional[float]:
+    """Raw score aligned to trade direction. Positive supports the trade direction."""
+    raw = t.get("raw") or {}
+    if component not in raw:
+        return None
+    try:
+        value = float(raw[component])
+    except (TypeError, ValueError):
+        return None
+    direction = t.get("direction")
+    if direction == "SHORT":
+        value = -value
+    elif direction != "LONG":
+        return None
+    return value
+
+
+def _fi_bucket_stats(trades: list[dict], components: tuple[str, ...]) -> dict:
+    stats: dict[str, dict] = {}
+    for comp in components:
+        rows = []
+        for t in trades:
+            outcome = _fi_trade_outcome(t)
+            aligned = _fi_aligned_raw_value(t, comp)
+            if outcome is None or aligned is None:
+                continue
+            pnl = float(t.get("pnl_pct", 0) or 0) * 100
+            rows.append({"aligned": aligned, "win": outcome, "pnl": pnl})
+        if not rows:
+            continue
+        wins = [r for r in rows if r["win"] == 1]
+        losses = [r for r in rows if r["win"] == 0]
+        pos = [r for r in rows if r["aligned"] > 0]
+        neg = [r for r in rows if r["aligned"] <= 0]
+        avg_aligned_wins = sum(r["aligned"] for r in wins) / len(wins) if wins else 0.0
+        avg_aligned_losses = sum(r["aligned"] for r in losses) / len(losses) if losses else 0.0
+        pos_wr = sum(r["win"] for r in pos) / len(pos) * 100 if pos else None
+        neg_wr = sum(r["win"] for r in neg) / len(neg) * 100 if neg else None
+        avg_pnl_pos = sum(r["pnl"] for r in pos) / len(pos) if pos else None
+        avg_pnl_neg = sum(r["pnl"] for r in neg) / len(neg) if neg else None
+        separation = avg_aligned_wins - avg_aligned_losses
+        wr_edge = 0.0
+        if pos_wr is not None and neg_wr is not None:
+            wr_edge = (pos_wr - neg_wr) / 100.0
+        pnl_edge = 0.0
+        if avg_pnl_pos is not None and avg_pnl_neg is not None:
+            pnl_edge = (avg_pnl_pos - avg_pnl_neg) / 10.0
+        importance_score = round(0.55 * separation + 0.30 * wr_edge + 0.15 * pnl_edge, 4)
+        if len(rows) < FEATURE_IMPORTANCE_MIN_BUCKET_TRADES:
+            recommendation = "INSUFFICIENT_BUCKET_DATA"
+        elif importance_score >= 0.15:
+            recommendation = "CONSIDER_WEIGHT_UP"
+        elif importance_score <= -0.15:
+            recommendation = "CONSIDER_WEIGHT_DOWN"
+        else:
+            recommendation = "KEEP"
+        stats[comp] = {
+            "sample": len(rows),
+            "winrate_when_supports_direction": round(pos_wr, 1) if pos_wr is not None else None,
+            "winrate_when_against_direction": round(neg_wr, 1) if neg_wr is not None else None,
+            "avg_pnl_when_supports_direction": round(avg_pnl_pos, 2) if avg_pnl_pos is not None else None,
+            "avg_pnl_when_against_direction": round(avg_pnl_neg, 2) if avg_pnl_neg is not None else None,
+            "avg_aligned_raw_winners": round(avg_aligned_wins, 3),
+            "avg_aligned_raw_losers": round(avg_aligned_losses, 3),
+            "separation": round(separation, 3),
+            "importance_score": importance_score,
+            "recommendation": recommendation,
+        }
+    return stats
+
+
+def feature_importance_analysis(state_mgr: StateManager = _STATE_MGR) -> dict:
+    """Analyze which raw score components separate winning and losing trades.
+
+    This is a reporting layer only. It does NOT change weights.
+    """
+    if not FEATURE_IMPORTANCE_ENABLED:
+        return {"ready": False, "enabled": False, "summary": "Feature Importance kapalı."}
+    trades = list(get_trades(state_mgr).values())
+    closed = [t for t in trades if _fi_trade_outcome(t) is not None]
+    if len(closed) < FEATURE_IMPORTANCE_MIN_TRADES:
+        return {
+            "ready": False,
+            "enabled": True,
+            "closed_trades": len(closed),
+            "min_required": FEATURE_IMPORTANCE_MIN_TRADES,
+            "summary": f"Feature Importance için veri yetersiz ({len(closed)}/{FEATURE_IMPORTANCE_MIN_TRADES}).",
+        }
+    overall = _fi_bucket_stats(closed, FEATURE_IMPORTANCE_COMPONENTS)
+    by_group: dict[str, dict] = {}
+    groups = sorted({t.get("group") or COINS.get(t.get("symbol", ""), "UNKNOWN") for t in closed})
+    for group in groups:
+        subset = [t for t in closed if (t.get("group") or COINS.get(t.get("symbol", ""), "UNKNOWN")) == group]
+        if len(subset) >= FEATURE_IMPORTANCE_MIN_BUCKET_TRADES:
+            by_group[group] = _fi_bucket_stats(subset, FEATURE_IMPORTANCE_COMPONENTS)
+    ranked = sorted(
+        ((comp, data) for comp, data in overall.items() if data.get("sample", 0) >= FEATURE_IMPORTANCE_MIN_BUCKET_TRADES),
+        key=lambda item: item[1].get("importance_score", 0),
+        reverse=True,
+    )
+    top_positive = ranked[:3]
+    top_negative = list(reversed(ranked[-3:])) if ranked else []
+    suggestions = []
+    for comp, data in ranked:
+        rec = data.get("recommendation")
+        if rec in ("CONSIDER_WEIGHT_UP", "CONSIDER_WEIGHT_DOWN"):
+            suggestions.append({
+                "component": comp,
+                "action": rec,
+                "importance_score": data["importance_score"],
+                "sample": data["sample"],
+                "reason": (
+                    f"support WR={data.get('winrate_when_supports_direction')}%, "
+                    f"against WR={data.get('winrate_when_against_direction')}%, "
+                    f"separation={data.get('separation')}"
+                ),
+            })
+    return {
+        "ready": True,
+        "enabled": True,
+        "closed_trades": len(closed),
+        "components": overall,
+        "by_group": by_group,
+        "top_positive": [{"component": c, **d} for c, d in top_positive],
+        "top_negative": [{"component": c, **d} for c, d in top_negative],
+        "suggestions": suggestions[:5],
+    }
+
+
+def format_feature_importance_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    fi = feature_importance_analysis(state_mgr)
+    if not fi.get("ready"):
+        return fi.get("summary", "Feature Importance: veri yetersiz.")
+    top = fi.get("top_positive") or []
+    weak = fi.get("top_negative") or []
+    top_text = ", ".join(f"{x['component']} {x['importance_score']:+.2f}" for x in top[:2]) if top else "-"
+    weak_text = ", ".join(f"{x['component']} {x['importance_score']:+.2f}" for x in weak[:2]) if weak else "-"
+    return f"FI: güçlü [{top_text}] | zayıf [{weak_text}]"
+
+
+def format_feature_importance_report(state_mgr: StateManager = _STATE_MGR) -> str:
+    fi = feature_importance_analysis(state_mgr)
+    if not fi.get("ready"):
+        return "🧠 FEATURE IMPORTANCE\n\n" + fi.get("summary", "Veri yetersiz.")
+    lines = [
+        "🧠 FEATURE IMPORTANCE REPORT",
+        "",
+        f"Kapalı trade: {fi['closed_trades']}",
+        "",
+        "En güçlü katkılar:",
+    ]
+    for item in fi.get("top_positive", [])[:5]:
+        lines.append(
+            f"- {item['component']}: score {item['importance_score']:+.3f} | "
+            f"support WR %{item.get('winrate_when_supports_direction')} | "
+            f"against WR %{item.get('winrate_when_against_direction')}"
+        )
+    lines.append("")
+    lines.append("Zayıf / yanıltıcı katkılar:")
+    for item in fi.get("top_negative", [])[:5]:
+        lines.append(
+            f"- {item['component']}: score {item['importance_score']:+.3f} | "
+            f"support WR %{item.get('winrate_when_supports_direction')} | "
+            f"against WR %{item.get('winrate_when_against_direction')}"
+        )
+    suggestions = fi.get("suggestions", [])
+    if suggestions:
+        lines.append("")
+        lines.append("Öneri adayları (otomatik uygulanmaz):")
+        for s in suggestions[:5]:
+            action = "weight ↑" if s["action"] == "CONSIDER_WEIGHT_UP" else "weight ↓"
+            lines.append(f"- {s['component']}: {action} | {s['reason']}")
+    lines.append("")
+    lines.append("Not: Bu modül sadece analiz yapar; parametreleri değiştirmez.")
+    return "\n".join(lines)
+
 def format_edge_brief(state_mgr: StateManager = _STATE_MGR) -> str:
     ea = edge_analysis(state_mgr)
     if not ea.get("closed_trades"):
@@ -2759,6 +2981,585 @@ def format_edge_brief(state_mgr: StateManager = _STATE_MGR) -> str:
 # ============================================================
 # BOT LOOP — modülerleştirilmiş
 # ============================================================
+
+
+
+# ============================================================
+# WEIGHT LEARNING ENGINE v1 (analysis + suggestion only)
+# ============================================================
+
+def _wl_clamp_weight(value: float) -> float:
+    return clamp(float(value), WEIGHT_LEARNING_MIN_WEIGHT, WEIGHT_LEARNING_MAX_WEIGHT)
+
+
+def _wl_normalize_weights(weights: dict[str, float], target_sum: float = 1.0) -> dict[str, float]:
+    total = sum(max(0.0, float(v)) for v in weights.values())
+    if total <= 0:
+        return dict(weights)
+    return {k: round(float(v) / total * target_sum, 5) for k, v in weights.items()}
+
+
+def _wl_group_feature_stats(fi: dict, group: str) -> dict:
+    """Return group-specific FI stats if available, otherwise overall stats."""
+    by_group = fi.get("by_group") or {}
+    if group in by_group and by_group[group]:
+        return by_group[group]
+    return fi.get("components") or {}
+
+
+def weight_learning_analysis(state_mgr: StateManager = _STATE_MGR) -> dict:
+    """Generate conservative weight-change suggestions from Feature Importance.
+
+    This module DOES NOT apply changes. It only proposes new weights that can later
+    be routed to a Telegram approval / adaptive_config flow.
+    """
+    if not WEIGHT_LEARNING_ENABLED:
+        return {"ready": False, "enabled": False, "summary": "Weight Learning kapalı."}
+
+    fi = feature_importance_analysis(state_mgr)
+    if not fi.get("ready"):
+        return {
+            "ready": False,
+            "enabled": True,
+            "summary": "Weight Learning için Feature Importance hazır değil: " + fi.get("summary", "veri yetersiz."),
+        }
+
+    closed = int(fi.get("closed_trades", 0) or 0)
+    if closed < WEIGHT_LEARNING_MIN_TRADES:
+        return {
+            "ready": False,
+            "enabled": True,
+            "closed_trades": closed,
+            "min_required": WEIGHT_LEARNING_MIN_TRADES,
+            "summary": f"Weight Learning için veri yetersiz ({closed}/{WEIGHT_LEARNING_MIN_TRADES}).",
+        }
+
+    group_suggestions = {}
+    flat_suggestions = []
+
+    for group, current in WEIGHTS.items():
+        stats = _wl_group_feature_stats(fi, group)
+        if not stats:
+            continue
+
+        proposed = {k: float(v) for k, v in current.items()}
+        component_changes = []
+
+        for comp, old_weight in current.items():
+            comp_stats = stats.get(comp) or {}
+            sample = int(comp_stats.get("sample", 0) or 0)
+            if sample < WEIGHT_LEARNING_MIN_BUCKET_TRADES:
+                continue
+
+            importance = float(comp_stats.get("importance_score", 0) or 0)
+            recommendation = comp_stats.get("recommendation")
+            if recommendation not in ("CONSIDER_WEIGHT_UP", "CONSIDER_WEIGHT_DOWN"):
+                continue
+
+            raw_delta = WEIGHT_LEARNING_RATE * importance
+            delta = clamp(raw_delta, -WEIGHT_LEARNING_MAX_DELTA, WEIGHT_LEARNING_MAX_DELTA)
+            if abs(delta) < 0.005:
+                continue
+
+            new_weight_raw = _wl_clamp_weight(float(old_weight) * (1 + delta))
+            proposed[comp] = new_weight_raw
+            action = "WEIGHT_UP" if delta > 0 else "WEIGHT_DOWN"
+            confidence = clamp(min(sample / 50.0, 1.0) * min(abs(importance) / 0.5, 1.0), 0.0, 1.0)
+
+            change = {
+                "group": group,
+                "component": comp,
+                "action": action,
+                "old_weight": round(float(old_weight), 5),
+                "raw_new_weight": round(new_weight_raw, 5),
+                "delta_pct": round(delta * 100, 2),
+                "importance_score": round(importance, 4),
+                "sample": sample,
+                "confidence": round(confidence, 3),
+                "reason": (
+                    f"FI={importance:+.3f}; support WR={comp_stats.get('winrate_when_supports_direction')}%; "
+                    f"against WR={comp_stats.get('winrate_when_against_direction')}%; sample={sample}"
+                ),
+            }
+            component_changes.append(change)
+            flat_suggestions.append(change)
+
+        if component_changes:
+            normalized = _wl_normalize_weights(proposed, target_sum=sum(float(v) for v in current.values()))
+            for change in component_changes:
+                comp = change["component"]
+                change["normalized_new_weight"] = normalized.get(comp)
+            group_suggestions[group] = {
+                "current_weights": {k: round(float(v), 5) for k, v in current.items()},
+                "proposed_weights": normalized,
+                "changes": component_changes,
+            }
+
+    flat_suggestions.sort(key=lambda x: (x.get("confidence", 0), abs(x.get("delta_pct", 0))), reverse=True)
+
+    if not flat_suggestions:
+        return {
+            "ready": True,
+            "enabled": True,
+            "closed_trades": closed,
+            "summary": "Weight Learning: değişiklik önerisi yok; mevcut ağırlıklar korunabilir.",
+            "groups": group_suggestions,
+            "suggestions": [],
+        }
+
+    return {
+        "ready": True,
+        "enabled": True,
+        "closed_trades": closed,
+        "groups": group_suggestions,
+        "suggestions": flat_suggestions[:8],
+        "summary": f"Weight Learning: {len(flat_suggestions)} ağırlık önerisi adayı üretildi.",
+    }
+
+
+def _wl_safe_write_json(path: str, data: dict) -> None:
+    try:
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError as e:
+        log.warning("Weight suggestion dosyası yazılamadı: %s", e)
+
+
+def persist_weight_learning_suggestions(state_mgr: StateManager = _STATE_MGR) -> dict:
+    """Persist latest suggestions to JSON for later approval/backtest workflow."""
+    wl = weight_learning_analysis(state_mgr)
+    payload = {
+        "generated_at": now_ts(),
+        "generated_at_tr": tr_now_text(),
+        "version": __version__,
+        "status": "READY" if wl.get("ready") else "NOT_READY",
+        "analysis": wl,
+    }
+    _wl_safe_write_json(WEIGHT_LEARNING_SUGGESTIONS_FILE, payload)
+    return wl
+
+
+def format_weight_learning_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    wl = weight_learning_analysis(state_mgr)
+    if not wl.get("ready"):
+        return wl.get("summary", "Weight Learning: veri yetersiz.")
+    suggestions = wl.get("suggestions") or []
+    if not suggestions:
+        return wl.get("summary", "Weight Learning: öneri yok.")
+    top = suggestions[:2]
+    text = ", ".join(
+        f"{s['group']}.{s['component']} {s['delta_pct']:+.1f}%" for s in top
+    )
+    return f"WL: {text}"
+
+
+def format_weight_learning_report(state_mgr: StateManager = _STATE_MGR) -> str:
+    wl = persist_weight_learning_suggestions(state_mgr)
+    if not wl.get("ready"):
+        return "🧠 WEIGHT LEARNING\n\n" + wl.get("summary", "Veri yetersiz.")
+
+    lines = [
+        "🧠 WEIGHT LEARNING REPORT",
+        "",
+        f"Kapalı trade: {wl.get('closed_trades', 0)}",
+        f"Durum: {wl.get('summary', '-')}",
+        "",
+        "Öneri adayları (otomatik uygulanmaz):",
+    ]
+    suggestions = wl.get("suggestions") or []
+    if not suggestions:
+        lines.append("- Şimdilik ağırlık değişikliği önerisi yok.")
+    for s in suggestions[:8]:
+        lines.append(
+            f"- {s['group']}.{s['component']}: {s['old_weight']:.3f} → "
+            f"{s.get('normalized_new_weight', s['raw_new_weight']):.3f} "
+            f"({s['delta_pct']:+.1f}%) | conf {s['confidence']:.2f} | {s['reason']}"
+        )
+    lines.extend([
+        "",
+        f"Dosya: {WEIGHT_LEARNING_SUGGESTIONS_FILE}",
+        "Not: Bu modül sadece öneri üretir; ağırlıkları otomatik değiştirmez.",
+    ])
+    return "\n".join(lines)
+
+# ============================================================
+# PARAMETER APPROVAL ENGINE v1 (Telegram ACCEPT / DECLINE)
+# ============================================================
+
+def _safe_read_json(path: str, default):
+    try:
+        if not os.path.exists(path):
+            return copy.deepcopy(default)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if data is not None else copy.deepcopy(default)
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("%s okunamadı: %s", path, e)
+        return copy.deepcopy(default)
+
+
+def _safe_write_json(path: str, data) -> None:
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        os.makedirs(parent, exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError as e:
+        log.warning("%s yazılamadı: %s", path, e)
+
+
+def _append_jsonl(path: str, record: dict) -> None:
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError as e:
+        log.warning("%s log yazılamadı: %s", path, e)
+
+
+def _suggestions_payload() -> dict:
+    payload = _safe_read_json(PARAMETER_SUGGESTIONS_FILE, {"version": 1, "suggestions": []})
+    if not isinstance(payload, dict):
+        payload = {"version": 1, "suggestions": []}
+    payload.setdefault("version", 1)
+    payload.setdefault("suggestions", [])
+    if not isinstance(payload["suggestions"], list):
+        payload["suggestions"] = []
+    return payload
+
+
+def _suggestion_hash(kind: str, group: str, new_weights: dict) -> str:
+    raw = json.dumps(
+        {"kind": kind, "group": group, "new_weights": new_weights},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:10]
+
+
+def _suggestion_id(kind: str, group: str, new_weights: dict) -> str:
+    return f"sug_{kind.lower()}_{group.lower()}_{_suggestion_hash(kind, group, new_weights)}"
+
+
+def _format_weight_group_suggestion_message(suggestion: dict) -> str:
+    changes = suggestion.get("changes") or []
+    lines = [
+        "🧠 PARAMETER / WEIGHT SUGGESTION",
+        "",
+        f"ID: {suggestion['id']}",
+        f"Tip: {suggestion.get('type', '-')}",
+        f"Grup: {suggestion.get('group', '-')}",
+        f"Güven: %{suggestion.get('confidence', 0) * 100:.1f}",
+        "",
+        "Önerilen değişiklikler:",
+    ]
+    for ch in changes[:8]:
+        lines.append(
+            f"- {ch['component']}: {ch['old_weight']:.3f} → "
+            f"{ch.get('normalized_new_weight', ch.get('raw_new_weight')):.3f} "
+            f"({ch['delta_pct']:+.1f}%)"
+        )
+    lines.extend([
+        "",
+        "Komut:",
+        f"ACCEPT {suggestion['id']}",
+        f"DECLINE {suggestion['id']}",
+        "",
+        "Not: Kabul edilirse adaptive_config.json güncellenir ve runtime ağırlıkları uygulanır.",
+    ])
+    return "\n".join(lines)
+
+
+def generate_parameter_suggestions_from_weight_learning(
+    state_mgr: StateManager = _STATE_MGR,
+    *,
+    notify: bool = True,
+) -> dict:
+    """Convert Weight Learning group proposals into human-approval suggestions.
+
+    This does NOT apply any parameter automatically.
+    """
+    wl = persist_weight_learning_suggestions(state_mgr)
+    payload = _suggestions_payload()
+    existing = payload["suggestions"]
+
+    existing_ids = {s.get("id") for s in existing if isinstance(s, dict)}
+    created = []
+
+    if not wl.get("ready"):
+        return {"created": 0, "summary": wl.get("summary", "Weight Learning hazır değil.")}
+
+    groups = wl.get("groups") or {}
+    for group, group_payload in groups.items():
+        changes = group_payload.get("changes") or []
+        if not changes:
+            continue
+
+        confidence = max(float(ch.get("confidence", 0) or 0) for ch in changes)
+        if confidence < PARAMETER_SUGGESTION_MIN_CONFIDENCE:
+            continue
+
+        proposed = group_payload.get("proposed_weights") or {}
+        if not proposed:
+            continue
+
+        sid = _suggestion_id("WEIGHTS", group, proposed)
+        if sid in existing_ids:
+            continue
+
+        # Aynı grup için hâlihazırda bekleyen öneri varsa spam yapma.
+        pending_same_group = any(
+            s.get("status") == "PENDING"
+            and s.get("type") == "WEIGHT_GROUP_UPDATE"
+            and s.get("group") == group
+            for s in existing
+            if isinstance(s, dict)
+        )
+        if pending_same_group:
+            continue
+
+        suggestion = {
+            "id": sid,
+            "type": "WEIGHT_GROUP_UPDATE",
+            "status": "PENDING",
+            "created_at": now_ts(),
+            "created_at_tr": tr_now_text(),
+            "source": "Weight Learning Engine v1",
+            "group": group,
+            "old_weights": group_payload.get("current_weights", {}),
+            "new_weights": proposed,
+            "changes": changes,
+            "confidence": round(confidence, 3),
+            "reason": "Feature Importance + Weight Learning sonuçlarına göre grup ağırlık güncellemesi.",
+        }
+        existing.append(suggestion)
+        existing_ids.add(sid)
+        created.append(suggestion)
+
+    if created:
+        payload["updated_at"] = now_ts()
+        _safe_write_json(PARAMETER_SUGGESTIONS_FILE, payload)
+        if notify:
+            for sug in created[:3]:
+                send_message(_format_weight_group_suggestion_message(sug))
+
+    return {"created": len(created), "suggestions": created}
+
+
+def pending_parameter_suggestions_text(limit: int = 8) -> str:
+    payload = _suggestions_payload()
+    pending = [
+        s for s in payload.get("suggestions", [])
+        if isinstance(s, dict) and s.get("status") == "PENDING"
+    ]
+    if not pending:
+        return "Bekleyen parametre önerisi yok."
+
+    lines = ["🧠 PENDING PARAMETER SUGGESTIONS", ""]
+    for s in pending[:limit]:
+        lines.append(
+            f"- {s['id']} | {s.get('type')} | {s.get('group')} | "
+            f"conf %{float(s.get('confidence', 0))*100:.1f}"
+        )
+    lines.extend(["", "Kullanım: ACCEPT <id> veya DECLINE <id>"])
+    return "\n".join(lines)
+
+
+def _load_adaptive_config() -> dict:
+    cfg = _safe_read_json(ADAPTIVE_CONFIG_FILE, {"version": 1})
+    if not isinstance(cfg, dict):
+        cfg = {"version": 1}
+    cfg.setdefault("version", 1)
+    return cfg
+
+
+def _apply_weights_config(weights_cfg: dict) -> None:
+    if not isinstance(weights_cfg, dict):
+        return
+    for group, group_weights in weights_cfg.items():
+        if group not in WEIGHTS or not isinstance(group_weights, dict):
+            continue
+        for comp, value in group_weights.items():
+            if comp in WEIGHTS[group]:
+                try:
+                    WEIGHTS[group][comp] = float(value)
+                except (TypeError, ValueError):
+                    log.warning("Adaptive weight değeri geçersiz: %s.%s=%r", group, comp, value)
+
+
+def load_and_apply_adaptive_config() -> dict:
+    """Apply approved adaptive settings at startup."""
+    cfg = _load_adaptive_config()
+    _apply_weights_config(cfg.get("WEIGHTS", {}))
+    return cfg
+
+
+def _save_adaptive_weights(group: str, new_weights: dict) -> dict:
+    cfg = _load_adaptive_config()
+    cfg.setdefault("WEIGHTS", {})
+    cfg["WEIGHTS"][group] = {k: float(v) for k, v in new_weights.items()}
+    cfg["updated_at"] = now_ts()
+    cfg["updated_at_tr"] = tr_now_text()
+    _safe_write_json(ADAPTIVE_CONFIG_FILE, cfg)
+
+    # Runtime update
+    _apply_weights_config({group: cfg["WEIGHTS"][group]})
+    return cfg
+
+
+def accept_parameter_suggestion(suggestion_id: str, actor: str = "telegram") -> str:
+    payload = _suggestions_payload()
+    suggestions = payload.get("suggestions", [])
+    for s in suggestions:
+        if not isinstance(s, dict) or s.get("id") != suggestion_id:
+            continue
+        if s.get("status") != "PENDING":
+            return f"{suggestion_id} zaten {s.get('status')} durumunda."
+
+        if s.get("type") != "WEIGHT_GROUP_UPDATE":
+            return f"{suggestion_id} tipi desteklenmiyor: {s.get('type')}"
+
+        group = s.get("group")
+        new_weights = s.get("new_weights") or {}
+        if group not in WEIGHTS or not isinstance(new_weights, dict):
+            return f"{suggestion_id} uygulanamadı: grup/weight verisi geçersiz."
+
+        before = copy.deepcopy(WEIGHTS[group])
+        _save_adaptive_weights(group, new_weights)
+        after = copy.deepcopy(WEIGHTS[group])
+
+        s["status"] = "ACCEPTED"
+        s["accepted_at"] = now_ts()
+        s["accepted_at_tr"] = tr_now_text()
+        s["actor"] = actor
+        payload["updated_at"] = now_ts()
+        _safe_write_json(PARAMETER_SUGGESTIONS_FILE, payload)
+
+        _append_jsonl(PARAMETER_CHANGE_LOG_FILE, {
+            "ts": now_ts(),
+            "ts_tr": tr_now_text(),
+            "actor": actor,
+            "suggestion_id": suggestion_id,
+            "type": s.get("type"),
+            "group": group,
+            "before": before,
+            "after": after,
+        })
+
+        return (
+            f"✅ ACCEPTED {suggestion_id}\n\n"
+            f"{group} ağırlıkları adaptive_config.json içine işlendi ve runtime’da uygulandı."
+        )
+
+    return f"{suggestion_id} bulunamadı."
+
+
+def decline_parameter_suggestion(suggestion_id: str, actor: str = "telegram") -> str:
+    payload = _suggestions_payload()
+    suggestions = payload.get("suggestions", [])
+    for s in suggestions:
+        if not isinstance(s, dict) or s.get("id") != suggestion_id:
+            continue
+        if s.get("status") != "PENDING":
+            return f"{suggestion_id} zaten {s.get('status')} durumunda."
+
+        s["status"] = "DECLINED"
+        s["declined_at"] = now_ts()
+        s["declined_at_tr"] = tr_now_text()
+        s["actor"] = actor
+        payload["updated_at"] = now_ts()
+        _safe_write_json(PARAMETER_SUGGESTIONS_FILE, payload)
+
+        _append_jsonl(PARAMETER_CHANGE_LOG_FILE, {
+            "ts": now_ts(),
+            "ts_tr": tr_now_text(),
+            "actor": actor,
+            "suggestion_id": suggestion_id,
+            "type": s.get("type"),
+            "group": s.get("group"),
+            "status": "DECLINED",
+        })
+        return f"❌ DECLINED {suggestion_id}"
+
+    return f"{suggestion_id} bulunamadı."
+
+
+def _telegram_get_updates(state_mgr: StateManager) -> list[dict]:
+    if not TOKEN:
+        return []
+    offset = state_mgr.get_meta("telegram_update_offset", 0)
+    params = {"timeout": 0}
+    if offset:
+        params["offset"] = offset
+    try:
+        data = request_json(f"{TELEGRAM_BASE}/bot{TOKEN}/getUpdates", params=params, retries=1, timeout=10)
+    except Exception as e:
+        log.debug("Telegram command polling başarısız: %s", e)
+        return []
+    if not isinstance(data, dict) or not data.get("ok"):
+        return []
+    updates = data.get("result") or []
+    if updates:
+        max_id = max(int(u.get("update_id", 0)) for u in updates)
+        state_mgr.set_meta("telegram_update_offset", max_id + 1)
+    return updates if isinstance(updates, list) else []
+
+
+def _extract_command_text(update: dict) -> tuple[Optional[str], Optional[str]]:
+    message = update.get("message") or update.get("edited_message") or {}
+    if not isinstance(message, dict):
+        return None, None
+
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    if CHAT_ID and str(chat_id) != str(CHAT_ID):
+        return None, None
+
+    text = (message.get("text") or "").strip()
+    if not text:
+        return None, None
+    return str(chat_id), text
+
+
+def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
+    """Poll Telegram commands for ACCEPT / DECLINE / PENDING.
+
+    Simple polling is enough for Render-style long-running bot deployments.
+    """
+    if not TELEGRAM_COMMANDS_ENABLED or not TOKEN or not CHAT_ID:
+        return
+
+    last_poll = state_mgr.get_meta("last_telegram_command_poll_ts", 0)
+    if now_ts() - last_poll < TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS:
+        return
+    state_mgr.set_meta("last_telegram_command_poll_ts", now_ts())
+
+    updates = _telegram_get_updates(state_mgr)
+    for update in updates:
+        _, text = _extract_command_text(update)
+        if not text:
+            continue
+
+        parts = text.strip().split()
+        cmd = parts[0].upper()
+
+        if cmd == "PENDING":
+            send_message(pending_parameter_suggestions_text())
+        elif cmd == "ACCEPT" and len(parts) >= 2:
+            send_message(accept_parameter_suggestion(parts[1], actor="telegram"))
+        elif cmd == "DECLINE" and len(parts) >= 2:
+            send_message(decline_parameter_suggestion(parts[1], actor="telegram"))
+        elif cmd in ("ACCEPT", "DECLINE"):
+            send_message("Kullanım: ACCEPT <suggestion_id> veya DECLINE <suggestion_id>")
 
 def _process_news_cycle(state_mgr: StateManager, current_news: dict) -> dict:
     """News taraması ve alert gönderim döngüsü.
@@ -2868,10 +3669,19 @@ def _send_periodic_messages(
 
     last_heartbeat = state_mgr.get_meta("last_heartbeat_ts", 0)
     if now_ts() - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
+        # Weight suggestions are generated at heartbeat cadence to avoid spam.
+        generate_parameter_suggestions_from_weight_learning(state_mgr, notify=True)
+        pending_count = len([
+            s for s in _suggestions_payload().get("suggestions", [])
+            if isinstance(s, dict) and s.get("status") == "PENDING"
+        ])
         send_message(
             f"✅ BOT AKTİF (v{__version__})\n\n"
             f"Son kontrol: {tr_now_text()}\n"
-            f"{format_edge_brief(state_mgr)}"
+            f"{format_edge_brief(state_mgr)}\n"
+            f"{format_feature_importance_brief(state_mgr)}\n"
+            f"{format_weight_learning_brief(state_mgr)}\n"
+            f"Pending suggestions: {pending_count}"
         )
         state_mgr.set_meta("last_heartbeat_ts", now_ts())
 
@@ -2899,6 +3709,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
         try:
             state_mgr.set_meta("last_scan_started_ts", now_ts())
             session_ctx = get_session_context()
+            process_telegram_commands(state_mgr)
             news_context = _process_news_cycle(state_mgr, news_context)
             state_mgr.save()
 
@@ -3022,6 +3833,7 @@ def main() -> None:
     import signal as _signal
 
     validate_env()
+    load_and_apply_adaptive_config()
     atexit.register(shutdown_resources)
 
     for sig_name in ("SIGTERM", "SIGINT"):
