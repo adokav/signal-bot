@@ -108,6 +108,49 @@ def validate_env() -> None:
         log.info("NEWS_API_KEY eksik — sadece GDELT kullanılacak.")
 
 
+def validate_runtime_config() -> None:
+    """Cross-field config checks. Uyuşmayan değerleri güvenli aralığa çeker."""
+    global POSITION_SIZING_MIN_RISK_PCT
+    global POSITION_SIZING_MAX_RISK_PCT
+    global POSITION_SIZING_BASE_RISK_PCT
+    global POSITION_SIZING_LOSS_STREAK_CUT_1
+    global POSITION_SIZING_LOSS_STREAK_CUT_2
+
+    if POSITION_SIZING_MIN_RISK_PCT > POSITION_SIZING_MAX_RISK_PCT:
+        log.warning(
+            "POSITION_SIZING_MIN_RISK_PCT (%s) > POSITION_SIZING_MAX_RISK_PCT (%s). Değerler swap edildi.",
+            POSITION_SIZING_MIN_RISK_PCT,
+            POSITION_SIZING_MAX_RISK_PCT,
+        )
+        POSITION_SIZING_MIN_RISK_PCT, POSITION_SIZING_MAX_RISK_PCT = (
+            POSITION_SIZING_MAX_RISK_PCT,
+            POSITION_SIZING_MIN_RISK_PCT,
+        )
+
+    if POSITION_SIZING_BASE_RISK_PCT < POSITION_SIZING_MIN_RISK_PCT:
+        log.warning(
+            "POSITION_SIZING_BASE_RISK_PCT (%s) min'in altında. %s'e çekildi.",
+            POSITION_SIZING_BASE_RISK_PCT,
+            POSITION_SIZING_MIN_RISK_PCT,
+        )
+        POSITION_SIZING_BASE_RISK_PCT = POSITION_SIZING_MIN_RISK_PCT
+    elif POSITION_SIZING_BASE_RISK_PCT > POSITION_SIZING_MAX_RISK_PCT:
+        log.warning(
+            "POSITION_SIZING_BASE_RISK_PCT (%s) max'in üstünde. %s'e çekildi.",
+            POSITION_SIZING_BASE_RISK_PCT,
+            POSITION_SIZING_MAX_RISK_PCT,
+        )
+        POSITION_SIZING_BASE_RISK_PCT = POSITION_SIZING_MAX_RISK_PCT
+
+    if POSITION_SIZING_LOSS_STREAK_CUT_2 < POSITION_SIZING_LOSS_STREAK_CUT_1:
+        log.warning(
+            "LOSS_STREAK_CUT_2 (%s), CUT_1'den küçük. CUT_2 değeri %s olarak güncellendi.",
+            POSITION_SIZING_LOSS_STREAK_CUT_2,
+            POSITION_SIZING_LOSS_STREAK_CUT_1,
+        )
+        POSITION_SIZING_LOSS_STREAK_CUT_2 = POSITION_SIZING_LOSS_STREAK_CUT_1
+
+
 # ============================================================
 # CONSTANTS — BASE URLS
 # ============================================================
@@ -208,6 +251,9 @@ BACKTEST_VALIDATION_REPORT_FILE = os.getenv(
     "BACKTEST_VALIDATION_REPORT_FILE", "backtest_validation_report.json"
 )
 
+# Legacy static risk (trade plan + position sizing için ortak anchor)
+RISK_PCT_PER_TRADE = env_float("RISK_PCT_PER_TRADE", 0.01, min_value=0.0001)
+
 # Position Sizing Engine v2
 # Risk artık sadece sabit RISK_PCT_PER_TRADE değildir; sinyal kalitesi,
 # confidence, piyasa rejimi, sembol/grup edge'i ve loss-streak'e göre
@@ -222,6 +268,9 @@ POSITION_SIZING_MIN_EDGE_TRADES = env_int("POSITION_SIZING_MIN_EDGE_TRADES", 6, 
 POSITION_SIZING_LOOKBACK_TRADES = env_int("POSITION_SIZING_LOOKBACK_TRADES", 60, min_value=10)
 POSITION_SIZING_LOSS_STREAK_CUT_1 = env_int("POSITION_SIZING_LOSS_STREAK_CUT_1", 2, min_value=1)
 POSITION_SIZING_LOSS_STREAK_CUT_2 = env_int("POSITION_SIZING_LOSS_STREAK_CUT_2", 3, min_value=2)
+POSITION_SIZING_MAX_NOTIONAL_MULTIPLIER = env_float(
+    "POSITION_SIZING_MAX_NOTIONAL_MULTIPLIER", 2.5, min_value=1.0
+)
 
 # Hata sonrası bekleme süreleri
 ERROR_BACKOFF_SHORT = env_int("ERROR_BACKOFF_SHORT", 60, min_value=1)
@@ -266,7 +315,6 @@ MOVEMENT_ALERT_THRESHOLDS: dict[str, dict[str, float]] = {
 # ============================================================
 
 ACCOUNT_SIZE_USD = env_float("ACCOUNT_SIZE_USD", 800.0, min_value=1.0)
-RISK_PCT_PER_TRADE = env_float("RISK_PCT_PER_TRADE", 0.01, min_value=0.0001)
 
 TRADE_PLAN_CONFIG: dict[str, dict[str, float]] = {
     "CORE": {
@@ -2109,15 +2157,28 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
     if not POSITION_SIZING_ENABLED:
         risk_pct = clamp(base_risk, POSITION_SIZING_MIN_RISK_PCT, POSITION_SIZING_MAX_RISK_PCT)
         risk_amount = ACCOUNT_SIZE_USD * risk_pct
+        position_notional = risk_amount / stop_pct if stop_pct > 0 else 0.0
+        notional_cap = ACCOUNT_SIZE_USD * POSITION_SIZING_MAX_NOTIONAL_MULTIPLIER
+        capped = position_notional > notional_cap
+        if capped:
+            position_notional = notional_cap
         return {
             "enabled": False,
             "risk_pct": risk_pct,
             "risk_amount": risk_amount,
-            "position_notional": risk_amount / stop_pct if stop_pct > 0 else 0.0,
+            "position_notional": position_notional,
+            "notional_cap": notional_cap,
+            "notional_capped": capped,
             "multiplier": 1.0,
             "mode": "STATIC",
             "loss_streak": 0,
-            "reasons": ["Position sizing kapalı; sabit risk kullanıldı."],
+            "reasons": [
+                "Position sizing kapalı; sabit risk kullanıldı.",
+                (
+                    f"Notional cap uygulandı: {POSITION_SIZING_MAX_NOTIONAL_MULTIPLIER:.2f}x hesap boyutu."
+                    if capped else "Notional cap tetiklenmedi."
+                ),
+            ],
         }
 
     symbol = result.get("symbol")
@@ -2163,6 +2224,11 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
     )
     risk_amount = ACCOUNT_SIZE_USD * risk_pct
     position_notional = risk_amount / stop_pct if stop_pct > 0 else 0.0
+    notional_cap = ACCOUNT_SIZE_USD * POSITION_SIZING_MAX_NOTIONAL_MULTIPLIER
+    capped = False
+    if position_notional > notional_cap:
+        position_notional = notional_cap
+        capped = True
 
     if risk_pct >= base_risk * 1.35:
         mode = "GROWTH"
@@ -2178,6 +2244,10 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         f"Loss streak {loss_streak} çarpanı x{ls_mult:.2f}",
         *edge_notes,
     ]
+    if capped:
+        reasons.append(
+            f"Notional cap uygulandı: {POSITION_SIZING_MAX_NOTIONAL_MULTIPLIER:.2f}x hesap boyutu."
+        )
 
     return {
         "enabled": True,
@@ -2186,6 +2256,8 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         "risk_pct": risk_pct,
         "risk_amount": risk_amount,
         "position_notional": position_notional,
+        "notional_cap": notional_cap,
+        "notional_capped": capped,
         "multiplier": round(raw_multiplier, 3),
         "loss_streak": loss_streak,
         "quality_multiplier": q_mult,
@@ -4351,6 +4423,7 @@ def main() -> None:
     import signal as _signal
 
     validate_env()
+    validate_runtime_config()
     load_and_apply_adaptive_config()
     atexit.register(shutdown_resources)
 
