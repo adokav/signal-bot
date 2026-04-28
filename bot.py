@@ -36,7 +36,7 @@ from flask import Flask
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-__version__ = "1.3.1-quality-regime"
+__version__ = "1.4.1-tracking-edge"
 
 # ============================================================
 # LOGGING
@@ -139,7 +139,7 @@ COINS: dict[str, str] = {
 # ============================================================
 
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
-STATE_VERSION = 3  # Migration için
+STATE_VERSION = 4  # Migration için
 
 SCAN_INTERVAL = env_int("SCAN_INTERVAL", 300, min_value=15)
 COOLDOWN_SECONDS = env_int("COOLDOWN_SECONDS", 900, min_value=0)
@@ -154,8 +154,15 @@ MOVEMENT_ALERT_COOLDOWN_SECONDS = env_int(
     "MOVEMENT_ALERT_COOLDOWN_SECONDS", 30 * 60, min_value=0
 )
 
-SEND_STANDALONE_NEWS_ALERTS = os.getenv("SEND_STANDALONE_NEWS_ALERTS", "1") == "1"
-SEND_MOVEMENT_ALERTS = os.getenv("SEND_MOVEMENT_ALERTS", "1") == "1"
+# Telegram noise control:
+# Default behavior: only trade open/close messages + hourly heartbeat.
+SEND_STANDALONE_NEWS_ALERTS = os.getenv("SEND_STANDALONE_NEWS_ALERTS", "0") == "1"
+SEND_MOVEMENT_ALERTS = os.getenv("SEND_MOVEMENT_ALERTS", "0") == "1"
+SEND_SUMMARY_MESSAGES = os.getenv("SEND_SUMMARY_MESSAGES", "0") == "1"
+
+TRADE_TRACKING_ENABLED = os.getenv("TRADE_TRACKING_ENABLED", "1") == "1"
+TRADE_OPEN_COOLDOWN_SECONDS = env_int("TRADE_OPEN_COOLDOWN_SECONDS", 4 * 60 * 60, min_value=0)
+TRADE_ALERT_RETRY_SECONDS = env_int("TRADE_ALERT_RETRY_SECONDS", 5 * 60, min_value=30)
 
 # Hata sonrası bekleme süreleri
 ERROR_BACKOFF_SHORT = env_int("ERROR_BACKOFF_SHORT", 60, min_value=1)
@@ -950,7 +957,7 @@ class StateManager:
 
     @staticmethod
     def _fresh_state() -> dict:
-        return {"version": STATE_VERSION, "symbols": {}, "meta": {}}
+        return {"version": STATE_VERSION, "symbols": {}, "meta": {}, "trades": {}}
 
     @staticmethod
     def _migrate(data: dict) -> dict:
@@ -967,11 +974,12 @@ class StateManager:
                 "last_news_alert_hash": data.get("_last_news_alert_hash"),
             }
             log.info("State v1 → v%d migration uygulandı.", STATE_VERSION)
-            return {"version": STATE_VERSION, "symbols": symbols, "meta": meta}
+            return {"version": STATE_VERSION, "symbols": symbols, "meta": meta, "trades": {}}
 
         # Eksik alanları doldur (forward compat)
         data.setdefault("symbols", {})
         data.setdefault("meta", {})
+        data.setdefault("trades", {})
         if version < 3:
             for symbol_state in data["symbols"].values():
                 if isinstance(symbol_state, dict):
@@ -979,6 +987,17 @@ class StateManager:
                     symbol_state.setdefault("updated_at", 0)
                     symbol_state.setdefault("actionable", symbol_state.get("signal") in ("LONG", "SHORT"))
             log.info("State v%s → v3 migration uygulandı.", version)
+        if version < 4:
+            for trade in data["trades"].values():
+                if not isinstance(trade, dict):
+                    continue
+                is_closed = trade.get("result") is not None
+                trade.setdefault("open_alert_sent", True)
+                trade.setdefault("open_alert_pending", False)
+                trade.setdefault("close_alert_sent", is_closed)
+                trade.setdefault("close_alert_pending", False)
+                trade.setdefault("last_notify_attempt_ts", 0)
+            log.info("State v%s → v4 migration uygulandı.", version)
         data["version"] = STATE_VERSION
         return data
 
@@ -1018,6 +1037,16 @@ class StateManager:
     def update_symbol(self, symbol: str, value: dict) -> None:
         with self._lock:
             self._state["symbols"][symbol] = value
+
+    def get_trades(self) -> dict:
+        """Open/closed tracked trades copy."""
+        with self._lock:
+            return copy.deepcopy(self._state.setdefault("trades", {}))
+
+    def update_trades(self, trades: dict) -> None:
+        """Replace tracked trades atomically inside state."""
+        with self._lock:
+            self._state["trades"] = copy.deepcopy(trades)
 
 
 # Global state manager
@@ -2177,19 +2206,28 @@ def portfolio_risk_check(result: dict, state_mgr: StateManager) -> dict:
         return {"allowed": True, "reason": "Sinyal yok."}
     snapshot = state_mgr.snapshot()
     symbols = snapshot.get("symbols", {})
-    active_items = [
-        (sym, v)
-        for sym, v in symbols.items()
-        if sym != result["symbol"]
-        and v.get("signal") in ("LONG", "SHORT")
-        and v.get("actionable", True)
-    ]
-    active = [v for _, v in active_items]
+    trades = snapshot.get("trades", {})
+    exposures: dict[str, dict] = {}
+
+    for sym, v in symbols.items():
+        if (
+            sym != result["symbol"]
+            and v.get("signal") in ("LONG", "SHORT")
+            and v.get("actionable", True)
+        ):
+            exposures[sym] = {"symbol": sym, "signal": v["signal"], "group": COINS.get(sym)}
+
+    for t in trades.values():
+        sym = t.get("symbol")
+        if not sym or sym == result["symbol"] or t.get("result") is not None:
+            continue
+        direction = t.get("direction")
+        if direction in ("LONG", "SHORT"):
+            exposures[sym] = {"symbol": sym, "signal": direction, "group": COINS.get(sym)}
+
+    active = list(exposures.values())
     same_dir = [v for v in active if v.get("signal") == result["signal"]]
-    high_beta_active = 0
-    for sym, v in active_items:
-        if v.get("signal") in ("LONG", "SHORT") and COINS.get(sym) == "HIGH_BETA":
-            high_beta_active += 1
+    high_beta_active = sum(1 for v in active if v.get("group") == "HIGH_BETA")
     if len(active) >= PORTFOLIO_LIMITS["max_active_signals"]:
         return {"allowed": False, "reason": "Maksimum aktif sinyal limiti dolu."}
     if len(same_dir) >= PORTFOLIO_LIMITS["max_same_direction"]:
@@ -2360,6 +2398,364 @@ def mark_movement_alert_sent(state_mgr: StateManager, symbol: str) -> None:
     state_mgr.set_meta(f"last_movement_alert_ts_{symbol}", now_ts())
 
 
+
+# ============================================================
+# TRADE TRACKING + EDGE ANALYZER
+# ============================================================
+
+def get_trades(state_mgr: StateManager = _STATE_MGR) -> dict:
+    return state_mgr.get_trades()
+
+
+def save_trades(trades: dict, state_mgr: StateManager = _STATE_MGR) -> None:
+    state_mgr.update_trades(trades)
+    state_mgr.save()
+
+
+def active_trade_exists(symbol: str, state_mgr: StateManager = _STATE_MGR) -> bool:
+    for t in get_trades(state_mgr).values():
+        if t.get("symbol") == symbol and t.get("result") is None:
+            return True
+    return False
+
+
+def _trade_id(symbol: str) -> str:
+    return f"{symbol}_{now_ts()}_{random.randint(1000, 9999)}"
+
+
+def can_open_new_trade(result: dict, state_mgr: StateManager) -> tuple[bool, str]:
+    if not TRADE_TRACKING_ENABLED:
+        return False, "Trade tracking disabled."
+    if result.get("signal") not in ("LONG", "SHORT"):
+        return False, "LONG/SHORT sinyali yok."
+    if not result.get("actionable", True):
+        return False, "Sinyal actionable değil."
+    if active_trade_exists(result["symbol"], state_mgr):
+        return False, "Bu sembolde açık trade var."
+
+    last_key = f"last_trade_open_ts_{result['symbol']}"
+    last_open = int(state_mgr.get_meta(last_key, 0) or 0)
+    if TRADE_OPEN_COOLDOWN_SECONDS > 0 and now_ts() - last_open < TRADE_OPEN_COOLDOWN_SECONDS:
+        remain = TRADE_OPEN_COOLDOWN_SECONDS - (now_ts() - last_open)
+        return False, f"Trade open cooldown aktif ({remain//60} dk)."
+
+    return True, "Trade açılabilir."
+
+
+def format_trade_open_msg(t: dict) -> str:
+    tq = t.get("trade_quality") or {}
+    regime = t.get("regime") or {}
+    return (
+        "🚀 TRADE OPENED\n\n"
+        f"{t['symbol']} → {t['direction']}\n\n"
+        f"Entry: {format_price(t['entry'])}\n"
+        f"Entry Zone: {format_price(t.get('entry_zone_low'))} - {format_price(t.get('entry_zone_high'))}\n"
+        f"Stop: {format_price(t['stop'])}\n"
+        f"TP1: {format_price(t['tp1'])}\n"
+        f"TP2: {format_price(t['tp2'])}\n"
+        f"TP3: {format_price(t['tp3'])}\n\n"
+        f"Score: {t.get('score')}\n"
+        f"Confidence: %{t.get('confidence', 0)}\n"
+        f"Quality: {tq.get('grade', '-')}, score {tq.get('score', '-')}\n"
+        f"Regime: {regime.get('regime', '-')}\n"
+        f"Risk: {format_money(t.get('risk_amount'))} | Notional: {format_money(t.get('position_notional'))}\n\n"
+        f"Not: Bu mesaj otomatik emir değildir; botun trade tracking kaydıdır.\n"
+        f"Zaman: {tr_now_text()}"
+    )
+
+
+def format_trade_close_msg(t: dict) -> str:
+    duration = 0
+    if t.get("closed_at") and t.get("opened_at"):
+        duration = (int(t["closed_at"]) - int(t["opened_at"])) // 60
+
+    return (
+        "🏁 TRADE CLOSED\n\n"
+        f"{t['symbol']} → {t['direction']}\n"
+        f"Result: {t['result']}\n"
+        f"Close Reason: {t.get('close_reason', '-')}\n"
+        f"Exit Price: {format_price(t.get('exit_price'))}\n\n"
+        f"PnL: %{t.get('pnl_pct', 0) * 100:.2f}\n"
+        f"Max Favorable: %{t.get('max_favor', 0) * 100:.2f}\n"
+        f"Max Adverse: %{t.get('max_adverse', 0) * 100:.2f}\n\n"
+        f"Süre: {duration} dk\n"
+        f"Zaman: {tr_now_text()}"
+    )
+
+
+def _mark_trade_notification(
+    t: dict,
+    *,
+    kind: str,
+    sent: bool,
+) -> None:
+    now = now_ts()
+    t["last_notify_attempt_ts"] = now
+    if kind == "open":
+        t["open_alert_sent"] = bool(sent)
+        t["open_alert_pending"] = not sent
+    else:
+        t["close_alert_sent"] = bool(sent)
+        t["close_alert_pending"] = not sent
+
+
+def _send_trade_notification(t: dict, kind: str) -> bool:
+    if kind == "open":
+        sent = send_message(format_trade_open_msg(t))
+    else:
+        sent = send_message(format_trade_close_msg(t))
+    _mark_trade_notification(t, kind=kind, sent=sent)
+    return sent
+
+
+def open_trade(result: dict, plan: dict, state_mgr: StateManager = _STATE_MGR) -> bool:
+    allowed, reason = can_open_new_trade(result, state_mgr)
+    if not allowed:
+        log.info("%s trade açılmadı: %s", result.get("symbol"), reason)
+        return False
+
+    trade_id = _trade_id(result["symbol"])
+    trades = get_trades(state_mgr)
+
+    trade = {
+        "id": trade_id,
+        "symbol": result["symbol"],
+        "direction": result["signal"],
+        "entry": float(plan["reference_entry"]),
+        "entry_zone_low": float(plan.get("entry_zone_low", plan["reference_entry"])),
+        "entry_zone_high": float(plan.get("entry_zone_high", plan["reference_entry"])),
+        "stop": float(plan["stop_price"]),
+        "tp1": float(plan["tp1"]),
+        "tp2": float(plan["tp2"]),
+        "tp3": float(plan["tp3"]),
+        "risk_amount": float(plan.get("risk_amount", 0)),
+        "position_notional": float(plan.get("position_notional", 0)),
+        "quantity": float(plan.get("quantity", 0)),
+        "opened_at": now_ts(),
+        "closed_at": None,
+        "result": None,
+        "close_reason": None,
+        "exit_price": None,
+        "pnl_pct": 0.0,
+        "max_favor": 0.0,
+        "max_adverse": 0.0,
+        "score": result.get("score"),
+        "confidence": result.get("confidence"),
+        "level": result.get("level"),
+        "trade_quality": copy.deepcopy(result.get("trade_quality", {})),
+        "regime": copy.deepcopy(result.get("regime", {})),
+        "session": copy.deepcopy(result.get("session_context", {})),
+        "news_context": copy.deepcopy(result.get("news_context", {})),
+        "raw": copy.deepcopy(result.get("raw", {})),
+        "open_alert_sent": False,
+        "open_alert_pending": True,
+        "close_alert_sent": False,
+        "close_alert_pending": False,
+        "last_notify_attempt_ts": 0,
+    }
+
+    sent = _send_trade_notification(trade, "open")
+    trades[trade_id] = trade
+    state_mgr.set_meta(f"last_trade_open_ts_{result['symbol']}", now_ts())
+    save_trades(trades, state_mgr)
+
+    return sent
+
+
+def _trade_pnl(direction: str, entry: float, price: float) -> float:
+    if entry <= 0:
+        return 0.0
+    if direction == "LONG":
+        return (price - entry) / entry
+    return (entry - price) / entry
+
+
+def close_trade(trades: dict, tid: str, t: dict, price: float, result: str, reason: str) -> None:
+    t["result"] = result
+    t["close_reason"] = reason
+    t["closed_at"] = now_ts()
+    t["exit_price"] = float(price)
+    t["pnl_pct"] = _trade_pnl(t["direction"], float(t["entry"]), float(price))
+    t["open_alert_pending"] = False
+    _send_trade_notification(t, "close")
+    trades[tid] = t
+
+
+def update_trades(results_by_symbol: dict, state_mgr: StateManager = _STATE_MGR) -> None:
+    """TP2/STOP ve MFE/MAE tracking. TP2 = WIN, STOP = LOSS."""
+    if not TRADE_TRACKING_ENABLED:
+        return
+
+    trades = get_trades(state_mgr)
+    changed = False
+
+    for tid, t in list(trades.items()):
+        if t.get("result") is not None:
+            continue
+
+        symbol = t.get("symbol")
+        result = results_by_symbol.get(symbol)
+        if not result:
+            continue
+
+        price = float(result["features"]["last"])
+        entry = float(t["entry"])
+        direction = t["direction"]
+        pnl = _trade_pnl(direction, entry, price)
+
+        t["max_favor"] = max(float(t.get("max_favor", 0)), pnl)
+        t["max_adverse"] = min(float(t.get("max_adverse", 0)), pnl)
+
+        if (direction == "LONG" and price <= float(t["stop"])) or (
+            direction == "SHORT" and price >= float(t["stop"])
+        ):
+            close_trade(trades, tid, t, price, "LOSS", "STOP")
+            changed = True
+            continue
+
+        if (direction == "LONG" and price >= float(t["tp2"])) or (
+            direction == "SHORT" and price <= float(t["tp2"])
+        ):
+            close_trade(trades, tid, t, price, "WIN", "TP2")
+            changed = True
+            continue
+
+        trades[tid] = t
+        changed = True
+
+    if changed:
+        save_trades(trades, state_mgr)
+
+
+def close_trades_on_signal_change(symbol: str, result: dict, state_mgr: StateManager = _STATE_MGR) -> None:
+    """Sinyal yönü bozulursa açık trade'i EXIT_SIGNAL ile kapat."""
+    if not TRADE_TRACKING_ENABLED:
+        return
+    trades = get_trades(state_mgr)
+    changed = False
+    current_signal = result.get("raw_signal", result.get("signal"))
+    price = float(result["features"]["last"])
+
+    for tid, t in list(trades.items()):
+        if t.get("result") is not None or t.get("symbol") != symbol:
+            continue
+        if current_signal != t.get("direction"):
+            close_trade(trades, tid, t, price, "EXIT", "SIGNAL_CHANGED_OR_CANCELLED")
+            changed = True
+
+    if changed:
+        save_trades(trades, state_mgr)
+
+
+def close_trades_on_signal_changes(results_by_symbol: dict, state_mgr: StateManager = _STATE_MGR) -> None:
+    for symbol, result in results_by_symbol.items():
+        close_trades_on_signal_change(symbol, result, state_mgr)
+
+
+def retry_pending_trade_alerts(state_mgr: StateManager = _STATE_MGR) -> None:
+    if not TRADE_TRACKING_ENABLED:
+        return
+    trades = get_trades(state_mgr)
+    changed = False
+    now = now_ts()
+
+    for tid, t in list(trades.items()):
+        last_attempt = int(t.get("last_notify_attempt_ts", 0) or 0)
+        if now - last_attempt < TRADE_ALERT_RETRY_SECONDS:
+            continue
+
+        if t.get("result") is None and t.get("open_alert_pending"):
+            _send_trade_notification(t, "open")
+            trades[tid] = t
+            changed = True
+        elif t.get("result") is not None and t.get("close_alert_pending"):
+            _send_trade_notification(t, "close")
+            trades[tid] = t
+            changed = True
+
+    if changed:
+        save_trades(trades, state_mgr)
+
+
+def edge_analysis(state_mgr: StateManager = _STATE_MGR) -> dict:
+    trades = list(get_trades(state_mgr).values())
+    closed = [t for t in trades if t.get("result") is not None]
+    if not closed:
+        return {"ready": False, "summary": "Henüz kapanmış trade yok."}
+
+    wins = [t for t in closed if t.get("result") == "WIN"]
+    losses = [t for t in closed if t.get("result") == "LOSS"]
+    winrate = len(wins) / len(closed) * 100 if closed else 0.0
+    pnl_values = [float(t.get("pnl_pct", 0)) for t in closed]
+    avg_pnl = sum(pnl_values) / len(pnl_values) * 100
+    win_pnls = [float(t.get("pnl_pct", 0)) for t in wins]
+    loss_pnls = [float(t.get("pnl_pct", 0)) for t in losses]
+    avg_win = sum(win_pnls) / len(win_pnls) * 100 if win_pnls else 0.0
+    avg_loss = sum(loss_pnls) / len(loss_pnls) * 100 if loss_pnls else 0.0
+    gross_win = sum(max(p, 0) for p in pnl_values)
+    gross_loss = abs(sum(min(p, 0) for p in pnl_values))
+    profit_factor = gross_win / gross_loss if gross_loss > 0 else None
+
+    by_symbol: dict[str, dict] = {}
+    by_direction: dict[str, dict] = {}
+    by_regime: dict[str, dict] = {}
+    by_quality: dict[str, dict] = {}
+
+    def bucket_update(bucket: dict, key: str, trade: dict) -> None:
+        item = bucket.setdefault(key, {"total": 0, "wins": 0, "pnl_sum": 0.0})
+        item["total"] += 1
+        item["wins"] += 1 if trade.get("result") == "WIN" else 0
+        item["pnl_sum"] += float(trade.get("pnl_pct", 0)) * 100
+
+    for t in closed:
+        bucket_update(by_symbol, t.get("symbol", "?"), t)
+        bucket_update(by_direction, t.get("direction", "?"), t)
+        reg = (t.get("regime") or {}).get("regime", "UNKNOWN")
+        bucket_update(by_regime, reg, t)
+        grade = (t.get("trade_quality") or {}).get("grade", "UNKNOWN")
+        bucket_update(by_quality, grade, t)
+
+    def compact(bucket: dict) -> dict:
+        out = {}
+        for k, v in bucket.items():
+            out[k] = {
+                "total": v["total"],
+                "winrate": round(v["wins"] / v["total"] * 100, 1) if v["total"] else 0,
+                "avg_pnl": round(v["pnl_sum"] / v["total"], 2) if v["total"] else 0,
+            }
+        return out
+
+    return {
+        "ready": len(closed) >= 5,
+        "closed_trades": len(closed),
+        "open_trades": len([t for t in trades if t.get("result") is None]),
+        "wins": len(wins),
+        "losses": len(losses),
+        "winrate": round(winrate, 1),
+        "avg_pnl": round(avg_pnl, 2),
+        "avg_win": round(avg_win, 2),
+        "avg_loss": round(avg_loss, 2),
+        "expectancy": round(avg_pnl, 2),
+        "profit_factor": round(profit_factor, 2) if profit_factor is not None else None,
+        "by_symbol": compact(by_symbol),
+        "by_direction": compact(by_direction),
+        "by_regime": compact(by_regime),
+        "by_quality": compact(by_quality),
+    }
+
+
+def format_edge_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    ea = edge_analysis(state_mgr)
+    if not ea.get("closed_trades"):
+        return "Edge: kapanmış trade yok."
+
+    pf = ea.get("profit_factor")
+    pf_text = f"{pf}" if pf is not None else "∞"
+    return (
+        f"Edge: {ea['closed_trades']} kapalı / {ea['open_trades']} açık | "
+        f"WR %{ea['winrate']} | Exp %{ea['expectancy']} | PF {pf_text}"
+    )
+
 # ============================================================
 # BOT LOOP — modülerleştirilmiş
 # ============================================================
@@ -2416,29 +2812,22 @@ def _process_symbol(
         result["portfolio_check"] = portfolio_risk_check(result, state_mgr)
         result = apply_trade_filters(result)
 
-        # Movement alert (sinyal bağımsız)
+        # Noise-free mode:
+        # - Standalone signal detail messages are suppressed
+        # - Trade tracking engine opens/closes trades and sends trade-level messages
+        old = state_mgr.get_symbol(symbol)
+        pending = None
+        last_alert_ts = old.get("last_alert_ts", 0) if old else 0
+
         if SEND_MOVEMENT_ALERTS:
             movement_reasons = detect_movement_alert(symbol, result)
             if movement_reasons and not should_movement_alert_cooldown(state_mgr, symbol):
                 if send_message(format_movement_alert(symbol, result, movement_reasons)):
                     mark_movement_alert_sent(state_mgr, symbol)
 
-        # Sinyal alert
-        old = state_mgr.get_symbol(symbol)
-        pending = old.get("pending_alert_type") if old else None
-        if pending_alert_still_relevant(pending, result):
-            alert_type = pending
-        else:
-            pending = None
-            alert_type = decide_alert(old, result)
-
-        last_alert_ts = old.get("last_alert_ts", 0) if old else 0
-        if alert_type and not should_cooldown(old, alert_type):
-            if send_message(format_signal(result, alert_type)):
-                last_alert_ts = now_ts()
-                pending = None
-            else:
-                pending = alert_type
+        plan = build_trade_plan(result)
+        if plan and result.get("signal") in ("LONG", "SHORT") and result.get("actionable", True):
+            open_trade(result, plan, state_mgr)
 
         state_mgr.update_symbol(symbol, {
             "signal": result["signal"],
@@ -2470,7 +2859,7 @@ def _send_periodic_messages(
 ) -> None:
     """Özet ve heartbeat mesajları."""
     last_summary = state_mgr.get_meta("last_summary_ts", 0)
-    if now_ts() - last_summary >= SUMMARY_INTERVAL_SECONDS:
+    if SEND_SUMMARY_MESSAGES and now_ts() - last_summary >= SUMMARY_INTERVAL_SECONDS:
         if results:
             send_message(make_summary(results, session_ctx, news_ctx))
         # results boş olsa bile ts ilerletilsin ki bir sonraki dilim
@@ -2480,13 +2869,9 @@ def _send_periodic_messages(
     last_heartbeat = state_mgr.get_meta("last_heartbeat_ts", 0)
     if now_ts() - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
         send_message(
-            f"✅ Bot aktif (v{__version__})\n"
+            f"✅ BOT AKTİF (v{__version__})\n\n"
             f"Son kontrol: {tr_now_text()}\n"
-            f"Seans: {session_ctx.session}\n"
-            f"Makro: x{session_ctx.macro_multiplier} | "
-            f"Mikro: x{session_ctx.micro_multiplier} | "
-            f"News: x{session_ctx.news_multiplier}\n"
-            f"Haber: {news_ctx['category']} (risk {news_ctx['news_risk_score']})"
+            f"{format_edge_brief(state_mgr)}"
         )
         state_mgr.set_meta("last_heartbeat_ts", now_ts())
 
@@ -2566,6 +2951,11 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
                 )
                 if result:
                     results.append(result)
+
+            results_by_symbol = {r["symbol"]: r for r in results}
+            update_trades(results_by_symbol, state_mgr)
+            close_trades_on_signal_changes(results_by_symbol, state_mgr)
+            retry_pending_trade_alerts(state_mgr)
 
             _send_periodic_messages(state_mgr, results, session_ctx, news_context)
 
