@@ -205,14 +205,15 @@ ERROR_BACKOFF_LONG = env_int("ERROR_BACKOFF_LONG", 300, min_value=1)
 
 KLINE_LIMIT = env_int("KLINE_LIMIT", 100, min_value=60)
 VOLUME_WINDOW = env_int("VOLUME_WINDOW", 30, min_value=5)
-MIN_KLINES_5M = 13                       # ret_1h için en az 13 bar (12 offset)
-MIN_KLINES_15M = 17                      # ret_4h için en az 17 bar (16 offset)
+MIN_KLINES_5M = 14                       # son kapanmış bar referansıyla ret_1h için
+MIN_KLINES_15M = 18                      # son kapanmış bar referansıyla ret_4h için
 
-# Periodlar (kline index offset'leri)
-RET_5M_OFFSET = 2
-RET_15M_OFFSET = 4
-RET_1H_OFFSET = 12     # 5m bar × 12 = 60 dk
-RET_4H_OFFSET = 16     # 15m bar × 16 = 240 dk
+# Periodlar (bar adedi)
+# Not: Getiri hesapları "son kapanmış bar" üzerinden yapılır (-2 index).
+RET_5M_BARS = 1        # 5m
+RET_15M_BARS = 3       # 15m (5m × 3)
+RET_1H_BARS = 12       # 60m (5m × 12)
+RET_4H_BARS = 16       # 240m (15m × 16)
 
 # EMA periyotları
 EMA_FAST = 9
@@ -904,6 +905,22 @@ def pct(a: float, b: float) -> float:
     return (a - b) / b * 100.0
 
 
+def closed_bar_return(closes: list[float], bars: int, *, series_name: str) -> float:
+    """Son kapanmış bara göre getiri hesapla.
+
+    MEXC kline endpoint'i son barı henüz kapanmamış verebildiği için hesap
+    daima closes[-2] üzerinden yapılır. Bu, sinyal jitter'ını azaltır.
+    """
+    need = bars + 2  # latest closed (-2) ve referans için
+    if len(closes) < need:
+        raise ValueError(
+            f"{series_name} için yetersiz bar: gerekli={need}, mevcut={len(closes)}"
+        )
+    latest_closed = closes[-2]
+    reference = closes[-(bars + 2)]
+    return pct(latest_closed, reference)
+
+
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
@@ -1493,27 +1510,28 @@ def get_features(symbol: str) -> dict:
     ema21_4h = ema(closes_4h, EMA_MID)
     ema50_4h = ema(closes_4h, EMA_SLOW)
 
-    # Returns (negatif index ile son N bar öncesi)
-    ret_5m = pct(closes_5[-1], closes_5[-RET_5M_OFFSET])
-    ret_15m = pct(closes_5[-1], closes_5[-RET_15M_OFFSET])
-    ret_1h = pct(closes_5[-1], closes_5[-RET_1H_OFFSET])
-    ret_4h = pct(closes_15[-1], closes_15[-RET_4H_OFFSET])
-    ret_1h_tf = pct(closes_1h[-1], closes_1h[-2])
-    ret_4h_tf = pct(closes_4h[-1], closes_4h[-2])
-    ret_24h_tf = pct(closes_4h[-1], closes_4h[-7])
+    # Returns: son kapanmış bar baz alınır (incomplete candle gürültüsünü azaltır)
+    ret_5m = closed_bar_return(closes_5, RET_5M_BARS, series_name=f"{symbol}.5m")
+    ret_15m = closed_bar_return(closes_5, RET_15M_BARS, series_name=f"{symbol}.5m")
+    ret_1h = closed_bar_return(closes_5, RET_1H_BARS, series_name=f"{symbol}.5m")
+    ret_4h = closed_bar_return(closes_15, RET_4H_BARS, series_name=f"{symbol}.15m")
+    ret_1h_tf = closed_bar_return(closes_1h, 1, series_name=f"{symbol}.1h")
+    ret_4h_tf = closed_bar_return(closes_4h, 1, series_name=f"{symbol}.4h")
+    ret_24h_tf = closed_bar_return(closes_4h, 6, series_name=f"{symbol}.4h")
 
-    # Hacim oranı: son barın, önceki VOLUME_WINDOW barın median'ına oranı
-    recent_vols = volumes_5[-(VOLUME_WINDOW + 1):-1]
+    # Hacim oranı: son kapanmış barın, önceki VOLUME_WINDOW kapanmış bar median'ına oranı
+    recent_vols = volumes_5[-(VOLUME_WINDOW + 2):-2]
     if recent_vols:
         median_vol = statistics.median(recent_vols)
-        vol_ratio = volumes_5[-1] / median_vol if median_vol > 0 else 1.0
+        vol_ratio = volumes_5[-2] / median_vol if median_vol > 0 else 1.0
     else:
         vol_ratio = 1.0
 
     bid = _to_float(book["bidPrice"], f"{symbol}.bid")
     ask = _to_float(book["askPrice"], f"{symbol}.ask")
     mid = (bid + ask) / 2
-    spread_bps = ((ask - bid) / mid) * 10000 if mid else 999.0
+    raw_spread_bps = ((ask - bid) / mid) * 10000 if mid else 999.0
+    spread_bps = max(0.0, raw_spread_bps)
 
     try:
         change_24h = _to_float(ticker.get("priceChangePercent", 0), f"{symbol}.change_24h")
