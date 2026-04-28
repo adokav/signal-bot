@@ -1,16 +1,16 @@
 """
-Signal Bot - Integrated Movement + News + Session + Basis.
+Signal Bot — Integrated Movement + News + Session + Basis
 
-Production-grade kripto sinyal botu. MEXC uzerinden coin verilerini ceker,
-makro/trend/momentum/volume/likidite/basis skorlarini hesaplar, news katmani
-ile yon-bagimli modulasyon uygular ve Telegram'a sinyal gonderir.
+Production-grade kripto sinyal botu. MEXC üzerinden coin verilerini çeker,
+makro/trend/momentum/volume/likidite/basis skorlarını hesaplar, news katmanı
+ile yön-bağımlı modülasyon uygular ve Telegram'a sinyal gönderir.
 
 Mimari:
     - Flask: health endpoint
-    - Background thread: ana bot dongusu
-    - State: atomik dosya yazimi + thread-safe
-    - HTTP: thread-local requests.Session, bounded concurrency, akilli retry
-    - News: NewsAPI + GDELT, kategori bazli keyword classification
+    - Background thread: ana bot döngüsü
+    - State: atomik dosya yazımı + thread-safe
+    - HTTP: requests.Session ile connection pooling, akıllı retry
+    - News: NewsAPI + GDELT, kategori bazlı keyword classification
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ from flask import Flask
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-__version__ = "1.2.0"
+__version__ = "1.3.1-quality-regime"
 
 # ============================================================
 # LOGGING
@@ -78,9 +78,8 @@ def env_float(name: str, default: float, *, min_value: Optional[float] = None) -
         return default
     return value
 
-
 # ============================================================
-# ENV VARIABLES
+# ENV VARIABLES (validation at startup)
 # ============================================================
 
 TOKEN = os.getenv("TOKEN")
@@ -90,9 +89,9 @@ PORT = env_int("PORT", 10000, min_value=1)
 
 
 def validate_env() -> None:
-    """Startup-time env validation.
+    """Startup-time env validation. Eksik kritik değişkenleri logla.
 
-    STRICT_ENV=1 verilirse kritik degisken eksiginde process baslamaz.
+    STRICT_ENV=1 verilmişse kritik değişken eksikse exit eder (production).
     """
     missing = []
     if not TOKEN:
@@ -100,17 +99,17 @@ def validate_env() -> None:
     if not CHAT_ID:
         missing.append("CHAT_ID")
     if missing:
-        msg = f"Eksik env degiskenleri: {', '.join(missing)} - Telegram mesajlari gonderilemez."
+        msg = f"Eksik env değişkenleri: {', '.join(missing)} — Telegram mesajları gönderilemez."
         if os.getenv("STRICT_ENV") == "1":
             log.error(msg)
             raise SystemExit(1)
         log.warning(msg)
     if not NEWS_API_KEY:
-        log.info("NEWS_API_KEY eksik - sadece GDELT kullanilacak.")
+        log.info("NEWS_API_KEY eksik — sadece GDELT kullanılacak.")
 
 
 # ============================================================
-# CONSTANTS - BASE URLS
+# CONSTANTS — BASE URLS
 # ============================================================
 
 MEXC_SPOT_BASE = "https://api.mexc.com"
@@ -136,11 +135,11 @@ COINS: dict[str, str] = {
 }
 
 # ============================================================
-# TIMING CONFIG
+# TIMING CONFIG (saniye cinsinden)
 # ============================================================
 
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
-STATE_VERSION = 3
+STATE_VERSION = 3  # Migration için
 
 SCAN_INTERVAL = env_int("SCAN_INTERVAL", 300, min_value=15)
 COOLDOWN_SECONDS = env_int("COOLDOWN_SECONDS", 900, min_value=0)
@@ -155,9 +154,10 @@ MOVEMENT_ALERT_COOLDOWN_SECONDS = env_int(
     "MOVEMENT_ALERT_COOLDOWN_SECONDS", 30 * 60, min_value=0
 )
 
-SEND_STANDALONE_NEWS_ALERTS = os.getenv("SEND_STANDALONE_NEWS_ALERTS", "0") == "1"
-SEND_MOVEMENT_ALERTS = os.getenv("SEND_MOVEMENT_ALERTS", "0") == "1"
+SEND_STANDALONE_NEWS_ALERTS = os.getenv("SEND_STANDALONE_NEWS_ALERTS", "1") == "1"
+SEND_MOVEMENT_ALERTS = os.getenv("SEND_MOVEMENT_ALERTS", "1") == "1"
 
+# Hata sonrası bekleme süreleri
 ERROR_BACKOFF_SHORT = env_int("ERROR_BACKOFF_SHORT", 60, min_value=1)
 ERROR_BACKOFF_LONG = env_int("ERROR_BACKOFF_LONG", 300, min_value=1)
 
@@ -165,19 +165,26 @@ ERROR_BACKOFF_LONG = env_int("ERROR_BACKOFF_LONG", 300, min_value=1)
 # FEATURE / KLINE CONFIG
 # ============================================================
 
-KLINE_LIMIT = env_int("KLINE_LIMIT", 100, min_value=20)
+KLINE_LIMIT = env_int("KLINE_LIMIT", 100, min_value=60)
 VOLUME_WINDOW = env_int("VOLUME_WINDOW", 30, min_value=5)
-MIN_KLINES_5M = 13
-MIN_KLINES_15M = 17
+MIN_KLINES_5M = 13                       # ret_1h için en az 13 bar (12 offset)
+MIN_KLINES_15M = 17                      # ret_4h için en az 17 bar (16 offset)
 
+# Periodlar (kline index offset'leri)
 RET_5M_OFFSET = 2
 RET_15M_OFFSET = 4
-RET_1H_OFFSET = 12
-RET_4H_OFFSET = 16
+RET_1H_OFFSET = 12     # 5m bar × 12 = 60 dk
+RET_4H_OFFSET = 16     # 15m bar × 16 = 240 dk
 
+# EMA periyotları
 EMA_FAST = 9
 EMA_MID = 21
 EMA_SLOW = 50
+
+# Multi-timeframe engine için daha yüksek zaman dilimleri
+MIN_KLINES_1H = 55
+MIN_KLINES_4H = 55
+
 
 # ============================================================
 # MOVEMENT ALERT THRESHOLDS
@@ -187,18 +194,28 @@ MOVEMENT_ALERT_THRESHOLDS: dict[str, dict[str, float]] = {
     "CORE": {"ret_15m": 2.0, "ret_1h": 3.0, "volume_ratio": 2.5},
     "HIGH_BETA": {"ret_15m": 3.0, "ret_1h": 5.0, "volume_ratio": 2.0},
 }
-
 # ============================================================
-# TRADE PLAN CONFIG
+# TRADE PLAN CONFIG (sadece plan üretir, emir göndermez)
 # ============================================================
 
 ACCOUNT_SIZE_USD = env_float("ACCOUNT_SIZE_USD", 800.0, min_value=1.0)
 RISK_PCT_PER_TRADE = env_float("RISK_PCT_PER_TRADE", 0.01, min_value=0.0001)
 
 TRADE_PLAN_CONFIG: dict[str, dict[str, float]] = {
-    "CORE": {"stop_pct": 0.020, "tp1_r": 1.0, "tp2_r": 2.0, "tp3_r": 3.0},
-    "HIGH_BETA": {"stop_pct": 0.035, "tp1_r": 1.0, "tp2_r": 2.0, "tp3_r": 3.0},
+    "CORE": {
+        "stop_pct": 0.020,
+        "tp1_r": 1.0,
+        "tp2_r": 2.0,
+        "tp3_r": 3.0,
+    },
+    "HIGH_BETA": {
+        "stop_pct": 0.035,
+        "tp1_r": 1.0,
+        "tp2_r": 2.0,
+        "tp3_r": 3.0,
+    },
 }
+
 
 # ============================================================
 # SIGNAL CONFIG
@@ -210,7 +227,11 @@ if MIN_SIGNAL_LEVEL not in LEVEL_ORDER:
     log.warning("MIN_SIGNAL_LEVEL=%r gecersiz, MEDIUM kullaniliyor.", MIN_SIGNAL_LEVEL)
     MIN_SIGNAL_LEVEL = "MEDIUM"
 
-CRITICAL_ALERTS = frozenset({"❌ SİNYAL İPTAL", "🔄 YÖN DEĞİŞTİ", "🛑 NEWS VETO"})
+CRITICAL_ALERTS = frozenset({
+    "❌ SİNYAL İPTAL",
+    "🔄 YÖN DEĞİŞTİ",
+    "🛑 NEWS VETO",
+})
 
 THRESHOLDS: dict[str, dict[str, float]] = {
     "CORE": {"long": 1.55, "short": -1.55, "strong": 2.25},
@@ -218,27 +239,24 @@ THRESHOLDS: dict[str, dict[str, float]] = {
 }
 
 WEIGHTS: dict[str, dict[str, float]] = {
+    # mtf = higher-timeframe alignment. funding = crowding/squeeze filtresi.
     "CORE": {
-        "macro": 0.25,
-        "market": 0.22,
-        "trend": 0.18,
-        "momentum": 0.14,
-        "volume": 0.05,
-        "liquidity": 0.05,
-        "basis": 0.11,
+        "macro": 0.19, "market": 0.17, "mtf": 0.17, "trend": 0.14,
+        "momentum": 0.11, "volume": 0.04, "liquidity": 0.04,
+        "basis": 0.09, "funding": 0.05,
     },
     "HIGH_BETA": {
-        "macro": 0.15,
-        "market": 0.18,
-        "trend": 0.18,
-        "momentum": 0.23,
-        "volume": 0.10,
-        "liquidity": 0.06,
-        "basis": 0.10,
+        "macro": 0.11, "market": 0.14, "mtf": 0.15, "trend": 0.15,
+        "momentum": 0.21, "volume": 0.09, "liquidity": 0.05,
+        "basis": 0.05, "funding": 0.05,
     },
 }
 
-SPREAD_LIMITS: dict[str, float] = {"CORE": 12, "HIGH_BETA": 25}
+# Spread limits (basis points) — DRY: tek kaynaktan
+SPREAD_LIMITS: dict[str, float] = {
+    "CORE": 12,
+    "HIGH_BETA": 25,
+}
 
 SCORE_PARAMS: dict[str, dict[str, float]] = {
     "macro": {
@@ -248,9 +266,50 @@ SCORE_PARAMS: dict[str, dict[str, float]] = {
         "weight_ret_4h": 1.5,
     },
     "market": {"ret_1h_strong": 0.5},
-    "momentum": {"ret_5m_strong": 0.15, "ret_15m_strong": 0.35, "ret_1h_strong": 0.8},
+    "momentum": {
+        "ret_5m_strong": 0.15,
+        "ret_15m_strong": 0.35,
+        "ret_1h_strong": 0.8,
+    },
     "volume": {"spike": 2.0, "high": 1.3, "low": 0.6},
-    "veto": {"vol_low_high_beta": 0.7, "btc_unclear_1h": 0.25, "btc_unclear_4h": 0.40},
+    "veto": {
+        "vol_low_high_beta": 0.7,
+        "btc_unclear_1h": 0.25,
+        "btc_unclear_4h": 0.40,
+    },
+}
+
+# ============================================================
+# REGIME / QUALITY / PORTFOLIO CONFIG
+# ============================================================
+
+REGIME_CONFIG = {
+    "trend_ret_4h": 1.2,
+    "trend_ret_24h": 2.5,
+    "chop_ret_4h": 0.45,
+    "risk_off_news": -2.0,
+}
+
+TRADE_QUALITY_MIN_GRADE = os.getenv("TRADE_QUALITY_MIN_GRADE", "A")
+TRADE_QUALITY_ORDER = {"D": 0, "C": 1, "B": 2, "A": 3, "A+": 4}
+if TRADE_QUALITY_MIN_GRADE not in TRADE_QUALITY_ORDER:
+    log.warning(
+        "TRADE_QUALITY_MIN_GRADE=%r gecersiz, A kullaniliyor.",
+        TRADE_QUALITY_MIN_GRADE,
+    )
+    TRADE_QUALITY_MIN_GRADE = "A"
+
+PORTFOLIO_LIMITS = {
+    "max_active_signals": env_int("MAX_ACTIVE_SIGNALS", 2, min_value=1),
+    "max_same_direction": env_int("MAX_SAME_DIRECTION", 1, min_value=1),
+    "max_high_beta_active": env_int("MAX_HIGH_BETA_ACTIVE", 1, min_value=0),
+}
+
+FUNDING_CONFIG = {
+    "crowded_positive": 0.06,
+    "crowded_negative": -0.06,
+    "extreme_positive": 0.12,
+    "extreme_negative": -0.12,
 }
 
 # ============================================================
@@ -259,40 +318,19 @@ SCORE_PARAMS: dict[str, dict[str, float]] = {
 
 US_MARKET_HOLIDAYS: dict[int, set[str]] = {
     2025: {
-        "2025-01-01",
-        "2025-01-20",
-        "2025-02-17",
-        "2025-04-18",
-        "2025-05-26",
-        "2025-06-19",
-        "2025-07-04",
-        "2025-09-01",
-        "2025-11-27",
-        "2025-12-25",
+        "2025-01-01", "2025-01-20", "2025-02-17", "2025-04-18",
+        "2025-05-26", "2025-06-19", "2025-07-04", "2025-09-01",
+        "2025-11-27", "2025-12-25",
     },
     2026: {
-        "2026-01-01",
-        "2026-01-19",
-        "2026-02-16",
-        "2026-04-03",
-        "2026-05-25",
-        "2026-06-19",
-        "2026-07-03",
-        "2026-09-07",
-        "2026-11-26",
-        "2026-12-25",
+        "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03",
+        "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
+        "2026-11-26", "2026-12-25",
     },
     2027: {
-        "2027-01-01",
-        "2027-01-18",
-        "2027-02-15",
-        "2027-03-26",
-        "2027-05-31",
-        "2027-06-18",
-        "2027-07-05",
-        "2027-09-06",
-        "2027-11-25",
-        "2027-12-24",
+        "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26",
+        "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06",
+        "2027-11-25", "2027-12-24",
     },
 }
 
@@ -309,82 +347,47 @@ US_EARLY_CLOSE: dict[int, set[str]] = {
 NEWS_CATEGORIES: dict[str, dict[str, Any]] = {
     "WAR": {
         "keywords": [
-            "war",
-            "missile",
-            "attack",
-            "strike",
-            "military",
-            "iran",
-            "israel",
-            "taiwan",
-            "russia",
-            "ukraine",
-            "hormuz",
-            "nuclear",
-            "escalation",
-            "invasion",
+            "war", "missile", "attack", "strike", "military",
+            "iran", "israel", "taiwan", "russia", "ukraine",
+            "hormuz", "nuclear", "escalation", "invasion",
         ],
         "risk": -3,
     },
     "TARIFF": {
         "keywords": [
-            "trump tariff",
-            "tariff",
-            "trade war",
-            "sanction",
-            "china tariff",
-            "import duty",
-            "export ban",
+            "trump tariff", "tariff", "trade war", "sanction",
+            "china tariff", "import duty", "export ban",
         ],
         "risk": -2,
     },
     "FED_MACRO": {
         "keywords": [
-            "powell",
-            "cpi",
-            "pce",
-            "inflation",
-            "payroll",
-            "nfp",
-            "unemployment",
-            "rate cut",
-            "rate hike",
-            "fed funds",
-            "fomc",
+            "powell", "cpi", "pce", "inflation", "payroll",
+            "nfp", "unemployment", "rate cut", "rate hike",
+            "fed funds", "fomc",
         ],
         "risk": -1,
     },
     "CRYPTO_RISK": {
         "keywords": [
-            "stablecoin depeg",
-            "exchange hack",
-            "crypto hack",
-            "exchange outage",
-            "liquidation cascade",
-            "etf rejection",
-            "sec lawsuit",
-            "depeg",
-            "exploit",
-            "binance",
-            "coinbase",
-            "kraken",
+            "stablecoin depeg", "exchange hack", "crypto hack",
+            "exchange outage", "liquidation cascade",
+            "etf rejection", "sec lawsuit",
+            "depeg", "exploit", "binance", "coinbase", "kraken",
         ],
         "risk": -2,
     },
     "RISK_ON": {
         "keywords": [
-            "ceasefire",
-            "deal reached",
-            "tariff pause",
-            "rate cut hopes",
-            "etf approval",
-            "peace agreement",
+            "ceasefire", "deal reached", "tariff pause",
+            "rate cut hopes", "etf approval", "peace agreement",
             "diplomatic breakthrough",
         ],
         "risk": 2,
     },
 }
 
+# News thresholds
 NEWS_VETO_THRESHOLD = 2.0
 NEWS_DAMPEN_THRESHOLD = 1.0
 NEWS_DAMPEN_FACTOR = 0.6
@@ -393,11 +396,12 @@ NEWS_BOOST_FACTOR = 1.1
 NEWS_MULTI_SOURCE_BOOST = 3
 NEWS_MULTI_SOURCE_FACTOR = 1.2
 
+# NewsAPI günlük rate limit (free tier: 100/gün) — defansif kullanım
 NEWSAPI_QUERIES_PER_SCAN = 3
 NEWSAPI_DAILY_LIMIT = env_int("NEWSAPI_DAILY_LIMIT", 90, min_value=1)
 
 # ============================================================
-# HTTP SESSION
+# HTTP SESSION (connection pooling + retry)
 # ============================================================
 
 HTTP_MAX_CONCURRENCY = env_int("HTTP_MAX_CONCURRENCY", 24, min_value=1)
@@ -405,13 +409,23 @@ _HTTP_SEMAPHORE = threading.BoundedSemaphore(HTTP_MAX_CONCURRENCY)
 _HTTP_LOCAL = threading.local()
 _HTTP_SESSION_LOCK = threading.RLock()
 _HTTP_SESSIONS: list[requests.Session] = []
+_STOP_EVENT = threading.Event()
 
 
 def _build_session() -> requests.Session:
-    """Per-thread requests.Session; connection pool thread icinde yeniden kullanilir."""
+    """Thread-local requests.Session connection pooling sağlar."""
     sess = requests.Session()
-    retry = Retry(total=0, backoff_factor=0, status_forcelist=[])
-    adapter = HTTPAdapter(pool_connections=32, pool_maxsize=64, max_retries=retry)
+    retry = Retry(
+        total=0,  # Manual retry yapıyoruz; urllib3'a bırakmıyoruz
+        backoff_factor=0,
+        status_forcelist=[],
+    )
+    # 9 coin × 5 endpoint = 45 paralel istek olabiliyor; pool buna göre.
+    adapter = HTTPAdapter(
+        pool_connections=32,
+        pool_maxsize=128,
+        max_retries=retry,
+    )
     sess.mount("http://", adapter)
     sess.mount("https://", adapter)
     sess.headers.update({"User-Agent": f"signal-bot/{__version__}"})
@@ -438,18 +452,17 @@ def close_http_sessions() -> None:
         except Exception:
             pass
 
-
-# Feature engine icin kalici thread pool.
+# Feature engine için kalıcı thread pool (her get_features çağrısında yeni
+# pool yaratmamak için). Coin sayısı × endpoint sayısı kadar worker yeterli.
 _FEATURE_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(16, len(COINS) * 5),
     thread_name_prefix="feat",
 )
+# Coinler arası paralel feature çekimi için ayrı pool.
 _SYMBOL_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(4, len(COINS)),
     thread_name_prefix="symbol",
 )
-
-_STOP_EVENT = threading.Event()
 
 # ============================================================
 # FLASK HEALTH SERVER
@@ -503,7 +516,6 @@ def readyz() -> tuple[dict, int]:
 # TIME HELPERS
 # ============================================================
 
-
 def now_ts() -> int:
     return int(time.time())
 
@@ -519,9 +531,8 @@ def sleep_or_stop(seconds: float) -> bool:
 
 
 # ============================================================
-# SESSION CONTEXT
+# SESSION CONTEXT (US market hours)
 # ============================================================
-
 
 @dataclass(frozen=True)
 class SessionContext:
@@ -543,46 +554,32 @@ class SessionContext:
 
 _SESSION_PROFILES = {
     "US_OPEN": SessionContext(
-        "US_OPEN",
-        1.00,
-        1.00,
-        1.00,
-        "ABD piyasasi acik: makro/risk verileri normal agirlikta.",
+        "US_OPEN", 1.00, 1.00, 1.00,
+        "ABD piyasası açık: makro/risk verileri normal ağırlıkta.",
     ),
     "US_EXTENDED": SessionContext(
-        "US_EXTENDED",
-        0.50,
-        1.10,
-        0.95,
-        "ABD pre/after-market: makro etkisi kismen azaltildi.",
+        "US_EXTENDED", 0.50, 1.10, 0.95,
+        "ABD pre/after-market: makro etkisi kısmen azaltıldı.",
     ),
     "US_CLOSED": SessionContext(
-        "US_CLOSED",
-        0.35,
-        1.15,
-        0.90,
-        "ABD piyasasi kapali: kripto ici sinyallerin agirligi artirildi.",
+        "US_CLOSED", 0.35, 1.15, 0.90,
+        "ABD piyasası kapalı: kripto içi sinyallerin ağırlığı artırıldı.",
     ),
     "US_HOLIDAY": SessionContext(
-        "US_HOLIDAY",
-        0.20,
-        1.20,
-        0.85,
-        "ABD piyasa tatili: makro/risk verilerinin etkisi azaltildi.",
+        "US_HOLIDAY", 0.20, 1.20, 0.85,
+        "ABD piyasa tatili: makro/risk verilerinin etkisi azaltıldı.",
     ),
     "WEEKEND": SessionContext(
-        "WEEKEND",
-        0.20,
-        1.20,
-        0.85,
+        "WEEKEND", 0.20, 1.20, 0.85,
         "Hafta sonu: ABD piyasa verileri bayat kabul edildi.",
     ),
 }
 
 
 def _compute_session_context(minute_key: int) -> SessionContext:
-    del minute_key
+    """minute_key ile cache'lenir — aynı dakika içinde tekrar hesap yapılmaz."""
     now_et = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York"))
+
     year = now_et.year
     date_key = now_et.strftime("%Y-%m-%d")
     weekday = now_et.weekday()
@@ -596,7 +593,7 @@ def _compute_session_context(minute_key: int) -> SessionContext:
     early_closes = US_EARLY_CLOSE.get(year, set())
 
     if year not in US_MARKET_HOLIDAYS:
-        log.warning("%d yili icin ABD tatil listesi tanimli degil.", year)
+        log.warning("%d yılı için ABD tatil listesi tanımlı değil.", year)
 
     if weekday >= 5:
         return _SESSION_PROFILES["WEEKEND"]
@@ -604,6 +601,7 @@ def _compute_session_context(minute_key: int) -> SessionContext:
         return _SESSION_PROFILES["US_HOLIDAY"]
 
     close_time = early_close if date_key in early_closes else regular_close
+
     if regular_open <= minutes < close_time:
         return _SESSION_PROFILES["US_OPEN"]
     if 4 * 60 <= minutes < regular_open or close_time <= minutes < 20 * 60:
@@ -617,6 +615,7 @@ def _cached_session(minute_key: int) -> SessionContext:
 
 
 def get_session_context() -> SessionContext:
+    """60s cache: aynı dakika içinde tekrar tekrar hesaplama yapma."""
     return _cached_session(now_ts() // 60)
 
 
@@ -624,17 +623,18 @@ def get_session_context() -> SessionContext:
 # TELEGRAM
 # ============================================================
 
-TELEGRAM_MAX_LEN = 4000
+# Telegram mesaj boyut limiti: 4096 karakter
+TELEGRAM_MAX_LEN = 4000  # Güvenli pay
 
 
 def send_message(text: str) -> bool:
-    """Telegram mesaj gonder. Basari durumunu dondurur."""
+    """Telegram mesaj gönder. Başarı durumunu döner."""
     if not TOKEN or not CHAT_ID:
-        log.warning("TOKEN veya CHAT_ID eksik, mesaj gonderilemedi.")
+        log.warning("TOKEN veya CHAT_ID eksik, mesaj gönderilemedi.")
         return False
 
     if len(text) > TELEGRAM_MAX_LEN:
-        text = text[: TELEGRAM_MAX_LEN - 20] + "\n\n[...mesaj kisaltildi]"
+        text = text[:TELEGRAM_MAX_LEN - 20] + "\n\n[...mesaj kısaltıldı]"
 
     url = f"{TELEGRAM_BASE}/bot{TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": text}
@@ -643,13 +643,12 @@ def send_message(text: str) -> bool:
         with _HTTP_SEMAPHORE:
             r = _http_session().post(url, data=data, timeout=15)
         if r.status_code != 200:
-            log.error("Telegram HTTP %s: %s", r.status_code, r.text[:200])
+            log.error("Telegram %s: %s", r.status_code, r.text[:200])
             return False
         log.debug("Telegram OK")
         return True
     except requests.RequestException as e:
-        # Exception string'i URL/token icerebilir; sadece tipini logluyoruz.
-        log.error("Telegram gonderim hatasi: %s", type(e).__name__)
+        log.error("Telegram gönderim hatası: %s", type(e).__name__)
         return False
 
 
@@ -657,13 +656,12 @@ def send_message(text: str) -> bool:
 # HTTP HELPERS
 # ============================================================
 
-
 class TransientHTTPError(Exception):
-    """Gecici HTTP hatasi - retry edilebilir."""
+    """Geçici HTTP hatası — retry edilebilir."""
 
 
 class PermanentHTTPError(Exception):
-    """Kalici HTTP hatasi - retry'a degmez."""
+    """Kalıcı HTTP hatası — retry'a değmez (4xx)."""
 
 
 def _retry_wait(base_delay: float, attempt: int, response: Optional[requests.Response] = None) -> float:
@@ -685,9 +683,9 @@ def request_json(
     headers: Optional[dict] = None,
 ) -> Any:
     """
-    Akilli HTTP retry:
-      - 4xx (429 haric): fail-fast
-      - 429: Retry-After + exponential backoff
+    Akıllı HTTP retry:
+      - 4xx (429 hariç): fail-fast, PermanentHTTPError
+      - 429: Retry-After'a uyar, exponential backoff
       - 5xx / timeout / connection: exponential backoff
     """
     attempts = max(1, retries)
@@ -704,16 +702,18 @@ def request_json(
             last_err = e
             if attempt < attempts - 1:
                 wait = _retry_wait(base_delay, attempt)
-                log.debug("Baglanti hatasi (%s), %.1fs bekleniyor: %s", type(e).__name__, wait, url)
+                log.debug("Bağlantı hatası (%s), %.1fs bekleniyor: %s", type(e).__name__, wait, url)
                 if sleep_or_stop(wait):
                     raise TransientHTTPError("Shutdown requested") from e
             continue
         except requests.RequestException as e:
+            # Genel requests hatası — geçici varsay
             last_err = e
             if attempt < attempts - 1 and sleep_or_stop(_retry_wait(base_delay, attempt)):
                 raise TransientHTTPError("Shutdown requested") from e
             continue
 
+        # 429 → rate limit
         if r.status_code == 429:
             wait = _retry_wait(base_delay, attempt, r)
             log.warning("429 rate limit, %.1fs bekleniyor: %s", wait, url)
@@ -722,19 +722,24 @@ def request_json(
                 raise TransientHTTPError("Shutdown requested")
             continue
 
+        # Diğer 4xx → kalıcı
         if 400 <= r.status_code < 500:
-            raise PermanentHTTPError(f"HTTP {r.status_code}: {url} - {r.text[:200]}")
+            raise PermanentHTTPError(
+                f"HTTP {r.status_code}: {url} — {r.text[:200]}"
+            )
 
+        # 5xx → geçici
         if r.status_code >= 500:
             last_err = TransientHTTPError(f"HTTP {r.status_code}: {url}")
             if attempt < attempts - 1 and sleep_or_stop(_retry_wait(base_delay, attempt, r)):
                 raise TransientHTTPError("Shutdown requested")
             continue
 
+        # 2xx
         try:
             return r.json()
         except ValueError as e:
-            raise PermanentHTTPError(f"Gecersiz JSON: {url} - {e}") from e
+            raise PermanentHTTPError(f"Geçersiz JSON: {url} — {e}") from e
 
     raise last_err if last_err else TransientHTTPError(f"Bilinmeyen hata: {url}")
 
@@ -742,7 +747,6 @@ def request_json(
 # ============================================================
 # MEXC HELPERS
 # ============================================================
-
 
 def to_futures_symbol(symbol: str) -> str:
     return symbol.replace("USDT", "_USDT")
@@ -754,65 +758,109 @@ def get_klines(symbol: str, interval: str = "5m", limit: int = KLINE_LIMIT) -> l
         {"symbol": symbol, "interval": interval, "limit": limit},
     )
     if not isinstance(data, list):
-        raise PermanentHTTPError(f"{symbol} kline response list degil")
+        raise PermanentHTTPError(f"{symbol} kline response list değil")
     return data
 
 
 def get_ticker(symbol: str) -> dict:
-    data = request_json(f"{MEXC_SPOT_BASE}/api/v3/ticker/24hr", {"symbol": symbol})
+    data = request_json(
+        f"{MEXC_SPOT_BASE}/api/v3/ticker/24hr",
+        {"symbol": symbol},
+    )
     if not isinstance(data, dict):
-        raise PermanentHTTPError(f"{symbol} ticker response dict degil")
+        raise PermanentHTTPError(f"{symbol} ticker response dict değil")
     return data
 
 
 def get_spot_price(symbol: str) -> float:
-    data = request_json(f"{MEXC_SPOT_BASE}/api/v3/ticker/price", {"symbol": symbol})
+    data = request_json(
+        f"{MEXC_SPOT_BASE}/api/v3/ticker/price",
+        {"symbol": symbol},
+    )
     if not isinstance(data, dict):
-        raise PermanentHTTPError(f"{symbol} price response dict degil")
+        raise PermanentHTTPError(f"{symbol} price response dict değil")
     return float(data["price"])
 
 
 def get_book(symbol: str) -> dict:
-    data = request_json(f"{MEXC_SPOT_BASE}/api/v3/ticker/bookTicker", {"symbol": symbol})
+    data = request_json(
+        f"{MEXC_SPOT_BASE}/api/v3/ticker/bookTicker",
+        {"symbol": symbol},
+    )
     if not isinstance(data, dict):
-        raise PermanentHTTPError(f"{symbol} book response dict degil")
+        raise PermanentHTTPError(f"{symbol} book response dict değil")
     return data
 
 
 def get_futures_fair_price(symbol: str) -> Optional[float]:
+    """MEXC futures fair price. Bulunamazsa None döner."""
     futures_symbol = to_futures_symbol(symbol)
     url = f"{MEXC_FUTURES_BASE}/api/v1/contract/fair_price/{futures_symbol}"
 
     try:
         data = request_json(url)
     except (TransientHTTPError, PermanentHTTPError) as e:
-        log.debug("%s futures fair price alinamadi: %s", symbol, e)
+        log.debug("%s futures fair price alınamadı: %s", symbol, e)
         return None
 
     if not isinstance(data, dict):
         return None
 
+    # MEXC bazen {"data": {"fairPrice": ...}}, bazen {"fairPrice": ...} dönüyor
     candidates = []
     if isinstance(data.get("data"), dict):
         candidates.append(data["data"])
     candidates.append(data)
 
     for src in candidates:
-        for key in ("fairPrice", "price"):
-            if key in src:
+        for k in ("fairPrice", "price"):
+            if k in src:
                 try:
-                    return float(src[key])
+                    return float(src[k])
                 except (TypeError, ValueError):
                     continue
     return None
 
 
+
+
+def get_funding_rate(symbol: str) -> Optional[float]:
+    """MEXC futures funding rate (%). Veri alınamazsa None döner."""
+    futures_symbol = to_futures_symbol(symbol)
+    endpoints = [
+        (f"{MEXC_FUTURES_BASE}/api/v1/contract/funding_rate/{futures_symbol}", None),
+        (f"{MEXC_FUTURES_BASE}/api/v1/contract/funding_rate/history", {"symbol": futures_symbol, "page_num": 1, "page_size": 1}),
+    ]
+    for url, params in endpoints:
+        try:
+            data = request_json(url, params=params, retries=2)
+        except Exception as e:
+            log.debug("%s funding rate alınamadı (%s): %s", symbol, url, e)
+            continue
+        candidates = []
+        if isinstance(data, dict):
+            if isinstance(data.get("data"), dict):
+                candidates.append(data["data"])
+            if isinstance(data.get("data"), list) and data["data"]:
+                candidates.append(data["data"][0])
+            candidates.append(data)
+        for src in candidates:
+            if not isinstance(src, dict):
+                continue
+            for key in ("fundingRate", "funding_rate", "rate"):
+                if key in src:
+                    try:
+                        return float(src[key]) * 100.0
+                    except (TypeError, ValueError):
+                        pass
+    return None
+
 # ============================================================
 # MATH HELPERS
 # ============================================================
 
-
 def pct(a: float, b: float) -> float:
+    """Yüzde değişim. b=0 ise 0.0 döner."""
     if b == 0:
         return 0.0
     return (a - b) / b * 100.0
@@ -823,6 +871,7 @@ def clamp(x: float, lo: float, hi: float) -> float:
 
 
 def ema(values: list[float], period: int) -> float:
+    """Exponential Moving Average. Veri yetersizse SMA fallback."""
     if not values:
         return 0.0
     if len(values) < period:
@@ -837,11 +886,13 @@ def ema(values: list[float], period: int) -> float:
 
 
 def bar(value: float, max_abs: float, width: int = 4) -> str:
+    """Görsel bar gösterimi: -max_abs ile +max_abs arası."""
     if max_abs <= 0:
         return "⬜" * width + "│" + "⬜" * width
 
     ratio = clamp(value / max_abs, -1, 1)
     filled = int(abs(ratio) * width)
+
     if ratio > 0:
         return "⬜" * width + "│" + "🟩" * filled + "⬜" * (width - filled)
     if ratio < 0:
@@ -870,12 +921,11 @@ def format_money(value: Optional[float]) -> str:
 
 
 # ============================================================
-# STATE MANAGEMENT
+# STATE MANAGEMENT (thread-safe)
 # ============================================================
 
-
 class StateManager:
-    """Thread-safe state yonetimi. Atomik yazim, in-memory cache."""
+    """Thread-safe state yönetimi. Atomik yazım, in-memory cache."""
 
     def __init__(self, file_path: str):
         self._file_path = file_path
@@ -890,11 +940,11 @@ class StateManager:
             with open(self._file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
-            log.error("State okunamadi, sifirlaniyor: %s", e)
+            log.error("State okunamadı, sıfırlanıyor: %s", e)
             return self._fresh_state()
 
         if not isinstance(data, dict):
-            log.error("State dict degil, sifirlaniyor.")
+            log.error("State dict değil, sıfırlanıyor.")
             return self._fresh_state()
         return self._migrate(data)
 
@@ -906,6 +956,7 @@ class StateManager:
     def _migrate(data: dict) -> dict:
         version = data.get("version", 1)
 
+        # v1 → v2: meta key'leri _ prefix'inden ayır
         if "symbols" not in data:
             symbols = {k: v for k, v in data.items() if not k.startswith("_")}
             meta = {
@@ -915,9 +966,10 @@ class StateManager:
                 "last_news_alert_ts": data.get("_last_news_alert_ts", 0),
                 "last_news_alert_hash": data.get("_last_news_alert_hash"),
             }
-            log.info("State v1 -> v%d migration uygulandi.", STATE_VERSION)
+            log.info("State v1 → v%d migration uygulandı.", STATE_VERSION)
             return {"version": STATE_VERSION, "symbols": symbols, "meta": meta}
 
+        # Eksik alanları doldur (forward compat)
         data.setdefault("symbols", {})
         data.setdefault("meta", {})
         if version < 3:
@@ -925,13 +977,13 @@ class StateManager:
                 if isinstance(symbol_state, dict):
                     symbol_state.setdefault("pending_alert_type", None)
                     symbol_state.setdefault("updated_at", 0)
-            log.info("State v%s -> v3 migration uygulandi.", version)
-
+                    symbol_state.setdefault("actionable", symbol_state.get("signal") in ("LONG", "SHORT"))
+            log.info("State v%s → v3 migration uygulandı.", version)
         data["version"] = STATE_VERSION
         return data
 
     def save(self) -> None:
-        """Atomik yazim: tmp + fsync + os.replace."""
+        """Atomik yazım: tmp + fsync + os.replace."""
         with self._lock:
             try:
                 parent = os.path.dirname(os.path.abspath(self._file_path))
@@ -946,6 +998,7 @@ class StateManager:
                 log.error("State kaydedilemedi: %s", e)
 
     def snapshot(self) -> dict:
+        """Read-only kopya."""
         with self._lock:
             return copy.deepcopy(self._state)
 
@@ -967,13 +1020,13 @@ class StateManager:
             self._state["symbols"][symbol] = value
 
 
+# Global state manager
 _STATE_MGR = StateManager(STATE_FILE)
 
 
 # ============================================================
 # NEWS LAYER
 # ============================================================
-
 
 def default_news_context() -> dict:
     return {
@@ -984,13 +1037,14 @@ def default_news_context() -> dict:
         "provider": None,
         "url": None,
         "match_count": 0,
-        "note": "Onemli haber etkisi yok.",
+        "note": "Önemli haber etkisi yok.",
     }
 
 
 def is_fresh_article(published_at: Optional[str]) -> bool:
+    """ISO-8601 tarih kontrolü."""
     if not published_at:
-        return True
+        return True  # Tarih yoksa şüpheli; agregasyon süreci elemese de güvenli
 
     try:
         dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
@@ -1002,6 +1056,7 @@ def is_fresh_article(published_at: Optional[str]) -> bool:
 
 
 def _newsapi_quota_used_today() -> int:
+    """Günlük NewsAPI kullanımını state'ten oku."""
     today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     quota = _STATE_MGR.get_meta("newsapi_quota", {})
     if quota.get("date") != today_key:
@@ -1019,12 +1074,16 @@ def _newsapi_quota_increment(by: int) -> None:
 
 
 def fetch_newsapi_headlines() -> list[dict]:
+    """NewsAPI'den jeopolitik/makro/kripto başlıkları çeker."""
     if not NEWS_API_KEY:
         return []
 
     used_today = _newsapi_quota_used_today()
     if used_today + NEWSAPI_QUERIES_PER_SCAN > NEWSAPI_DAILY_LIMIT:
-        log.warning("NewsAPI limit korumasina takildi (%d/%d). Atlaniyor.", used_today, NEWSAPI_DAILY_LIMIT)
+        log.warning(
+            "NewsAPI günlük limit korumasına takıldı (%d/%d). Atlanıyor.",
+            used_today, NEWSAPI_DAILY_LIMIT,
+        )
         return []
 
     queries = [
@@ -1040,36 +1099,47 @@ def fetch_newsapi_headlines() -> list[dict]:
         try:
             data = request_json(
                 f"{NEWSAPI_BASE}/everything",
-                params={"q": q, "language": "en", "sortBy": "publishedAt", "pageSize": 15},
+                params={
+                    "q": q,
+                    "language": "en",
+                    "sortBy": "publishedAt",
+                    "pageSize": 15,
+                },
+                # apiKey'i header'da göndermek log'larda görünmesini engeller
                 headers={"X-Api-Key": NEWS_API_KEY},
             )
             success_count += 1
         except (TransientHTTPError, PermanentHTTPError) as e:
-            log.warning("NewsAPI query basarisiz (%s...): %s", q[:30], e)
+            log.warning("NewsAPI query başarısız (%s...): %s", q[:30], e)
             continue
 
         for article in data.get("articles", []) if isinstance(data, dict) else []:
             title = article.get("title") or ""
             published_at = article.get("publishedAt")
+
             if not title or not is_fresh_article(published_at):
                 continue
-            headlines.append(
-                {
-                    "title": title,
-                    "source": (article.get("source") or {}).get("name", "Unknown"),
-                    "url": article.get("url", ""),
-                    "published_at": published_at,
-                    "provider": "NewsAPI",
-                }
-            )
+
+            headlines.append({
+                "title": title,
+                "source": (article.get("source") or {}).get("name", "Unknown"),
+                "url": article.get("url", ""),
+                "published_at": published_at,
+                "provider": "NewsAPI",
+            })
 
     if success_count > 0:
         _newsapi_quota_increment(success_count)
+
     return headlines
 
 
 def fetch_gdelt_headlines() -> list[dict]:
-    query = "trump tariff iran israel china war missile fed powell crypto sec etf hack stablecoin"
+    """GDELT son haber feed'i."""
+    query = (
+        "trump tariff iran israel china war missile fed powell "
+        "crypto sec etf hack stablecoin"
+    )
 
     try:
         data = request_json(
@@ -1083,53 +1153,59 @@ def fetch_gdelt_headlines() -> list[dict]:
             },
         )
     except (TransientHTTPError, PermanentHTTPError) as e:
-        log.warning("GDELT alinamadi: %s", e)
+        log.warning("GDELT alınamadı: %s", e)
         return []
 
     headlines = []
-    articles = data.get("articles", []) if isinstance(data, dict) else []
-    for article in articles:
+    for article in data.get("articles", []) if isinstance(data, dict) else []:
         title = article.get("title") or ""
         if not title:
             continue
 
+        # GDELT seendate formatı: 'YYYYMMDDhhmmss'
         seendate = article.get("seendate")
         published_at = None
         if seendate and len(seendate) >= 14:
-            published_at = (
-                f"{seendate[0:4]}-{seendate[4:6]}-{seendate[6:8]}T"
-                f"{seendate[8:10]}:{seendate[10:12]}:{seendate[12:14]}Z"
-            )
+            try:
+                published_at = (
+                    f"{seendate[0:4]}-{seendate[4:6]}-{seendate[6:8]}T"
+                    f"{seendate[8:10]}:{seendate[10:12]}:{seendate[12:14]}Z"
+                )
+            except Exception:
+                published_at = None
 
         if not is_fresh_article(published_at):
             continue
 
-        headlines.append(
-            {
-                "title": title,
-                "source": article.get("sourceCountry", "GDELT"),
-                "url": article.get("url", ""),
-                "published_at": published_at,
-                "provider": "GDELT",
-            }
-        )
+        headlines.append({
+            "title": title,
+            "source": article.get("sourceCountry", "GDELT"),
+            "url": article.get("url", ""),
+            "published_at": published_at,
+            "provider": "GDELT",
+        })
 
     return headlines
 
 
 def _compile_keyword_patterns() -> dict:
+    """Tek kelime keyword'leri word-boundary regex'e, çok kelimeli ifadeleri
+    substring match'e çevirir. Modül yüklenirken bir kez çalışır."""
     compiled = {}
     for category, cfg in NEWS_CATEGORIES.items():
         patterns = []
         for kw in cfg["keywords"]:
             kw_lower = kw.lower().strip()
             if not kw_lower:
-                log.warning("Bos keyword atlaniyor (kategori: %s)", category)
+                log.warning("Boş keyword atlanıyor (kategori: %s)", category)
                 continue
             if " " in kw_lower:
                 patterns.append(("substring", kw_lower))
             else:
-                patterns.append(("regex", re.compile(rf"\b{re.escape(kw_lower)}\b", re.IGNORECASE)))
+                patterns.append((
+                    "regex",
+                    re.compile(rf"\b{re.escape(kw_lower)}\b", re.IGNORECASE),
+                ))
         compiled[category] = patterns
     return compiled
 
@@ -1144,8 +1220,9 @@ def count_keyword_hits(text: str, category: str) -> int:
         if kind == "regex":
             if pattern.search(text_lower):
                 hits += 1
-        elif pattern in text_lower:
-            hits += 1
+        else:
+            if pattern in text_lower:
+                hits += 1
     return hits
 
 
@@ -1164,6 +1241,8 @@ def classify_headline(headline: dict) -> Optional[dict]:
         return None
 
     best_hits, _, best_category, best_risk = best
+
+    # Match yoğunluğuna göre risk şiddeti
     if best_hits >= 3:
         risk_score = best_risk
     elif best_hits == 2:
@@ -1183,6 +1262,7 @@ def classify_headline(headline: dict) -> Optional[dict]:
 
 
 def scan_news() -> dict:
+    """Tüm news kaynaklarını tarayıp en yüksek risk skorunu döndürür."""
     headlines = []
 
     try:
@@ -1195,6 +1275,7 @@ def scan_news() -> dict:
     except Exception as e:
         log.warning("GDELT hata: %s", e)
 
+    # Başlık dedup
     classified = []
     seen_titles = set()
     for headline in headlines:
@@ -1210,10 +1291,12 @@ def scan_news() -> dict:
     if not classified:
         return default_news_context()
 
+    # Çoklu kaynak doğrulaması
     category_counts: dict[str, int] = {}
     for item in classified:
         category_counts[item["category"]] = category_counts.get(item["category"], 0) + 1
 
+    # En şiddetli skoru al; çoklu kaynak varsa boost
     classified.sort(key=lambda x: (abs(x["risk_score"]), x["hits"]), reverse=True)
     top = classified[0]
 
@@ -1222,9 +1305,9 @@ def scan_news() -> dict:
     if multi_count >= NEWS_MULTI_SOURCE_BOOST:
         final_risk = clamp(final_risk * NEWS_MULTI_SOURCE_FACTOR, -3, 3)
 
-    note = "Haber katmani aktif."
+    note = "Haber katmanı aktif."
     if multi_count >= NEWS_MULTI_SOURCE_BOOST:
-        note += f" {multi_count} kaynak {top['category']} kategorisini dogruluyor."
+        note += f" {multi_count} kaynak {top['category']} kategorisini doğruluyor."
 
     return {
         "news_risk_score": round(final_risk, 2),
@@ -1249,34 +1332,39 @@ def format_news_alert(news_context: dict) -> str:
         "📰 NEWS RISK ALERT\n\n"
         f"Kategori: {news_context['category']}\n"
         f"Risk Skoru: {news_context['news_risk_score']} / 3\n"
-        f"Dogulayan Kaynak Sayisi: {news_context.get('match_count', 1)}\n"
+        f"Doğrulayan Kaynak Sayısı: {news_context.get('match_count', 1)}\n"
         f"Provider: {news_context.get('provider', '-')} ({news_context.get('source', '-')})\n\n"
-        f"Baslik:\n{news_context.get('headline', '-')}\n\n"
+        f"Başlık:\n{news_context.get('headline', '-')}\n\n"
         f"Bot Etkisi:\n"
-        f"- |risk| >= {NEWS_VETO_THRESHOLD}: ters yondeki sinyaller VETO edilir\n"
-        f"- |risk| >= {NEWS_DAMPEN_THRESHOLD}: ters yondeki skor x{NEWS_DAMPEN_FACTOR} sonumlenir\n"
-        f"- Ayni yon: skor x{NEWS_BOOST_FACTOR} guclendirilir\n\n"
+        f"- |risk| ≥ {NEWS_VETO_THRESHOLD}: ters yöndeki sinyaller VETO edilir\n"
+        f"- |risk| ≥ {NEWS_DAMPEN_THRESHOLD}: ters yöndeki skor x{NEWS_DAMPEN_FACTOR} sönümlenir\n"
+        f"- Aynı yön: skor x{NEWS_BOOST_FACTOR} güçlendirilir\n\n"
         f"Zaman: {tr_now_text()}"
     )
 
 
 # ============================================================
-# FEATURE ENGINE
+# FEATURE ENGINE (paralel HTTP + partial failure handling)
 # ============================================================
-
 
 def _to_float(value: Any, field: str) -> float:
     try:
         return float(value)
     except (TypeError, ValueError) as e:
-        raise ValueError(f"{field} float'a cevrilemedi: {value!r}") from e
+        raise ValueError(f"{field} float'a çevrilemedi: {value!r}") from e
 
 
 def get_features(symbol: str) -> dict:
-    """Tek coin icin spot endpoint'ler paralel cagrilir; futures non-kritiktir."""
+    """Tek coin için 5 endpoint paralel çağrılır.
+
+    Spot endpoint'lerden biri fail olursa exception fırlatır (kritik).
+    Futures fail olursa basis_pct=None (non-kritik).
+    """
     futures = {
         "k5": _FEATURE_EXECUTOR.submit(get_klines, symbol, "5m", KLINE_LIMIT),
         "k15": _FEATURE_EXECUTOR.submit(get_klines, symbol, "15m", KLINE_LIMIT),
+        "k1h": _FEATURE_EXECUTOR.submit(get_klines, symbol, "60m", KLINE_LIMIT),
+        "k4h": _FEATURE_EXECUTOR.submit(get_klines, symbol, "4h", KLINE_LIMIT),
         "ticker": _FEATURE_EXECUTOR.submit(get_ticker, symbol),
         "book": _FEATURE_EXECUTOR.submit(get_book, symbol),
         "spot": _FEATURE_EXECUTOR.submit(get_spot_price, symbol),
@@ -1290,26 +1378,46 @@ def get_features(symbol: str) -> dict:
         except Exception as e:
             errors[key] = e
 
-    failed = [key for key in ("k5", "k15", "ticker", "book", "spot") if key in errors]
+    # Kritik endpoint'lerden biri bile fail ise exception
+    critical = ("k5", "k15", "k1h", "k4h", "ticker", "book", "spot")
+    failed = [k for k in critical if k in errors]
     if failed:
-        raise RuntimeError(f"{symbol}: kritik endpoint hatasi ({', '.join(failed)}): {errors[failed[0]]}")
+        raise RuntimeError(
+            f"{symbol}: kritik endpoint hatası ({', '.join(failed)}): "
+            f"{errors[failed[0]]}"
+        )
 
     k5 = results["k5"]
     k15 = results["k15"]
+    k1h = results["k1h"]
+    k4h = results["k4h"]
     ticker = results["ticker"]
     book = results["book"]
     spot_price = results["spot"]
 
     closes_5 = [_to_float(x[4], f"{symbol}.k5.close") for x in k5]
     closes_15 = [_to_float(x[4], f"{symbol}.k15.close") for x in k15]
+    closes_1h = [_to_float(x[4], f"{symbol}.k1h.close") for x in k1h]
+    closes_4h = [_to_float(x[4], f"{symbol}.k4h.close") for x in k4h]
     volumes_5 = [_to_float(x[5], f"{symbol}.k5.volume") for x in k5]
 
-    if len(closes_5) < MIN_KLINES_5M or len(closes_15) < MIN_KLINES_15M:
+    if (
+        len(closes_5) < MIN_KLINES_5M
+        or len(closes_15) < MIN_KLINES_15M
+        or len(closes_1h) < MIN_KLINES_1H
+        or len(closes_4h) < MIN_KLINES_4H
+    ):
         raise ValueError(
-            f"{symbol} icin yetersiz kline verisi "
-            f"(5m={len(closes_5)}/{MIN_KLINES_5M}, 15m={len(closes_15)}/{MIN_KLINES_15M})"
+            f"{symbol} için yetersiz kline verisi "
+            f"(5m={len(closes_5)}/{MIN_KLINES_5M}, "
+            f"15m={len(closes_15)}/{MIN_KLINES_15M}, "
+            f"1h={len(closes_1h)}/{MIN_KLINES_1H}, "
+            f"4h={len(closes_4h)}/{MIN_KLINES_4H})"
         )
 
+    last = closes_5[-1]
+
+    # EMA hesapları
     ema9 = ema(closes_5, EMA_FAST)
     ema21 = ema(closes_5, EMA_MID)
     ema50 = ema(closes_5, EMA_SLOW)
@@ -1317,12 +1425,25 @@ def get_features(symbol: str) -> dict:
     ema21_15 = ema(closes_15, EMA_MID)
     ema50_15 = ema(closes_15, EMA_SLOW)
 
+    # Multi-timeframe: 1h setup + 4h trend
+    ema9_1h = ema(closes_1h, EMA_FAST)
+    ema21_1h = ema(closes_1h, EMA_MID)
+    ema50_1h = ema(closes_1h, EMA_SLOW)
+    ema9_4h = ema(closes_4h, EMA_FAST)
+    ema21_4h = ema(closes_4h, EMA_MID)
+    ema50_4h = ema(closes_4h, EMA_SLOW)
+
+    # Returns (negatif index ile son N bar öncesi)
     ret_5m = pct(closes_5[-1], closes_5[-RET_5M_OFFSET])
     ret_15m = pct(closes_5[-1], closes_5[-RET_15M_OFFSET])
     ret_1h = pct(closes_5[-1], closes_5[-RET_1H_OFFSET])
     ret_4h = pct(closes_15[-1], closes_15[-RET_4H_OFFSET])
+    ret_1h_tf = pct(closes_1h[-1], closes_1h[-2])
+    ret_4h_tf = pct(closes_4h[-1], closes_4h[-2])
+    ret_24h_tf = pct(closes_4h[-1], closes_4h[-7])
 
-    recent_vols = volumes_5[-(VOLUME_WINDOW + 1) : -1]
+    # Hacim oranı: son barın, önceki VOLUME_WINDOW barın median'ına oranı
+    recent_vols = volumes_5[-(VOLUME_WINDOW + 1):-1]
     if recent_vols:
         median_vol = statistics.median(recent_vols)
         vol_ratio = volumes_5[-1] / median_vol if median_vol > 0 else 1.0
@@ -1334,32 +1455,39 @@ def get_features(symbol: str) -> dict:
     mid = (bid + ask) / 2
     spread_bps = ((ask - bid) / mid) * 10000 if mid else 999.0
 
-    change_24h = _to_float(ticker.get("priceChangePercent", 0), f"{symbol}.change_24h")
+    try:
+        change_24h = _to_float(ticker.get("priceChangePercent", 0), f"{symbol}.change_24h")
+    except (TypeError, ValueError):
+        change_24h = 0.0
 
+    # Futures fair price / funding — non-kritik, fail olabilir
     futures_price = None
     basis_pct = None
+    funding_rate = None
     try:
         futures_price = get_futures_fair_price(symbol)
         if futures_price:
             basis_pct = pct(futures_price, spot_price)
     except Exception as e:
-        log.debug("%s futures basis alinamadi: %s", symbol, e)
+        log.debug("%s futures basis alınamadı: %s", symbol, e)
+    try:
+        funding_rate = get_funding_rate(symbol)
+    except Exception as e:
+        log.debug("%s funding rate alınamadı: %s", symbol, e)
 
     return {
-        "last": closes_5[-1],
+        "last": last,
         "spot_price": spot_price,
         "futures_price": futures_price,
         "basis_pct": basis_pct,
-        "ema9": ema9,
-        "ema21": ema21,
-        "ema50": ema50,
-        "ema9_15": ema9_15,
-        "ema21_15": ema21_15,
-        "ema50_15": ema50_15,
-        "ret_5m": ret_5m,
-        "ret_15m": ret_15m,
-        "ret_1h": ret_1h,
-        "ret_4h": ret_4h,
+        "funding_rate": funding_rate,
+        "ema9": ema9, "ema21": ema21, "ema50": ema50,
+        "ema9_15": ema9_15, "ema21_15": ema21_15, "ema50_15": ema50_15,
+        "ema9_1h": ema9_1h, "ema21_1h": ema21_1h, "ema50_1h": ema50_1h,
+        "ema9_4h": ema9_4h, "ema21_4h": ema21_4h, "ema50_4h": ema50_4h,
+        "ret_1h_tf": ret_1h_tf, "ret_4h_tf": ret_4h_tf, "ret_24h_tf": ret_24h_tf,
+        "ret_5m": ret_5m, "ret_15m": ret_15m,
+        "ret_1h": ret_1h, "ret_4h": ret_4h,
         "vol_ratio": vol_ratio,
         "spread_bps": spread_bps,
         "change_24h": change_24h,
@@ -1367,9 +1495,8 @@ def get_features(symbol: str) -> dict:
 
 
 # ============================================================
-# SCORING FUNCTIONS
+# SCORING FUNCTIONS (saf fonksiyonlar — test edilebilir)
 # ============================================================
-
 
 def score_macro(btc: dict) -> float:
     p = SCORE_PARAMS["macro"]
@@ -1393,11 +1520,47 @@ def score_market(btc: dict, eth: dict) -> float:
         score += 1
     elif btc["ret_1h"] < -threshold:
         score -= 1
+
     if eth["ret_1h"] > threshold:
         score += 1
     elif eth["ret_1h"] < -threshold:
         score -= 1
     return clamp(score, -2, 2)
+
+
+def score_mtf(f: dict) -> float:
+    """Multi-timeframe skor: 4H ana trend + 1H setup + 15m/5m giriş uyumu.
+
+    Pozitif skor LONG yönünü, negatif skor SHORT yönünü destekler.
+    Bu katman görseldeki "Günlük/4H trend → 15m entry" mantığının
+    bot içindeki karşılığıdır.
+    """
+    score = 0.0
+
+    # 4H = ana trend filtresi
+    if f["ema9_4h"] > f["ema21_4h"] > f["ema50_4h"]:
+        score += 1.4
+    elif f["ema9_4h"] < f["ema21_4h"] < f["ema50_4h"]:
+        score -= 1.4
+
+    # 1H = setup yönü
+    if f["ema9_1h"] > f["ema21_1h"] > f["ema50_1h"]:
+        score += 1.0
+    elif f["ema9_1h"] < f["ema21_1h"] < f["ema50_1h"]:
+        score -= 1.0
+
+    # 4H ve 24H momentum teyidi
+    if f["ret_4h_tf"] > 0.6:
+        score += 0.3
+    elif f["ret_4h_tf"] < -0.6:
+        score -= 0.3
+
+    if f["ret_24h_tf"] > 2.0:
+        score += 0.3
+    elif f["ret_24h_tf"] < -2.0:
+        score -= 0.3
+
+    return clamp(score, -3, 3)
 
 
 def score_trend(f: dict) -> float:
@@ -1421,10 +1584,12 @@ def score_momentum(f: dict) -> float:
         score += 0.4
     elif f["ret_5m"] < -p["ret_5m_strong"]:
         score -= 0.4
+
     if f["ret_15m"] > p["ret_15m_strong"]:
         score += 0.6
     elif f["ret_15m"] < -p["ret_15m_strong"]:
         score -= 0.6
+
     if f["ret_1h"] > p["ret_1h_strong"]:
         score += 1.0
     elif f["ret_1h"] < -p["ret_1h_strong"]:
@@ -1473,24 +1638,50 @@ def score_basis(basis_pct: Optional[float], f: dict) -> float:
     return clamp(score, -2, 2)
 
 
+
+
+def score_funding(funding_rate: Optional[float], f: dict) -> float:
+    """Funding skorunu crowding/squeeze filtresi olarak kullanır."""
+    if funding_rate is None:
+        return 0.0
+    score = 0.0
+    if funding_rate >= FUNDING_CONFIG["extreme_positive"]:
+        score -= 1.5
+    elif funding_rate >= FUNDING_CONFIG["crowded_positive"]:
+        score -= 0.8
+    if funding_rate <= FUNDING_CONFIG["extreme_negative"]:
+        score += 1.5
+    elif funding_rate <= FUNDING_CONFIG["crowded_negative"]:
+        score += 0.8
+    if funding_rate < 0 and f.get("ret_1h", 0) > 0.8:
+        score += 0.4
+    if funding_rate > 0 and f.get("ret_1h", 0) < -0.8:
+        score -= 0.4
+    return clamp(score, -2, 2)
+
 # ============================================================
 # SIGNAL ENGINE
 # ============================================================
 
-
 def veto_signal(symbol: str, f: dict, btc: dict, eth: dict) -> Optional[str]:
-    del eth
+    """None döner = veto yok. String döner = veto sebebi."""
     group = COINS[symbol]
     p = SCORE_PARAMS["veto"]
 
     if f["spread_bps"] > SPREAD_LIMITS[group]:
-        return "Spread yuksek"
+        return "Spread yüksek"
+
     if group == "HIGH_BETA" and f["vol_ratio"] < p["vol_low_high_beta"]:
-        return "Hacim zayif"
+        return "Hacim zayıf"
+
     if symbol not in ("BTCUSDT", "ETHUSDT"):
-        btc_unclear = abs(btc["ret_1h"]) < p["btc_unclear_1h"] and abs(btc["ret_4h"]) < p["btc_unclear_4h"]
+        btc_unclear = (
+            abs(btc["ret_1h"]) < p["btc_unclear_1h"]
+            and abs(btc["ret_4h"]) < p["btc_unclear_4h"]
+        )
         if btc_unclear:
-            return "BTC yonu belirsiz"
+            return "BTC yönü belirsiz"
+
     return None
 
 
@@ -1518,12 +1709,25 @@ def normalize_weights_if_basis_missing(weights: dict, features: dict) -> dict:
     return redistributed
 
 
-def apply_news_modulation(total_score: float, news_risk: float, session_news_mult: float) -> tuple[Optional[float], str]:
+def apply_news_modulation(
+    total_score: float, news_risk: float, session_news_mult: float
+) -> tuple[Optional[float], str]:
+    """News skorunu yön-bağımlı uygular.
+
+    Returns:
+        (modulated_score, action). Veto durumunda (None, "news_veto").
+    """
     effective_risk = news_risk * session_news_mult
     abs_risk = abs(effective_risk)
 
-    same_direction = (total_score > 0 and effective_risk > 0) or (total_score < 0 and effective_risk < 0)
-    opposite_direction = (total_score > 0 and effective_risk < 0) or (total_score < 0 and effective_risk > 0)
+    same_direction = (
+        (total_score > 0 and effective_risk > 0)
+        or (total_score < 0 and effective_risk < 0)
+    )
+    opposite_direction = (
+        (total_score > 0 and effective_risk < 0)
+        or (total_score < 0 and effective_risk > 0)
+    )
 
     if abs_risk >= NEWS_VETO_THRESHOLD and opposite_direction:
         return None, "news_veto"
@@ -1531,6 +1735,7 @@ def apply_news_modulation(total_score: float, news_risk: float, session_news_mul
         return total_score * NEWS_DAMPEN_FACTOR, "news_dampened"
     if abs_risk >= NEWS_BOOST_THRESHOLD and same_direction:
         return total_score * NEWS_BOOST_FACTOR, "news_boosted"
+
     return total_score, "news_neutral"
 
 
@@ -1543,7 +1748,9 @@ def weighted_signal(
     news_context: dict,
 ) -> dict:
     group = COINS[symbol]
-    weights = normalize_weights_if_basis_missing(WEIGHTS[group], features)
+    base_weights = WEIGHTS[group]
+    weights = normalize_weights_if_basis_missing(base_weights, features)
+
     veto = veto_signal(symbol, features, btc, eth)
 
     macro_mult = session_context.macro_multiplier
@@ -1553,29 +1760,37 @@ def weighted_signal(
     raw = {
         "macro": score_macro(btc) * macro_mult,
         "market": score_market(btc, eth) * micro_mult,
+        "mtf": score_mtf(features),
         "trend": score_trend(features) * micro_mult,
         "momentum": score_momentum(features) * micro_mult,
         "volume": score_volume(features) * micro_mult,
         "liquidity": score_liquidity(features, group),
         "basis": score_basis(features["basis_pct"], features) * micro_mult,
+        "funding": score_funding(features.get("funding_rate"), features) * micro_mult,
     }
 
     pre_news_total = sum(raw[k] * weights[k] for k in raw)
+
     news_risk = float(news_context.get("news_risk_score", 0))
-    modulated_total, news_action = apply_news_modulation(pre_news_total, news_risk, news_mult)
+    modulated_total, news_action = apply_news_modulation(
+        pre_news_total, news_risk, news_mult
+    )
 
     max_components = {
         "macro": 3 * abs(macro_mult),
         "market": 2 * abs(micro_mult),
+        "mtf": 3,
         "trend": 2 * abs(micro_mult),
         "momentum": 2 * abs(micro_mult),
         "volume": 2 * abs(micro_mult),
         "liquidity": 2,
         "basis": 2 * abs(micro_mult),
+        "funding": 2 * abs(micro_mult),
     }
     max_total = sum(weights[k] * max_components[k] for k in raw)
 
     if modulated_total is None:
+        # News veto
         signal = "NO_TRADE"
         level = "WEAK"
         total = pre_news_total
@@ -1595,6 +1810,7 @@ def weighted_signal(
             signal = "NO_TRADE"
             level = "WEAK"
 
+    # NO_TRADE için confidence yanıltıcı olmasın — sadece sinyal varken anlamlı
     if signal in ("LONG", "SHORT") and max_total > 0:
         confidence = round(clamp(abs(total) / max_total * 100, 0, 100), 1)
     else:
@@ -1616,17 +1832,37 @@ def weighted_signal(
         "session_context": session_context.as_dict(),
         "news_context": news_context,
         "basis_missing": features["basis_pct"] is None,
+        "funding_missing": features.get("funding_rate") is None,
     }
 
 
-# ============================================================
-# TRADE PLAN ENGINE
-# ============================================================
 
+# ============================================================
+# TRADE PLAN ENGINE (bilgilendirme amaçlı, emir göndermez)
+# ============================================================
 
 def build_trade_plan(result: dict) -> Optional[dict]:
+    """Sinyal varsa entry/stop/TP/pozisyon büyüklüğü planı üretir.
+
+    Bu fonksiyon emir göndermez. Amaç: Telegram sinyalinde trader'a
+    uygulanabilir risk planı sunmak.
+
+    Pullback zone mantığı:
+      - LONG: Trader spot'tan girmek yerine EMA9/EMA21 bölgesine pullback
+        beklemeli. Bu yüzden zone, EMA'ların oluşturduğu aralık içinde ve
+        spot'a göre AŞAĞIDA (geri çekilme) olmalı.
+      - SHORT: Tam tersi — EMA bölgesi spot'a göre YUKARIDA (yukarı çekilme).
+      - EMA'lar yanlış tarafta ise (örn. LONG sinyalinde EMA'lar zaten
+        spot'un üstünde), spot'tan stop_pct/2 kadar uzakta synthetic zone üretilir.
+    """
     signal = result.get("signal")
     if signal not in ("LONG", "SHORT"):
+        return None
+    tq = result.get("trade_quality")
+    if tq and not tq.get("tradable", False):
+        return None
+    pc = result.get("portfolio_check")
+    if pc and not pc.get("allowed", True):
         return None
 
     group = result["group"]
@@ -1639,18 +1875,22 @@ def build_trade_plan(result: dict) -> Optional[dict]:
     stop_pct = float(cfg["stop_pct"])
 
     if spot <= 0:
-        log.warning("%s build_trade_plan: spot=%s, plan uretilemiyor", result["symbol"], spot)
+        log.warning("%s build_trade_plan: spot=%s, plan üretilemiyor", result["symbol"], spot)
         return None
 
+    # Referans entry: sinyal anındaki spot.
     reference_entry = spot
-    ema_low = min(ema9, ema21)
-    ema_high = max(ema9, ema21)
 
     if signal == "LONG":
+        # Pullback bölgesi: EMA9 ile EMA21 arası, spot'un altında olmalı.
+        ema_low = min(ema9, ema21)
+        ema_high = max(ema9, ema21)
         if ema_high < spot and ema_low > 0:
+            # EMA'lar spot'un altında — sağlıklı pullback bölgesi
             zone_low = ema_low
             zone_high = ema_high
         else:
+            # Synthetic zone: spot'un %0.5-1.0 altı
             zone_high = spot * (1 - stop_pct / 4)
             zone_low = spot * (1 - stop_pct / 2)
 
@@ -1659,11 +1899,17 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         tp1 = reference_entry + risk_per_unit * cfg["tp1_r"]
         tp2 = reference_entry + risk_per_unit * cfg["tp2_r"]
         tp3 = reference_entry + risk_per_unit * cfg["tp3_r"]
-    else:
+
+    else:  # SHORT
+        # Pullback bölgesi: spot'un üstünde olmalı.
+        ema_low = min(ema9, ema21)
+        ema_high = max(ema9, ema21)
         if ema_low > spot:
+            # EMA'lar spot'un üstünde — sağlıklı pullback bölgesi
             zone_low = ema_low
             zone_high = ema_high
         else:
+            # Synthetic zone: spot'un %0.5-1.0 üstü
             zone_low = spot * (1 + stop_pct / 4)
             zone_high = spot * (1 + stop_pct / 2)
 
@@ -1676,6 +1922,9 @@ def build_trade_plan(result: dict) -> Optional[dict]:
     risk_amount = ACCOUNT_SIZE_USD * RISK_PCT_PER_TRADE
     position_notional = risk_amount / stop_pct if stop_pct > 0 else 0
     quantity = position_notional / reference_entry if reference_entry > 0 else 0
+
+    # R:R sanity check — trader'a görünür olsun
+    rr_ratio = cfg["tp2_r"]  # tp2'yi referans alıyoruz (hedef R:R)
 
     return {
         "direction": signal,
@@ -1690,7 +1939,7 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         "tp1": tp1,
         "tp2": tp2,
         "tp3": tp3,
-        "rr_ratio": cfg["tp2_r"],
+        "rr_ratio": rr_ratio,
         "position_notional": position_notional,
         "quantity": quantity,
     }
@@ -1702,26 +1951,23 @@ def format_trade_plan_block(plan: Optional[dict]) -> list[str]:
 
     return [
         "",
-        "📌 Trade Plan (emir gondermez)",
-        f"Yon: {plan['direction']}",
+        "📌 Trade Plan (emir göndermez)",
+        f"Yön: {plan['direction']}",
         f"Referans Entry: {format_price(plan['reference_entry'])}",
-        f"Tercihli Entry Bolgesi: {format_price(plan['entry_zone_low'])} - {format_price(plan['entry_zone_high'])}",
+        f"Tercihli Entry Bölgesi: {format_price(plan['entry_zone_low'])} - {format_price(plan['entry_zone_high'])}",
         f"Stop: {format_price(plan['stop_price'])} (%{plan['stop_pct'] * 100:.2f})",
         f"TP1 (1R): {format_price(plan['tp1'])}",
         f"TP2 (2R): {format_price(plan['tp2'])}",
         f"TP3 / Runner (3R): {format_price(plan['tp3'])}",
         f"Hesap: {format_money(plan['account_size'])}",
-        f"Islem Riski: %{plan['risk_pct'] * 100:.2f} = {format_money(plan['risk_amount'])}",
-        f"Onerilen Notional: {format_money(plan['position_notional'])}",
-        f"Yaklasik Miktar: {plan['quantity']:.6f}",
-        "Not: Sinyal geldi diye anlik piyasa emri sart degildir; entry bolgesine pullback beklemek daha sagliklidir.",
+        f"İşlem Riski: %{plan['risk_pct'] * 100:.2f} = {format_money(plan['risk_amount'])}",
+        f"Önerilen Notional: {format_money(plan['position_notional'])}",
+        f"Yaklaşık Miktar: {plan['quantity']:.6f}",
+        "Not: Sinyal geldi diye anlık piyasa emri şart değildir; entry bölgesine pullback beklemek daha sağlıklıdır.",
     ]
-
-
 # ============================================================
 # MESSAGE FORMATTERS
 # ============================================================
-
 
 def format_signal(result: dict, title: str) -> str:
     f = result["features"]
@@ -1729,46 +1975,77 @@ def format_signal(result: dict, title: str) -> str:
     session = result["session_context"]
     news = result["news_context"]
 
-    basis_text = f"{f['basis_pct']:+.3f}%" if f["basis_pct"] is not None else "N/A"
-    futures_text = format_price(f["futures_price"]) if f["futures_price"] is not None else "N/A"
+    basis_text = (
+        f"{f['basis_pct']:+.3f}%" if f["basis_pct"] is not None else "N/A"
+    )
+    funding_text = (
+        f"{f.get('funding_rate'):+.4f}%" if f.get("funding_rate") is not None else "N/A"
+    )
+    futures_text = (
+        format_price(f["futures_price"]) if f["futures_price"] is not None else "N/A"
+    )
 
     lines = [
         title,
-        f"{result['symbol']} -> {result['signal']} / {result['level']}",
+        f"{result['symbol']} → {result['signal']} / {result['level']}",
         f"Skor: {result['score']} / {result['max_score']} {bar(result['score'], result['max_score'])}",
-        f"News-oncesi Skor: {result['pre_news_score']}",
+        f"News-öncesi Skor: {result['pre_news_score']}",
         f"News Aksiyonu: {result['news_action']}",
-        f"Guven: %{result['confidence']}",
+        f"Güven: %{result['confidence']}",
         f"Seans: {session['session']}",
-        f"Makro Carpan: x{session['macro_multiplier']}",
-        f"Mikro Carpan: x{session['micro_multiplier']}",
-        f"News Carpani: x{session['news_multiplier']}",
+        f"Makro Çarpan: x{session['macro_multiplier']}",
+        f"Mikro Çarpan: x{session['micro_multiplier']}",
+        f"News Çarpanı: x{session['news_multiplier']}",
         f"Not: {session['note']}",
         f"Haber Kategorisi: {news['category']}",
         f"Haber Risk Skoru: {news['news_risk_score']} / 3",
         f"Haber Notu: {news['note']}",
+    ]
+    if result.get("blocked_signal"):
+        lines.append(f"Ham Sinyal: {result['blocked_signal']} / {result.get('blocked_level', '-')}")
+        lines.append("Aksiyon: kalite/portföy filtresi nedeniyle NO_TRADE")
+
+    lines.extend([
         "",
         "Alt Skorlar:",
         f"Macro: {raw['macro']:+.2f} / 3 {bar(raw['macro'], 3)}",
         f"Market: {raw['market']:+.2f} / 2 {bar(raw['market'], 2)}",
+        f"MTF: {raw['mtf']:+.2f} / 3 {bar(raw['mtf'], 3)}",
         f"Trend: {raw['trend']:+.2f} / 2 {bar(raw['trend'], 2)}",
         f"Momentum: {raw['momentum']:+.2f} / 2 {bar(raw['momentum'], 2)}",
         f"Volume: {raw['volume']:+.2f} / 2 {bar(raw['volume'], 2)}",
         f"Liquidity: {raw['liquidity']:+.2f} / 2 {bar(raw['liquidity'], 2)}",
         f"Basis: {raw['basis']:+.2f} / 2 {bar(raw['basis'], 2)}",
+        f"Funding: {raw.get('funding', 0):+.2f} / 2 {bar(raw.get('funding', 0), 2)}",
         "",
         f"Spot: {format_price(f['spot_price'])}",
         f"Futures Fair: {futures_text}",
         f"Basis: {basis_text}",
+        f"Funding: {funding_text}",
         f"5m: %{f['ret_5m']:.2f} | 15m: %{f['ret_15m']:.2f} | "
         f"1h: %{f['ret_1h']:.2f} | 4h: %{f['ret_4h']:.2f}",
-        f"Hacim Orani: {f['vol_ratio']:.2f}x | Spread: {f['spread_bps']:.2f} bps",
-    ]
+        f"HTF: 1H %{f['ret_1h_tf']:.2f} | 4H %{f['ret_4h_tf']:.2f} | 24H %{f['ret_24h_tf']:.2f}",
+        f"Hacim Oranı: {f['vol_ratio']:.2f}x | Spread: {f['spread_bps']:.2f} bps",
+    ])
+
+    if result.get("regime"):
+        rg = result["regime"]
+        lines.extend(["", "🧭 Rejim", f"Durum: {rg['regime']}", f"Not: {rg['note']}"])
+    if result.get("trade_quality"):
+        tq = result["trade_quality"]
+        lines.extend(["", "⭐ Trade Quality", f"Grade: {tq['grade']} / Skor: {tq['score']}", f"Tradable: {'EVET' if tq['tradable'] else 'HAYIR'}"])
+        if tq.get("reasons"):
+            lines.append("Gerekçeler:")
+            lines.extend(f"- {r}" for r in tq["reasons"][:5])
+    if result.get("portfolio_check"):
+        pc = result["portfolio_check"]
+        lines.extend(["", "🧱 Portfolio Risk", f"Durum: {'UYGUN' if pc['allowed'] else 'BLOKLU'}", f"Sebep: {pc['reason']}"])
 
     lines.extend(format_trade_plan_block(build_trade_plan(result)))
 
     if result.get("basis_missing"):
-        lines.append("Not: Basis verisi yok, agirliklar yeniden dagitildi.")
+        lines.append("Not: Basis verisi yok, ağırlıklar yeniden dağıtıldı.")
+
     if result["veto"]:
         lines.append(f"Veto: {result['veto']}")
 
@@ -1784,18 +2061,18 @@ def make_summary(results: list[dict], session_context: SessionContext, news_cont
     headline = news_context.get("headline") or "-"
     url = news_context.get("url") or ""
     headline_line = headline + (f"\n{url}" if url else "")
-    sd = session_context.as_dict()
 
+    sd = session_context.as_dict()
     return (
-        "📊 DURUM OZETI\n\n"
+        "📊 DURUM ÖZETİ\n\n"
         f"Seans: {sd['session']}\n"
-        f"Makro Carpan: x{sd['macro_multiplier']}\n"
-        f"Mikro Carpan: x{sd['micro_multiplier']}\n"
-        f"News Carpani: x{sd['news_multiplier']}\n"
+        f"Makro Çarpan: x{sd['macro_multiplier']}\n"
+        f"Mikro Çarpan: x{sd['micro_multiplier']}\n"
+        f"News Çarpanı: x{sd['news_multiplier']}\n"
         f"Not: {sd['note']}\n\n"
         f"Haber Kategorisi: {news_context['category']}\n"
         f"Haber Risk Skoru: {news_context['news_risk_score']} / 3\n"
-        f"Haber Basligi: {headline_line}\n\n"
+        f"Haber Başlığı: {headline_line}\n\n"
         f"LONG: {', '.join(longs) if longs else '-'}\n"
         f"SHORT: {', '.join(shorts) if shorts else '-'}\n"
         f"NO_TRADE: {', '.join(neutral) if neutral else '-'}\n"
@@ -1804,22 +2081,178 @@ def make_summary(results: list[dict], session_context: SessionContext, news_cont
 
 
 # ============================================================
+# REGIME / QUALITY / PORTFOLIO ENGINE
+# ============================================================
+
+def detect_market_regime(btc: dict, eth: dict, news_context: dict) -> dict:
+    """Piyasa rejimini basit ve izah edilebilir kurallarla sınıflandırır."""
+    news_risk = float(news_context.get("news_risk_score", 0) or 0)
+    if news_risk <= REGIME_CONFIG["risk_off_news"]:
+        return {"regime": "RISK_OFF", "score": -2, "note": "Negatif haber riski yüksek."}
+    btc_mtf = score_mtf(btc)
+    eth_mtf = score_mtf(eth)
+    btc_4h = btc.get("ret_4h_tf", 0)
+    btc_24h = btc.get("ret_24h_tf", 0)
+    if btc_mtf > 1.5 and eth_mtf > 0.5 and btc_4h > REGIME_CONFIG["trend_ret_4h"]:
+        return {"regime": "TREND_UP", "score": 2, "note": "BTC/ETH üst zaman dilimlerinde yukarı trend teyitli."}
+    if btc_mtf < -1.5 and eth_mtf < -0.5 and btc_4h < -REGIME_CONFIG["trend_ret_4h"]:
+        return {"regime": "TREND_DOWN", "score": -2, "note": "BTC/ETH üst zaman dilimlerinde aşağı trend teyitli."}
+    if abs(btc_4h) < REGIME_CONFIG["chop_ret_4h"] and abs(btc_24h) < REGIME_CONFIG["trend_ret_24h"]:
+        return {"regime": "CHOP", "score": 0, "note": "BTC yönsüz/chop; sinyal seçiciliği artırıldı."}
+    return {"regime": "NEUTRAL", "score": 0, "note": "Net trend veya risk-off yok."}
+
+
+def grade_from_quality(score: float) -> str:
+    if score >= 85:
+        return "A+"
+    if score >= 70:
+        return "A"
+    if score >= 55:
+        return "B"
+    if score >= 40:
+        return "C"
+    return "D"
+
+
+def compute_trade_quality(result: dict, regime: dict) -> dict:
+    """Sinyalin işlem yapılabilirliğini A+ / A / B / C / D olarak sınıflandırır."""
+    if result.get("signal") not in ("LONG", "SHORT"):
+        return {"score": 0, "grade": "D", "tradable": False, "reasons": ["LONG/SHORT sinyali yok."]}
+    signal = result["signal"]
+    raw = result["raw"]
+    f = result["features"]
+    reasons = []
+    score = 50.0
+    direction = 1 if signal == "LONG" else -1
+    for key, weight in (("mtf", 14), ("trend", 10), ("momentum", 10), ("market", 8), ("macro", 8), ("basis", 5), ("funding", 5)):
+        val = raw.get(key, 0) * direction
+        if val > 0.5:
+            score += weight
+            reasons.append(f"{key} aynı yönde destekliyor")
+        elif val < -0.5:
+            score -= weight
+            reasons.append(f"{key} ters yönde uyarı veriyor")
+    reg = regime.get("regime")
+    if signal == "LONG" and reg == "TREND_UP":
+        score += 10
+        reasons.append("Rejim LONG için uygun: TREND_UP")
+    elif signal == "SHORT" and reg == "TREND_DOWN":
+        score += 10
+        reasons.append("Rejim SHORT için uygun: TREND_DOWN")
+    elif reg in ("CHOP", "RISK_OFF"):
+        score -= 15
+        reasons.append(f"Rejim kaliteyi düşürüyor: {reg}")
+    group = result["group"]
+    if signal == "LONG":
+        if group == "HIGH_BETA" and f.get("ret_1h", 0) > 6:
+            score -= 20
+            reasons.append("HIGH_BETA 1s pump yüksek; FOMO riski")
+        elif group == "CORE" and f.get("ret_1h", 0) > 3.5:
+            score -= 15
+            reasons.append("CORE 1s hareket aşırı; pullback beklemek daha sağlıklı")
+    else:
+        if group == "HIGH_BETA" and f.get("ret_1h", 0) < -6:
+            score -= 20
+            reasons.append("HIGH_BETA 1s dump yüksek; geç short riski")
+        elif group == "CORE" and f.get("ret_1h", 0) < -3.5:
+            score -= 15
+            reasons.append("CORE 1s düşüş aşırı; geç short riski")
+    if f.get("vol_ratio", 1) > 3.0:
+        score -= 8
+        reasons.append("Aşırı hacim spike; dağıtım/squeeze sonrası geç giriş riski")
+    if f.get("spread_bps", 999) > SPREAD_LIMITS[group] / 2:
+        score -= 8
+        reasons.append("Spread görece geniş")
+    score = clamp(score, 0, 100)
+    grade = grade_from_quality(score)
+    tradable = TRADE_QUALITY_ORDER[grade] >= TRADE_QUALITY_ORDER.get(TRADE_QUALITY_MIN_GRADE, 3)
+    if not tradable:
+        reasons.append(f"Trade quality minimum {TRADE_QUALITY_MIN_GRADE} altında: {grade}")
+    return {"score": round(score, 1), "grade": grade, "tradable": tradable, "reasons": reasons[:8]}
+
+
+def portfolio_risk_check(result: dict, state_mgr: StateManager) -> dict:
+    """Aynı anda çok fazla benzer sinyal riskini sınırlayan basit portföy filtresi."""
+    if result.get("signal") not in ("LONG", "SHORT"):
+        return {"allowed": True, "reason": "Sinyal yok."}
+    snapshot = state_mgr.snapshot()
+    symbols = snapshot.get("symbols", {})
+    active_items = [
+        (sym, v)
+        for sym, v in symbols.items()
+        if sym != result["symbol"]
+        and v.get("signal") in ("LONG", "SHORT")
+        and v.get("actionable", True)
+    ]
+    active = [v for _, v in active_items]
+    same_dir = [v for v in active if v.get("signal") == result["signal"]]
+    high_beta_active = 0
+    for sym, v in active_items:
+        if v.get("signal") in ("LONG", "SHORT") and COINS.get(sym) == "HIGH_BETA":
+            high_beta_active += 1
+    if len(active) >= PORTFOLIO_LIMITS["max_active_signals"]:
+        return {"allowed": False, "reason": "Maksimum aktif sinyal limiti dolu."}
+    if len(same_dir) >= PORTFOLIO_LIMITS["max_same_direction"]:
+        return {"allowed": False, "reason": "Aynı yönde aktif sinyal limiti dolu."}
+    if result["group"] == "HIGH_BETA" and high_beta_active >= PORTFOLIO_LIMITS["max_high_beta_active"]:
+        return {"allowed": False, "reason": "HIGH_BETA aktif sinyal limiti dolu."}
+    return {"allowed": True, "reason": "Portföy riski uygun."}
+
+
+def apply_trade_filters(result: dict) -> dict:
+    """Quality/portfolio filtrelerini aksiyon alınabilir sinyale uygular."""
+    result["raw_signal"] = result.get("signal")
+    result["actionable"] = result.get("signal") in ("LONG", "SHORT")
+    if result.get("signal") not in ("LONG", "SHORT"):
+        return result
+
+    tq = result.get("trade_quality") or {}
+    pc = result.get("portfolio_check") or {}
+    veto_reason = None
+    if tq and not tq.get("tradable", True):
+        veto_reason = f"Trade quality filtresi: {tq.get('grade', '-')}"
+    elif pc and not pc.get("allowed", True):
+        veto_reason = f"Portföy riski: {pc.get('reason', '-')}"
+
+    if veto_reason:
+        result["blocked_signal"] = result["signal"]
+        result["blocked_level"] = result["level"]
+        result["signal"] = "NO_TRADE"
+        result["level"] = "WEAK"
+        result["confidence"] = 0.0
+        result["actionable"] = False
+        result["veto"] = result.get("veto") or veto_reason
+
+    return result
+
+# ============================================================
 # ALERT LOGIC
 # ============================================================
 
-
 def should_notify_signal(result: dict) -> bool:
     if result["signal"] == "NO_TRADE":
+        return False
+    if not result.get("actionable", True):
         return False
     return LEVEL_ORDER[result["level"]] >= LEVEL_ORDER[MIN_SIGNAL_LEVEL]
 
 
 def decide_alert(old: Optional[dict], new: dict) -> Optional[str]:
-    if new.get("news_action") == "news_veto" and old and old.get("signal") in ("LONG", "SHORT"):
+    """Hangi tipte alert gönderileceğine karar verir. None = alert yok."""
+    # News veto: aktif pozisyonu olan kullanıcıya kritik bilgi
+    if (
+        new.get("news_action") == "news_veto"
+        and old
+        and old.get("signal") in ("LONG", "SHORT")
+    ):
         return "🛑 NEWS VETO"
 
     if not should_notify_signal(new):
-        if old and old.get("signal") in ("LONG", "SHORT") and new["signal"] == "NO_TRADE":
+        if (
+            old
+            and old.get("signal") in ("LONG", "SHORT")
+            and new["signal"] == "NO_TRADE"
+        ):
             return "❌ SİNYAL İPTAL"
         return None
 
@@ -1828,12 +2261,18 @@ def decide_alert(old: Optional[dict], new: dict) -> Optional[str]:
 
     old_signal = old.get("signal")
     new_signal = new["signal"]
+
     if old_signal == "NO_TRADE" and new_signal in ("LONG", "SHORT"):
         return "🚀 YENİ SİNYAL"
     if old_signal in ("LONG", "SHORT") and new_signal == "NO_TRADE":
         return "❌ SİNYAL İPTAL"
-    if old_signal != new_signal and old_signal != "NO_TRADE" and new_signal != "NO_TRADE":
+    if (
+        old_signal != new_signal
+        and old_signal != "NO_TRADE"
+        and new_signal != "NO_TRADE"
+    ):
         return "🔄 YÖN DEĞİŞTİ"
+
     if old_signal == new_signal and new_signal != "NO_TRADE":
         old_conf = float(old.get("confidence", 0))
         old_score = float(old.get("score", 0))
@@ -1841,10 +2280,17 @@ def decide_alert(old: Optional[dict], new: dict) -> Optional[str]:
             return "⚠️ SİNYAL ZAYIFLADI"
         if abs(old_score) - abs(new["score"]) >= 1.0:
             return "⚠️ SKOR ZAYIFLADI"
+
     return None
 
 
 def should_cooldown(old: Optional[dict], alert_type: str) -> bool:
+    """Cooldown kararı.
+
+    Kritik alertler (NEWS VETO, SİNYAL İPTAL, YÖN DEĞİŞTİ) cooldown'a takılmaz —
+    kullanıcının ANLIK bilmesi gereken durumlar bunlar.
+    """
+    # Kritik alert ise cooldown bypass
     if alert_type in CRITICAL_ALERTS:
         return False
     if not old:
@@ -1867,17 +2313,19 @@ def pending_alert_still_relevant(alert_type: Optional[str], new: dict) -> bool:
 
 
 def detect_movement_alert(symbol: str, result: dict) -> Optional[list[str]]:
+    """Sinyal oluşmasa bile olağan dışı coin hareketlerini yakalar."""
     group = COINS[symbol]
     f = result["features"]
     thresholds = MOVEMENT_ALERT_THRESHOLDS[group]
 
     reasons = []
     if abs(f["ret_15m"]) >= thresholds["ret_15m"]:
-        reasons.append(f"15dk degisim: %{f['ret_15m']:+.2f}")
+        reasons.append(f"15dk değişim: %{f['ret_15m']:+.2f}")
     if abs(f["ret_1h"]) >= thresholds["ret_1h"]:
-        reasons.append(f"1s degisim: %{f['ret_1h']:+.2f}")
+        reasons.append(f"1s değişim: %{f['ret_1h']:+.2f}")
     if f["vol_ratio"] >= thresholds["volume_ratio"]:
-        reasons.append(f"Hacim orani: {f['vol_ratio']:.2f}x")
+        reasons.append(f"Hacim oranı: {f['vol_ratio']:.2f}x")
+
     return reasons if reasons else None
 
 
@@ -1895,9 +2343,10 @@ def format_movement_alert(symbol: str, result: dict, reasons: list[str]) -> str:
         f"Fiyat: {format_price(f['spot_price'])}\n"
         f"5m: %{f['ret_5m']:+.2f} | 15m: %{f['ret_15m']:+.2f} | "
         f"1h: %{f['ret_1h']:+.2f} | 4h: %{f['ret_4h']:+.2f}\n"
-        f"Hacim Orani: {f['vol_ratio']:.2f}x\n"
+        f"Hacim Oranı: {f['vol_ratio']:.2f}x\n"
         f"Spread: {f['spread_bps']:.2f} bps\n\n"
-        f"Not: Bu bir LONG/SHORT sinyali degildir. Bot sadece olagan disi coin hareketi tespit etti.\n"
+        f"Not: Bu bir LONG/SHORT sinyali değildir. "
+        f"Bot sadece olağan dışı coin hareketi tespit etti.\n"
         f"Zaman: {tr_now_text()}"
     )
 
@@ -1912,11 +2361,15 @@ def mark_movement_alert_sent(state_mgr: StateManager, symbol: str) -> None:
 
 
 # ============================================================
-# BOT LOOP
+# BOT LOOP — modülerleştirilmiş
 # ============================================================
 
-
 def _process_news_cycle(state_mgr: StateManager, current_news: dict) -> dict:
+    """News taraması ve alert gönderim döngüsü.
+
+    Returns:
+        Güncel news context.
+    """
     last_news_scan = state_mgr.get_meta("last_news_scan_ts", 0)
     if now_ts() - last_news_scan < NEWS_SCAN_INTERVAL_SECONDS:
         return current_news
@@ -1929,10 +2382,12 @@ def _process_news_cycle(state_mgr: StateManager, current_news: dict) -> dict:
 
     state_mgr.set_meta("last_news_scan_ts", now_ts())
 
+    # News alert
     if SEND_STANDALONE_NEWS_ALERTS and abs(new_news["news_risk_score"]) >= NEWS_VETO_THRESHOLD:
         last_alert_ts = state_mgr.get_meta("last_news_alert_ts", 0)
         last_alert_hash = state_mgr.get_meta("last_news_alert_hash")
         current_hash = headline_hash(new_news.get("headline"))
+
         cooled = now_ts() - last_alert_ts >= NEWS_ALERT_COOLDOWN_SECONDS
         new_headline = current_hash != last_alert_hash
 
@@ -1952,15 +2407,23 @@ def _process_symbol(
     news_ctx: dict,
     state_mgr: StateManager,
 ) -> Optional[dict]:
+    """Tek coin için sinyal üretip gerekirse alert gönderir."""
     try:
         result = weighted_signal(symbol, features, btc, eth, session_ctx, news_ctx)
+        regime = detect_market_regime(btc, eth, news_ctx)
+        result["regime"] = regime
+        result["trade_quality"] = compute_trade_quality(result, regime)
+        result["portfolio_check"] = portfolio_risk_check(result, state_mgr)
+        result = apply_trade_filters(result)
 
+        # Movement alert (sinyal bağımsız)
         if SEND_MOVEMENT_ALERTS:
             movement_reasons = detect_movement_alert(symbol, result)
             if movement_reasons and not should_movement_alert_cooldown(state_mgr, symbol):
                 if send_message(format_movement_alert(symbol, result, movement_reasons)):
                     mark_movement_alert_sent(state_mgr, symbol)
 
+        # Sinyal alert
         old = state_mgr.get_symbol(symbol)
         pending = old.get("pending_alert_type") if old else None
         if pending_alert_still_relevant(pending, result):
@@ -1977,22 +2440,25 @@ def _process_symbol(
             else:
                 pending = alert_type
 
-        state_mgr.update_symbol(
-            symbol,
-            {
-                "signal": result["signal"],
-                "level": result["level"],
-                "score": result["score"],
-                "confidence": result["confidence"],
-                "last_alert_ts": last_alert_ts,
-                "pending_alert_type": pending,
-                "updated_at": now_ts(),
-            },
-        )
+        state_mgr.update_symbol(symbol, {
+            "signal": result["signal"],
+            "level": result["level"],
+            "score": result["score"],
+            "confidence": result["confidence"],
+            "actionable": result.get("actionable", result["signal"] in ("LONG", "SHORT")),
+            "raw_signal": result.get("raw_signal"),
+            "blocked_signal": result.get("blocked_signal"),
+            "quality_grade": result.get("trade_quality", {}).get("grade"),
+            "regime": result.get("regime", {}).get("regime"),
+            "last_alert_ts": last_alert_ts,
+            "pending_alert_type": pending,
+            "updated_at": now_ts(),
+        })
+
         return result
 
     except Exception as e:
-        log.warning("%s sinyal islemi basarisiz: %s", symbol, e)
+        log.warning("%s sinyal işlemi başarısız: %s", symbol, e)
         return None
 
 
@@ -2002,10 +2468,13 @@ def _send_periodic_messages(
     session_ctx: SessionContext,
     news_ctx: dict,
 ) -> None:
+    """Özet ve heartbeat mesajları."""
     last_summary = state_mgr.get_meta("last_summary_ts", 0)
     if now_ts() - last_summary >= SUMMARY_INTERVAL_SECONDS:
         if results:
             send_message(make_summary(results, session_ctx, news_ctx))
+        # results boş olsa bile ts ilerletilsin ki bir sonraki dilim
+        # SUMMARY_INTERVAL kadar sonraya kaysın (dakika dakika tekrar denemesin).
         state_mgr.set_meta("last_summary_ts", now_ts())
 
     last_heartbeat = state_mgr.get_meta("last_heartbeat_ts", 0)
@@ -2023,10 +2492,15 @@ def _send_periodic_messages(
 
 
 def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
-    log.info("BOT BASLADI v%s", __version__)
-    send_message(f"BOT BASLADI 🚀 v{__version__} - News + session + basis aktif.")
+    """Ana bot döngüsü."""
+    log.info("BOT BAŞLADI v%s", __version__)
+    send_message(
+        f"BOT BAŞLADI 🚀 v{__version__} — News (yön-bağımlı veto/dampener) + session + basis aktif."
+    )
 
     state_mgr = _STATE_MGR
+
+    # İlk açılışta hemen özet/heartbeat tetiklenmesin
     if not state_mgr.get_meta("last_summary_ts"):
         state_mgr.set_meta("last_summary_ts", now_ts())
     if not state_mgr.get_meta("last_heartbeat_ts"):
@@ -2043,15 +2517,19 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
             news_context = _process_news_cycle(state_mgr, news_context)
             state_mgr.save()
 
+            # BTC ve ETH features (referans, başarısızsa tur atla)
             try:
                 btc = get_features("BTCUSDT")
                 eth = get_features("ETHUSDT")
             except Exception as e:
                 consecutive_failures += 1
                 wait = min(ERROR_BACKOFF_LONG, ERROR_BACKOFF_SHORT * consecutive_failures)
+                log.error(
+                    "BTC/ETH features alınamadı (#%d), %ds bekleniyor: %s",
+                    consecutive_failures, wait, e,
+                )
                 state_mgr.set_meta("consecutive_failures", consecutive_failures)
                 state_mgr.save()
-                log.error("BTC/ETH features alinamadi (#%d), %ds bekleniyor: %s", consecutive_failures, wait, e)
                 if sleep_or_stop(wait):
                     break
                 continue
@@ -2059,30 +2537,40 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
             consecutive_failures = 0
             state_mgr.set_meta("consecutive_failures", 0)
 
+            # Diğer coinleri paralel çek (BTC/ETH zaten var).
+            # Her coin için get_features kendi içinde 5 endpointi paralel çekiyor;
+            # coinler arası paralelizm scan turunu dramatik kısaltır.
             features_cache: dict[str, dict] = {"BTCUSDT": btc, "ETHUSDT": eth}
             other_symbols = [s for s in COINS if s not in features_cache]
+
             if other_symbols:
-                future_to_symbol = {_SYMBOL_EXECUTOR.submit(get_features, sym): sym for sym in other_symbols}
+                future_to_symbol = {
+                    _SYMBOL_EXECUTOR.submit(get_features, sym): sym
+                    for sym in other_symbols
+                }
                 for fut in as_completed(future_to_symbol):
                     sym = future_to_symbol[fut]
                     try:
                         features_cache[sym] = fut.result()
                     except Exception as e:
-                        log.warning("%s features alinamadi: %s", sym, e)
+                        log.warning("%s features alınamadı: %s", sym, e)
 
             results: list[dict] = []
             for symbol in COINS:
                 features = features_cache.get(symbol)
                 if features is None:
                     continue
-                result = _process_symbol(symbol, features, btc, eth, session_ctx, news_context, state_mgr)
+
+                result = _process_symbol(
+                    symbol, features, btc, eth, session_ctx, news_context, state_mgr
+                )
                 if result:
                     results.append(result)
 
             _send_periodic_messages(state_mgr, results, session_ctx, news_context)
+
             state_mgr.set_meta("last_successful_scan_ts", now_ts())
             state_mgr.save()
-
             if sleep_or_stop(SCAN_INTERVAL):
                 break
 
@@ -2091,9 +2579,12 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
                 break
             log.exception("ANA HATA: %s", e)
             try:
-                send_message(f"⚠️ Bot hata aldi:\n{e}\nZaman: {tr_now_text()}")
+                send_message(f"⚠️ Bot hata aldı:\n{e}\nZaman: {tr_now_text()}")
             except Exception:
                 pass
+            # Ana hata sonrası uzun backoff istemiyoruz; yine de consecutive
+            # sayacını da sıfırlayalım ki BTC/ETH başarısızlığı normalleşince
+            # hemen agresif backoff'a girilmesin.
             consecutive_failures = 0
             state_mgr.set_meta("consecutive_failures", 0)
             state_mgr.save()
@@ -2104,7 +2595,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
 
 
 # ============================================================
-# ENTRYPOINT / SHUTDOWN
+# ENTRYPOINT
 # ============================================================
 
 _SHUTDOWN_LOCK = threading.RLock()
@@ -2117,7 +2608,7 @@ def shutdown_resources() -> None:
         if _SHUTDOWN_DONE:
             return
         _SHUTDOWN_DONE = True
-        log.info("Shutdown basladi, kaynaklar kapatiliyor.")
+        log.info("Shutdown sinyali alındı, kaynaklar kapatılıyor.")
         _STOP_EVENT.set()
         try:
             _STATE_MGR.save()
