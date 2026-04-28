@@ -36,7 +36,7 @@ from flask import Flask
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-__version__ = "1.8.0-position-sizing-v2"
+__version__ = "2.0.0-regime-commander"
 
 # ============================================================
 # LOGGING
@@ -106,49 +106,6 @@ def validate_env() -> None:
         log.warning(msg)
     if not NEWS_API_KEY:
         log.info("NEWS_API_KEY eksik — sadece GDELT kullanılacak.")
-
-
-def validate_runtime_config() -> None:
-    """Cross-field config checks. Uyuşmayan değerleri güvenli aralığa çeker."""
-    global POSITION_SIZING_MIN_RISK_PCT
-    global POSITION_SIZING_MAX_RISK_PCT
-    global POSITION_SIZING_BASE_RISK_PCT
-    global POSITION_SIZING_LOSS_STREAK_CUT_1
-    global POSITION_SIZING_LOSS_STREAK_CUT_2
-
-    if POSITION_SIZING_MIN_RISK_PCT > POSITION_SIZING_MAX_RISK_PCT:
-        log.warning(
-            "POSITION_SIZING_MIN_RISK_PCT (%s) > POSITION_SIZING_MAX_RISK_PCT (%s). Değerler swap edildi.",
-            POSITION_SIZING_MIN_RISK_PCT,
-            POSITION_SIZING_MAX_RISK_PCT,
-        )
-        POSITION_SIZING_MIN_RISK_PCT, POSITION_SIZING_MAX_RISK_PCT = (
-            POSITION_SIZING_MAX_RISK_PCT,
-            POSITION_SIZING_MIN_RISK_PCT,
-        )
-
-    if POSITION_SIZING_BASE_RISK_PCT < POSITION_SIZING_MIN_RISK_PCT:
-        log.warning(
-            "POSITION_SIZING_BASE_RISK_PCT (%s) min'in altında. %s'e çekildi.",
-            POSITION_SIZING_BASE_RISK_PCT,
-            POSITION_SIZING_MIN_RISK_PCT,
-        )
-        POSITION_SIZING_BASE_RISK_PCT = POSITION_SIZING_MIN_RISK_PCT
-    elif POSITION_SIZING_BASE_RISK_PCT > POSITION_SIZING_MAX_RISK_PCT:
-        log.warning(
-            "POSITION_SIZING_BASE_RISK_PCT (%s) max'in üstünde. %s'e çekildi.",
-            POSITION_SIZING_BASE_RISK_PCT,
-            POSITION_SIZING_MAX_RISK_PCT,
-        )
-        POSITION_SIZING_BASE_RISK_PCT = POSITION_SIZING_MAX_RISK_PCT
-
-    if POSITION_SIZING_LOSS_STREAK_CUT_2 < POSITION_SIZING_LOSS_STREAK_CUT_1:
-        log.warning(
-            "LOSS_STREAK_CUT_2 (%s), CUT_1'den küçük. CUT_2 değeri %s olarak güncellendi.",
-            POSITION_SIZING_LOSS_STREAK_CUT_2,
-            POSITION_SIZING_LOSS_STREAK_CUT_1,
-        )
-        POSITION_SIZING_LOSS_STREAK_CUT_2 = POSITION_SIZING_LOSS_STREAK_CUT_1
 
 
 # ============================================================
@@ -251,9 +208,6 @@ BACKTEST_VALIDATION_REPORT_FILE = os.getenv(
     "BACKTEST_VALIDATION_REPORT_FILE", "backtest_validation_report.json"
 )
 
-# Legacy static risk (trade plan + position sizing için ortak anchor)
-RISK_PCT_PER_TRADE = env_float("RISK_PCT_PER_TRADE", 0.01, min_value=0.0001)
-
 # Position Sizing Engine v2
 # Risk artık sadece sabit RISK_PCT_PER_TRADE değildir; sinyal kalitesi,
 # confidence, piyasa rejimi, sembol/grup edge'i ve loss-streak'e göre
@@ -268,8 +222,15 @@ POSITION_SIZING_MIN_EDGE_TRADES = env_int("POSITION_SIZING_MIN_EDGE_TRADES", 6, 
 POSITION_SIZING_LOOKBACK_TRADES = env_int("POSITION_SIZING_LOOKBACK_TRADES", 60, min_value=10)
 POSITION_SIZING_LOSS_STREAK_CUT_1 = env_int("POSITION_SIZING_LOSS_STREAK_CUT_1", 2, min_value=1)
 POSITION_SIZING_LOSS_STREAK_CUT_2 = env_int("POSITION_SIZING_LOSS_STREAK_CUT_2", 3, min_value=2)
-POSITION_SIZING_MAX_NOTIONAL_MULTIPLIER = env_float(
-    "POSITION_SIZING_MAX_NOTIONAL_MULTIPLIER", 2.5, min_value=1.0
+
+# Regime Commander + Entry + Strategy Simulation
+REGIME_COMMANDER_ENABLED = os.getenv("REGIME_COMMANDER_ENABLED", "1") == "1"
+ENTRY_ENGINE_ENABLED = os.getenv("ENTRY_ENGINE_ENABLED", "1") == "1"
+ENTRY_ENGINE_REQUIRE_READY = os.getenv("ENTRY_ENGINE_REQUIRE_READY", "1") == "1"
+STRATEGY_SIMULATION_ENABLED = os.getenv("STRATEGY_SIMULATION_ENABLED", "1") == "1"
+STRATEGY_SIMULATION_MIN_TRADES = env_int("STRATEGY_SIMULATION_MIN_TRADES", 20, min_value=5)
+STRATEGY_SIMULATION_REPORT_FILE = os.getenv(
+    "STRATEGY_SIMULATION_REPORT_FILE", "strategy_simulation_report.json"
 )
 
 # Hata sonrası bekleme süreleri
@@ -315,6 +276,7 @@ MOVEMENT_ALERT_THRESHOLDS: dict[str, dict[str, float]] = {
 # ============================================================
 
 ACCOUNT_SIZE_USD = env_float("ACCOUNT_SIZE_USD", 800.0, min_value=1.0)
+RISK_PCT_PER_TRADE = env_float("RISK_PCT_PER_TRADE", 0.01, min_value=0.0001)
 
 TRADE_PLAN_CONFIG: dict[str, dict[str, float]] = {
     "CORE": {
@@ -403,6 +365,108 @@ REGIME_CONFIG = {
     "trend_ret_24h": 2.5,
     "chop_ret_4h": 0.45,
     "risk_off_news": -2.0,
+    "news_chaos_abs": 2.5,
+    "altseason_eth_outperf": 1.0,
+    "squeeze_funding_abs": 0.08,
+    "high_vol_1h_core": 3.0,
+    "high_vol_1h_high_beta": 5.0,
+}
+
+# Regime Commander Strategy Matrix
+# Felsefe:
+#   Kötü rejimde hayatta kal.
+#   İyi rejimde büyü.
+#   Mükemmel rejimde agresifleş.
+#   Rejim bozulunca çık.
+REGIME_STRATEGY_MATRIX: dict[str, dict[str, Any]] = {
+    "RISK_ON_TREND_UP": {
+        "direction_bias": "LONG_ONLY",
+        "allow_long": True,
+        "allow_short": False,
+        "high_beta_allowed": True,
+        "risk_multiplier": 1.25,
+        "min_quality": "A",
+        "quality_bonus": 8,
+        "tp_style": "trend_runner",
+        "note": "Risk-on yukarı trend: pullback long ve güçlü A/A+ setup öncelikli.",
+    },
+    "RISK_ON_ALTSEASON": {
+        "direction_bias": "LONG_ONLY_HIGH_BETA_OK",
+        "allow_long": True,
+        "allow_short": False,
+        "high_beta_allowed": True,
+        "risk_multiplier": 1.45,
+        "min_quality": "A",
+        "quality_bonus": 10,
+        "tp_style": "aggressive_runner",
+        "note": "Altseason rejimi: HIGH_BETA long serbest ama pump kovalamadan retest/pullback şart.",
+    },
+    "RISK_OFF_TREND_DOWN": {
+        "direction_bias": "SHORT_ONLY_OR_CASH",
+        "allow_long": False,
+        "allow_short": True,
+        "high_beta_allowed": False,
+        "risk_multiplier": 0.55,
+        "min_quality": "A+",
+        "quality_bonus": -10,
+        "tp_style": "defensive",
+        "note": "Risk-off düşüş: long kapalı, sadece çok kaliteli short veya nakit.",
+    },
+    "CHOP_RANGE": {
+        "direction_bias": "SELECTIVE_ONLY",
+        "allow_long": True,
+        "allow_short": True,
+        "high_beta_allowed": False,
+        "risk_multiplier": 0.45,
+        "min_quality": "A+",
+        "quality_bonus": -12,
+        "tp_style": "quick_tp",
+        "note": "Chop/range: sinyal gürültüsü yüksek; A+ dışında işlem yok, risk düşük.",
+    },
+    "NEWS_CHAOS": {
+        "direction_bias": "NO_NEW_TRADE",
+        "allow_long": False,
+        "allow_short": False,
+        "high_beta_allowed": False,
+        "risk_multiplier": 0.0,
+        "min_quality": "A+",
+        "quality_bonus": -30,
+        "tp_style": "cash",
+        "note": "Haber kaosu: yeni trade kapalı; mevcut pozisyonlarda risk azaltma öncelikli.",
+    },
+    "SQUEEZE_LONG": {
+        "direction_bias": "LONG_ONLY_FAST_TP",
+        "allow_long": True,
+        "allow_short": False,
+        "high_beta_allowed": True,
+        "risk_multiplier": 0.85,
+        "min_quality": "A+",
+        "quality_bonus": 4,
+        "tp_style": "fast_tp_runner",
+        "note": "Short squeeze ihtimali: küçük başlangıç, hızlı TP1 ve runner yaklaşımı.",
+    },
+    "SQUEEZE_SHORT": {
+        "direction_bias": "SHORT_ONLY_FAST_TP",
+        "allow_long": False,
+        "allow_short": True,
+        "high_beta_allowed": True,
+        "risk_multiplier": 0.80,
+        "min_quality": "A+",
+        "quality_bonus": 4,
+        "tp_style": "fast_tp_runner",
+        "note": "Long liquidation ihtimali: küçük short, hızlı kâr alma.",
+    },
+    "NEUTRAL": {
+        "direction_bias": "BALANCED",
+        "allow_long": True,
+        "allow_short": True,
+        "high_beta_allowed": False,
+        "risk_multiplier": 0.75,
+        "min_quality": "A",
+        "quality_bonus": -3,
+        "tp_style": "standard",
+        "note": "Nötr rejim: sadece kaliteli setup, HIGH_BETA sınırlı.",
+    },
 }
 
 TRADE_QUALITY_MIN_GRADE = os.getenv("TRADE_QUALITY_MIN_GRADE", "A")
@@ -2120,22 +2184,34 @@ def _ps_confidence_multiplier(confidence: float) -> float:
     return 0.65
 
 
-def _ps_regime_multiplier(signal: str, regime_name: str) -> float:
-    regime_name = regime_name or "UNKNOWN"
-    if regime_name == "RISK_OFF":
-        return 0.35
-    if regime_name == "CHOP":
-        return 0.55
-    if signal == "LONG" and regime_name == "TREND_UP":
-        return 1.25
-    if signal == "SHORT" and regime_name == "TREND_DOWN":
-        return 1.25
-    if signal == "LONG" and regime_name == "TREND_DOWN":
-        return 0.55
-    if signal == "SHORT" and regime_name == "TREND_UP":
-        return 0.55
-    return 1.0
 
+def get_regime_strategy(regime_name: str) -> dict:
+    """Return a defensive copy of the strategy profile for the current regime."""
+    profile = REGIME_STRATEGY_MATRIX.get(regime_name) or REGIME_STRATEGY_MATRIX["NEUTRAL"]
+    return copy.deepcopy(profile)
+
+
+def quality_meets_min(grade: Optional[str], minimum: Optional[str]) -> bool:
+    """Compare A+/A/B/C/D grades."""
+    if not minimum:
+        return True
+    return TRADE_QUALITY_ORDER.get(str(grade or "D").upper(), 0) >= TRADE_QUALITY_ORDER.get(str(minimum).upper(), 0)
+
+
+def _ps_regime_multiplier(signal: str, regime_name: str) -> float:
+    """Position sizing regime multiplier delegated to Regime Commander matrix."""
+    if not REGIME_COMMANDER_ENABLED:
+        return 1.0
+
+    strategy = get_regime_strategy(regime_name or "NEUTRAL")
+    base = float(strategy.get("risk_multiplier", 1.0))
+
+    if signal == "LONG" and not strategy.get("allow_long", True):
+        return 0.0
+    if signal == "SHORT" and not strategy.get("allow_short", True):
+        return 0.0
+
+    return clamp(base, 0.0, 1.75)
 
 def _ps_loss_streak_multiplier(streak: int) -> float:
     if streak >= POSITION_SIZING_LOSS_STREAK_CUT_2:
@@ -2157,28 +2233,15 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
     if not POSITION_SIZING_ENABLED:
         risk_pct = clamp(base_risk, POSITION_SIZING_MIN_RISK_PCT, POSITION_SIZING_MAX_RISK_PCT)
         risk_amount = ACCOUNT_SIZE_USD * risk_pct
-        position_notional = risk_amount / stop_pct if stop_pct > 0 else 0.0
-        notional_cap = ACCOUNT_SIZE_USD * POSITION_SIZING_MAX_NOTIONAL_MULTIPLIER
-        capped = position_notional > notional_cap
-        if capped:
-            position_notional = notional_cap
         return {
             "enabled": False,
             "risk_pct": risk_pct,
             "risk_amount": risk_amount,
-            "position_notional": position_notional,
-            "notional_cap": notional_cap,
-            "notional_capped": capped,
+            "position_notional": risk_amount / stop_pct if stop_pct > 0 else 0.0,
             "multiplier": 1.0,
             "mode": "STATIC",
             "loss_streak": 0,
-            "reasons": [
-                "Position sizing kapalı; sabit risk kullanıldı.",
-                (
-                    f"Notional cap uygulandı: {POSITION_SIZING_MAX_NOTIONAL_MULTIPLIER:.2f}x hesap boyutu."
-                    if capped else "Notional cap tetiklenmedi."
-                ),
-            ],
+            "reasons": ["Position sizing kapalı; sabit risk kullanıldı."],
         }
 
     symbol = result.get("symbol")
@@ -2224,11 +2287,6 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
     )
     risk_amount = ACCOUNT_SIZE_USD * risk_pct
     position_notional = risk_amount / stop_pct if stop_pct > 0 else 0.0
-    notional_cap = ACCOUNT_SIZE_USD * POSITION_SIZING_MAX_NOTIONAL_MULTIPLIER
-    capped = False
-    if position_notional > notional_cap:
-        position_notional = notional_cap
-        capped = True
 
     if risk_pct >= base_risk * 1.35:
         mode = "GROWTH"
@@ -2244,10 +2302,6 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         f"Loss streak {loss_streak} çarpanı x{ls_mult:.2f}",
         *edge_notes,
     ]
-    if capped:
-        reasons.append(
-            f"Notional cap uygulandı: {POSITION_SIZING_MAX_NOTIONAL_MULTIPLIER:.2f}x hesap boyutu."
-        )
 
     return {
         "enabled": True,
@@ -2256,8 +2310,6 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         "risk_pct": risk_pct,
         "risk_amount": risk_amount,
         "position_notional": position_notional,
-        "notional_cap": notional_cap,
-        "notional_capped": capped,
         "multiplier": round(raw_multiplier, 3),
         "loss_streak": loss_streak,
         "quality_multiplier": q_mult,
@@ -2308,6 +2360,14 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         return None
     pc = result.get("portfolio_check")
     if pc and not pc.get("allowed", True):
+        return None
+    rc = result.get("regime_commander")
+    if rc and not rc.get("allowed", True):
+        return None
+    ee = result.get("entry_engine")
+    if ee and ee.get("status") == "BLOCKED":
+        return None
+    if ENTRY_ENGINE_REQUIRE_READY and ee and ee.get("status") != "READY":
         return None
 
     group = result["group"]
@@ -2364,6 +2424,25 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         tp2 = reference_entry - risk_per_unit * cfg["tp2_r"]
         tp3 = reference_entry - risk_per_unit * cfg["tp3_r"]
 
+    regime_info = result.get("regime") or {}
+    tp_style = regime_info.get("tp_style") or (result.get("regime_commander", {}).get("strategy", {}) or {}).get("tp_style")
+    if tp_style in ("quick_tp", "fast_tp_runner"):
+        # Chop/squeeze rejimlerinde hızlı TP tercih edilir: hedefler biraz yakınlaşır.
+        if signal == "LONG":
+            tp1 = reference_entry + risk_per_unit * max(0.75, cfg["tp1_r"] * 0.80)
+            tp2 = reference_entry + risk_per_unit * max(1.25, cfg["tp2_r"] * 0.75)
+            tp3 = reference_entry + risk_per_unit * max(2.00, cfg["tp3_r"] * 0.70)
+        else:
+            tp1 = reference_entry - risk_per_unit * max(0.75, cfg["tp1_r"] * 0.80)
+            tp2 = reference_entry - risk_per_unit * max(1.25, cfg["tp2_r"] * 0.75)
+            tp3 = reference_entry - risk_per_unit * max(2.00, cfg["tp3_r"] * 0.70)
+    elif tp_style in ("trend_runner", "aggressive_runner"):
+        # Risk-on trend/altseason: TP3 runner daha geniş bırakılır.
+        if signal == "LONG":
+            tp3 = reference_entry + risk_per_unit * max(cfg["tp3_r"], 3.5)
+        else:
+            tp3 = reference_entry - risk_per_unit * max(cfg["tp3_r"], 3.5)
+
     position_sizing = compute_position_sizing(result, stop_pct)
     risk_pct = float(position_sizing["risk_pct"])
     risk_amount = float(position_sizing["risk_amount"])
@@ -2379,6 +2458,8 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         "risk_pct": risk_pct,
         "risk_amount": risk_amount,
         "position_sizing": position_sizing,
+        "entry_engine": copy.deepcopy(result.get("entry_engine", {})),
+        "regime_commander": copy.deepcopy(result.get("regime_commander", {})),
         "reference_entry": reference_entry,
         "entry_zone_low": zone_low,
         "entry_zone_high": zone_high,
@@ -2534,21 +2615,114 @@ def make_summary(results: list[dict], session_context: SessionContext, news_cont
 # ============================================================
 
 def detect_market_regime(btc: dict, eth: dict, news_context: dict) -> dict:
-    """Piyasa rejimini basit ve izah edilebilir kurallarla sınıflandırır."""
+    """Market Regime Engine v2.
+
+    Üst akıl: aynı sinyal, her rejimde aynı anlama gelmez. Bu fonksiyon
+    BTC/ETH üst zaman dilimi, haber riski ve funding proxy'siyle piyasanın
+    oynadığı oyunu sınıflandırır.
+    """
     news_risk = float(news_context.get("news_risk_score", 0) or 0)
-    if news_risk <= REGIME_CONFIG["risk_off_news"]:
-        return {"regime": "RISK_OFF", "score": -2, "note": "Negatif haber riski yüksek."}
+    category = news_context.get("category") or "NONE"
+    match_count = int(news_context.get("match_count", 0) or 0)
+
     btc_mtf = score_mtf(btc)
     eth_mtf = score_mtf(eth)
-    btc_4h = btc.get("ret_4h_tf", 0)
-    btc_24h = btc.get("ret_24h_tf", 0)
-    if btc_mtf > 1.5 and eth_mtf > 0.5 and btc_4h > REGIME_CONFIG["trend_ret_4h"]:
-        return {"regime": "TREND_UP", "score": 2, "note": "BTC/ETH üst zaman dilimlerinde yukarı trend teyitli."}
-    if btc_mtf < -1.5 and eth_mtf < -0.5 and btc_4h < -REGIME_CONFIG["trend_ret_4h"]:
-        return {"regime": "TREND_DOWN", "score": -2, "note": "BTC/ETH üst zaman dilimlerinde aşağı trend teyitli."}
-    if abs(btc_4h) < REGIME_CONFIG["chop_ret_4h"] and abs(btc_24h) < REGIME_CONFIG["trend_ret_24h"]:
-        return {"regime": "CHOP", "score": 0, "note": "BTC yönsüz/chop; sinyal seçiciliği artırıldı."}
-    return {"regime": "NEUTRAL", "score": 0, "note": "Net trend veya risk-off yok."}
+    btc_4h = float(btc.get("ret_4h_tf", 0) or 0)
+    btc_24h = float(btc.get("ret_24h_tf", 0) or 0)
+    eth_24h = float(eth.get("ret_24h_tf", 0) or 0)
+
+    btc_funding = btc.get("funding_rate")
+    btc_funding = float(btc_funding) if btc_funding is not None else 0.0
+
+    notes: list[str] = []
+
+    if abs(news_risk) >= REGIME_CONFIG["news_chaos_abs"] or (
+        category in ("WAR", "CRYPTO_RISK")
+        and news_risk <= -2
+        and match_count >= 2
+    ):
+        regime_name = "NEWS_CHAOS"
+        notes.append(f"Yüksek haber şoku: {category}, risk={news_risk}.")
+    elif (
+        btc_funding <= -REGIME_CONFIG["squeeze_funding_abs"]
+        and btc_4h > 0.4
+        and btc_mtf > 0
+    ):
+        regime_name = "SQUEEZE_LONG"
+        notes.append("Negatif funding + yukarı tepki: short squeeze ihtimali.")
+    elif (
+        btc_funding >= REGIME_CONFIG["squeeze_funding_abs"]
+        and btc_4h < -0.4
+        and btc_mtf < 0
+    ):
+        regime_name = "SQUEEZE_SHORT"
+        notes.append("Pozitif funding + aşağı kırılım: long liquidation ihtimali.")
+    elif (
+        news_risk <= REGIME_CONFIG["risk_off_news"]
+        or (btc_mtf < -1.4 and eth_mtf < -0.6 and btc_4h < -REGIME_CONFIG["trend_ret_4h"])
+        or (btc_24h < -REGIME_CONFIG["trend_ret_24h"] and eth_24h < -REGIME_CONFIG["trend_ret_24h"])
+    ):
+        regime_name = "RISK_OFF_TREND_DOWN"
+        notes.append("BTC/ETH zayıf veya negatif haber baskısı yüksek.")
+    elif (
+        btc_24h > -1.0
+        and eth_24h - btc_24h >= REGIME_CONFIG["altseason_eth_outperf"]
+        and eth_mtf > 0.8
+        and news_risk >= -0.5
+    ):
+        regime_name = "RISK_ON_ALTSEASON"
+        notes.append("ETH BTC'ye göre güçlü; altcoin risk iştahı proxy'si pozitif.")
+    elif (
+        btc_mtf > 1.4
+        and eth_mtf > 0.5
+        and btc_4h > REGIME_CONFIG["trend_ret_4h"]
+        and btc_24h > 0
+        and news_risk > -1.0
+    ):
+        regime_name = "RISK_ON_TREND_UP"
+        notes.append("BTC/ETH üst zaman dilimlerinde yukarı trend teyitli.")
+    elif abs(btc_4h) < REGIME_CONFIG["chop_ret_4h"] and abs(btc_24h) < REGIME_CONFIG["trend_ret_24h"]:
+        regime_name = "CHOP_RANGE"
+        notes.append("BTC yönsüz/range; fake sinyal riski yüksek.")
+    else:
+        regime_name = "NEUTRAL"
+        notes.append("Net risk-on/risk-off yok; seçici mod.")
+
+    strategy = get_regime_strategy(regime_name)
+    score_map = {
+        "NEWS_CHAOS": -3,
+        "RISK_OFF_TREND_DOWN": -2,
+        "CHOP_RANGE": -1,
+        "NEUTRAL": 0,
+        "SQUEEZE_SHORT": -1,
+        "SQUEEZE_LONG": 1,
+        "RISK_ON_TREND_UP": 2,
+        "RISK_ON_ALTSEASON": 3,
+    }
+
+    return {
+        "regime": regime_name,
+        "score": score_map.get(regime_name, 0),
+        "direction_bias": strategy["direction_bias"],
+        "risk_multiplier": strategy["risk_multiplier"],
+        "min_quality": strategy["min_quality"],
+        "high_beta_allowed": strategy["high_beta_allowed"],
+        "allow_long": strategy["allow_long"],
+        "allow_short": strategy["allow_short"],
+        "tp_style": strategy.get("tp_style", "standard"),
+        "strategy_note": strategy["note"],
+        "note": " ".join(notes),
+        "metrics": {
+            "btc_mtf": round(btc_mtf, 2),
+            "eth_mtf": round(eth_mtf, 2),
+            "btc_4h": round(btc_4h, 2),
+            "btc_24h": round(btc_24h, 2),
+            "eth_24h": round(eth_24h, 2),
+            "news_risk": news_risk,
+            "btc_funding": round(btc_funding, 4),
+        },
+    }
+
 
 
 def grade_from_quality(score: float) -> str:
@@ -2567,13 +2741,24 @@ def compute_trade_quality(result: dict, regime: dict) -> dict:
     """Sinyalin işlem yapılabilirliğini A+ / A / B / C / D olarak sınıflandırır."""
     if result.get("signal") not in ("LONG", "SHORT"):
         return {"score": 0, "grade": "D", "tradable": False, "reasons": ["LONG/SHORT sinyali yok."]}
+
     signal = result["signal"]
     raw = result["raw"]
     f = result["features"]
-    reasons = []
+    group = result["group"]
+    reasons: list[str] = []
     score = 50.0
     direction = 1 if signal == "LONG" else -1
-    for key, weight in (("mtf", 14), ("trend", 10), ("momentum", 10), ("market", 8), ("macro", 8), ("basis", 5), ("funding", 5)):
+
+    for key, weight in (
+        ("mtf", 14),
+        ("trend", 10),
+        ("momentum", 10),
+        ("market", 8),
+        ("macro", 8),
+        ("basis", 5),
+        ("funding", 5),
+    ):
         val = raw.get(key, 0) * direction
         if val > 0.5:
             score += weight
@@ -2581,43 +2766,156 @@ def compute_trade_quality(result: dict, regime: dict) -> dict:
         elif val < -0.5:
             score -= weight
             reasons.append(f"{key} ters yönde uyarı veriyor")
-    reg = regime.get("regime")
-    if signal == "LONG" and reg == "TREND_UP":
-        score += 10
-        reasons.append("Rejim LONG için uygun: TREND_UP")
-    elif signal == "SHORT" and reg == "TREND_DOWN":
-        score += 10
-        reasons.append("Rejim SHORT için uygun: TREND_DOWN")
-    elif reg in ("CHOP", "RISK_OFF"):
-        score -= 15
-        reasons.append(f"Rejim kaliteyi düşürüyor: {reg}")
-    group = result["group"]
+
+    reg = regime.get("regime", "NEUTRAL")
+    strategy = get_regime_strategy(reg)
+
+    score += float(strategy.get("quality_bonus", 0))
+    reasons.append(f"Rejim: {reg} / bias: {strategy.get('direction_bias')}")
+
+    if signal == "LONG" and strategy.get("allow_long"):
+        score += 4
+    elif signal == "SHORT" and strategy.get("allow_short"):
+        score += 4
+    else:
+        score -= 25
+        reasons.append("Rejim bu yönü desteklemiyor")
+
+    if group == "HIGH_BETA" and not strategy.get("high_beta_allowed", False):
+        score -= 18
+        reasons.append("Rejim HIGH_BETA riskini desteklemiyor")
+
     if signal == "LONG":
-        if group == "HIGH_BETA" and f.get("ret_1h", 0) > 6:
+        if group == "HIGH_BETA" and f.get("ret_1h", 0) > REGIME_CONFIG["high_vol_1h_high_beta"]:
             score -= 20
             reasons.append("HIGH_BETA 1s pump yüksek; FOMO riski")
-        elif group == "CORE" and f.get("ret_1h", 0) > 3.5:
+        elif group == "CORE" and f.get("ret_1h", 0) > REGIME_CONFIG["high_vol_1h_core"]:
             score -= 15
             reasons.append("CORE 1s hareket aşırı; pullback beklemek daha sağlıklı")
     else:
-        if group == "HIGH_BETA" and f.get("ret_1h", 0) < -6:
+        if group == "HIGH_BETA" and f.get("ret_1h", 0) < -REGIME_CONFIG["high_vol_1h_high_beta"]:
             score -= 20
             reasons.append("HIGH_BETA 1s dump yüksek; geç short riski")
-        elif group == "CORE" and f.get("ret_1h", 0) < -3.5:
+        elif group == "CORE" and f.get("ret_1h", 0) < -REGIME_CONFIG["high_vol_1h_core"]:
             score -= 15
             reasons.append("CORE 1s düşüş aşırı; geç short riski")
+
     if f.get("vol_ratio", 1) > 3.0:
         score -= 8
         reasons.append("Aşırı hacim spike; dağıtım/squeeze sonrası geç giriş riski")
+
     if f.get("spread_bps", 999) > SPREAD_LIMITS[group] / 2:
         score -= 8
         reasons.append("Spread görece geniş")
+
     score = clamp(score, 0, 100)
     grade = grade_from_quality(score)
-    tradable = TRADE_QUALITY_ORDER[grade] >= TRADE_QUALITY_ORDER.get(TRADE_QUALITY_MIN_GRADE, 3)
-    if not tradable:
-        reasons.append(f"Trade quality minimum {TRADE_QUALITY_MIN_GRADE} altında: {grade}")
-    return {"score": round(score, 1), "grade": grade, "tradable": tradable, "reasons": reasons[:8]}
+
+    global_min_ok = quality_meets_min(grade, TRADE_QUALITY_MIN_GRADE)
+    regime_min_ok = quality_meets_min(grade, strategy.get("min_quality"))
+    tradable = global_min_ok and regime_min_ok
+
+    if not global_min_ok:
+        reasons.append(f"Global trade quality minimum {TRADE_QUALITY_MIN_GRADE} altında: {grade}")
+    if not regime_min_ok:
+        reasons.append(f"Rejim minimum kalite {strategy.get('min_quality')} altında: {grade}")
+
+    return {"score": round(score, 1), "grade": grade, "tradable": tradable, "reasons": reasons[:10]}
+
+
+
+def evaluate_entry_engine(result: dict) -> dict:
+    """Entry Engine v1.
+
+    READY: mevcut fiyatla takip edilebilir.
+    WAIT_PULLBACK: sinyal var ama fiyat aşırı uzamış; pullback/retest bekle.
+    BLOCKED: likidite, rejim veya kalite nedeniyle giriş uygun değil.
+    """
+    if not ENTRY_ENGINE_ENABLED:
+        return {"status": "READY", "reason": "Entry engine kapalı; doğrudan hazır kabul edildi.", "checks": []}
+
+    if result.get("signal") not in ("LONG", "SHORT"):
+        return {"status": "BLOCKED", "reason": "LONG/SHORT sinyali yok.", "checks": []}
+
+    signal = result["signal"]
+    f = result["features"]
+    group = result["group"]
+    regime = result.get("regime") or {}
+    checks: list[str] = []
+
+    if regime.get("regime") == "NEWS_CHAOS":
+        return {"status": "BLOCKED", "reason": "NEWS_CHAOS rejiminde yeni giriş kapalı.", "checks": checks}
+
+    if f.get("spread_bps", 999) > SPREAD_LIMITS[group]:
+        return {"status": "BLOCKED", "reason": "Spread limitin üstünde.", "checks": checks}
+
+    ret_1h = float(f.get("ret_1h", 0) or 0)
+    vol_ratio = float(f.get("vol_ratio", 1) or 1)
+    raw = result.get("raw", {})
+    direction = 1 if signal == "LONG" else -1
+
+    if signal == "LONG":
+        if group == "HIGH_BETA" and ret_1h > REGIME_CONFIG["high_vol_1h_high_beta"]:
+            return {"status": "WAIT_PULLBACK", "reason": "HIGH_BETA long için 1s pump yüksek; pullback bekle.", "checks": checks}
+        if group == "CORE" and ret_1h > REGIME_CONFIG["high_vol_1h_core"]:
+            return {"status": "WAIT_PULLBACK", "reason": "CORE long için fiyat uzamış; pullback bekle.", "checks": checks}
+    else:
+        if group == "HIGH_BETA" and ret_1h < -REGIME_CONFIG["high_vol_1h_high_beta"]:
+            return {"status": "WAIT_PULLBACK", "reason": "HIGH_BETA short için dump sonrası geç giriş riski; retest bekle.", "checks": checks}
+        if group == "CORE" and ret_1h < -REGIME_CONFIG["high_vol_1h_core"]:
+            return {"status": "WAIT_PULLBACK", "reason": "CORE short için düşüş uzamış; retest bekle.", "checks": checks}
+
+    if vol_ratio > 4.0:
+        return {"status": "WAIT_PULLBACK", "reason": "Aşırı hacim spike; squeeze/dağıtım sonrası teyit bekle.", "checks": checks}
+
+    mtf_ok = raw.get("mtf", 0) * direction > 0
+    trend_ok = raw.get("trend", 0) * direction > -0.2
+    momentum_ok = raw.get("momentum", 0) * direction > -0.2
+
+    checks.extend([
+        f"MTF {'OK' if mtf_ok else 'zayıf'}",
+        f"Trend {'OK' if trend_ok else 'zayıf'}",
+        f"Momentum {'OK' if momentum_ok else 'zayıf'}",
+    ])
+
+    if not mtf_ok:
+        return {"status": "WAIT_PULLBACK", "reason": "Üst zaman dilimi sinyali tam desteklemiyor; teyit bekle.", "checks": checks}
+
+    if not trend_ok and not momentum_ok:
+        return {"status": "WAIT_PULLBACK", "reason": "Trend ve momentum aynı anda zayıf; giriş bekletildi.", "checks": checks}
+
+    return {"status": "READY", "reason": "Rejim, MTF ve mikro sinyal giriş için yeterli.", "checks": checks}
+
+
+def regime_commander_decision(result: dict, regime: dict) -> dict:
+    """Regime Commander: direction/risk/quality/high-beta kurallarını tek noktada uygular."""
+    if not REGIME_COMMANDER_ENABLED:
+        return {"allowed": True, "reason": "Regime Commander kapalı.", "strategy": get_regime_strategy("NEUTRAL")}
+
+    strategy = get_regime_strategy(regime.get("regime", "NEUTRAL"))
+    signal = result.get("signal")
+    group = result.get("group")
+
+    if signal not in ("LONG", "SHORT"):
+        return {"allowed": True, "reason": "İşlem sinyali yok.", "strategy": strategy}
+
+    if float(strategy.get("risk_multiplier", 1.0)) <= 0:
+        return {"allowed": False, "reason": "Regime Commander: bu rejimde yeni trade kapalı.", "strategy": strategy}
+
+    if signal == "LONG" and not strategy.get("allow_long", True):
+        return {"allowed": False, "reason": f"Regime Commander: {regime.get('regime')} LONG yönünü kapatıyor.", "strategy": strategy}
+
+    if signal == "SHORT" and not strategy.get("allow_short", True):
+        return {"allowed": False, "reason": f"Regime Commander: {regime.get('regime')} SHORT yönünü kapatıyor.", "strategy": strategy}
+
+    if group == "HIGH_BETA" and not strategy.get("high_beta_allowed", False):
+        return {"allowed": False, "reason": f"Regime Commander: {regime.get('regime')} HIGH_BETA riskini kapatıyor.", "strategy": strategy}
+
+    tq = result.get("trade_quality") or {}
+    if tq and not quality_meets_min(tq.get("grade"), strategy.get("min_quality")):
+        return {"allowed": False, "reason": f"Regime Commander: minimum kalite {strategy.get('min_quality')} gerekir.", "strategy": strategy}
+
+    return {"allowed": True, "reason": strategy.get("note", "Rejim uygun."), "strategy": strategy}
 
 
 def portfolio_risk_check(result: dict, state_mgr: StateManager) -> dict:
@@ -2658,7 +2956,7 @@ def portfolio_risk_check(result: dict, state_mgr: StateManager) -> dict:
 
 
 def apply_trade_filters(result: dict) -> dict:
-    """Quality/portfolio filtrelerini aksiyon alınabilir sinyale uygular."""
+    """Regime Commander + Quality + Entry + Portfolio filtrelerini aksiyon alınabilir sinyale uygular."""
     result["raw_signal"] = result.get("signal")
     result["actionable"] = result.get("signal") in ("LONG", "SHORT")
     if result.get("signal") not in ("LONG", "SHORT"):
@@ -2666,9 +2964,18 @@ def apply_trade_filters(result: dict) -> dict:
 
     tq = result.get("trade_quality") or {}
     pc = result.get("portfolio_check") or {}
+    rc = result.get("regime_commander") or {}
+    ee = result.get("entry_engine") or {}
+
     veto_reason = None
-    if tq and not tq.get("tradable", True):
+    if rc and not rc.get("allowed", True):
+        veto_reason = rc.get("reason", "Regime Commander blokladı.")
+    elif tq and not tq.get("tradable", True):
         veto_reason = f"Trade quality filtresi: {tq.get('grade', '-')}"
+    elif ee and ee.get("status") == "BLOCKED":
+        veto_reason = f"Entry engine: {ee.get('reason', '-')}"
+    elif ENTRY_ENGINE_REQUIRE_READY and ee and ee.get("status") == "WAIT_PULLBACK":
+        veto_reason = f"Entry bekleniyor: {ee.get('reason', '-')}"
     elif pc and not pc.get("allowed", True):
         veto_reason = f"Portföy riski: {pc.get('reason', '-')}"
 
@@ -2682,6 +2989,7 @@ def apply_trade_filters(result: dict) -> dict:
         result["veto"] = result.get("veto") or veto_reason
 
     return result
+
 
 # ============================================================
 # ALERT LOGIC
@@ -2878,6 +3186,8 @@ def format_trade_open_msg(t: dict) -> str:
         f"Confidence: %{t.get('confidence', 0)}\n"
         f"Quality: {tq.get('grade', '-')}, score {tq.get('score', '-')}\n"
         f"Regime: {regime.get('regime', '-')}\n"
+        f"Bias: {regime.get('direction_bias', '-')}, Risk x{regime.get('risk_multiplier', '-')}\n"
+        f"Entry: {(t.get('entry_engine') or {}).get('status', '-')} — {(t.get('entry_engine') or {}).get('reason', '-')}\n"
         f"Risk: {format_money(t.get('risk_amount'))} (%{float(t.get('risk_pct', 0))*100:.2f}) | Notional: {format_money(t.get('position_notional'))}\\n"
         f"{format_position_sizing_brief(t.get('position_sizing'))}\\n\\n"
         f"Not: Bu mesaj otomatik emir değildir; botun trade tracking kaydıdır.\n"
@@ -2955,6 +3265,8 @@ def open_trade(result: dict, plan: dict, state_mgr: StateManager = _STATE_MGR) -
         "position_notional": float(plan.get("position_notional", 0)),
         "quantity": float(plan.get("quantity", 0)),
         "position_sizing": copy.deepcopy(plan.get("position_sizing", {})),
+        "entry_engine": copy.deepcopy(plan.get("entry_engine", {})),
+        "regime_commander": copy.deepcopy(plan.get("regime_commander", {})),
         "opened_at": now_ts(),
         "closed_at": None,
         "result": None,
@@ -3855,6 +4167,119 @@ def format_backtest_validation_brief() -> str:
     last = reports[-1].get("report", {}) if isinstance(reports[-1], dict) else {}
     return "BV: " + last.get("summary", "rapor okunamadı")
 
+
+def strategy_simulation_analysis(state_mgr: StateManager = _STATE_MGR) -> dict:
+    """Strategy Simulation v1.
+
+    V1 gerçek exchange replay değildir; botun kendi kapalı trade hafızasında
+    kayıtlı raw skor snapshotlarını kullanarak mevcut ağırlıkların kazanan ve
+    kaybeden trade'leri ayırma gücünü ölçer. Amaç: kullanılan ağırlıklar
+    tutarlı mı, hangi rejimde edge var, hangi rejimde savunmaya geçmeliyiz?
+    """
+    if not STRATEGY_SIMULATION_ENABLED:
+        return {"ready": False, "reason": "Strategy simulation kapalı."}
+
+    trades = [
+        t for t in get_trades(state_mgr).values()
+        if isinstance(t, dict)
+        and t.get("result") in ("WIN", "LOSS", "EXIT")
+        and isinstance(t.get("raw"), dict)
+    ]
+    if len(trades) < STRATEGY_SIMULATION_MIN_TRADES:
+        return {
+            "ready": False,
+            "closed_trades": len(trades),
+            "reason": f"Yeterli kapalı trade yok ({len(trades)}/{STRATEGY_SIMULATION_MIN_TRADES}).",
+        }
+
+    rows = []
+    regime_stats: dict[str, dict] = {}
+    group_stats: dict[str, dict] = {}
+    direction_stats: dict[str, dict] = {}
+
+    for t in trades:
+        group = t.get("group") or COINS.get(t.get("symbol"), "UNKNOWN")
+        direction = t.get("direction")
+        raw = t.get("raw") or {}
+        weights = WEIGHTS.get(group, {})
+        weighted = sum(float(raw.get(k, 0) or 0) * float(weights.get(k, 0) or 0) for k in weights)
+        direction_factor = 1 if direction == "LONG" else -1
+        aligned_score = weighted * direction_factor
+        outcome = 1 if t.get("result") == "WIN" else 0
+
+        regime = (t.get("regime") or {}).get("regime", "UNKNOWN")
+        pnl_pct = float(t.get("pnl_pct", 0) or 0)
+
+        rows.append({"aligned_score": aligned_score, "outcome": outcome, "regime": regime, "group": group, "direction": direction, "pnl_pct": pnl_pct})
+
+        for bucket, store in ((regime, regime_stats), (group, group_stats), (direction, direction_stats)):
+            if bucket not in store:
+                store[bucket] = {"trades": 0, "wins": 0, "pnl_sum": 0.0}
+            store[bucket]["trades"] += 1
+            store[bucket]["wins"] += outcome
+            store[bucket]["pnl_sum"] += pnl_pct
+
+    scores = [r["aligned_score"] for r in rows]
+    median_score = statistics.median(scores) if scores else 0.0
+    high = [r for r in rows if r["aligned_score"] >= median_score]
+    low = [r for r in rows if r["aligned_score"] < median_score]
+
+    def _wr(rs: list[dict]) -> float:
+        return sum(r["outcome"] for r in rs) / len(rs) if rs else 0.0
+
+    high_wr = _wr(high)
+    low_wr = _wr(low)
+    all_wr = _wr(rows)
+    separation = high_wr - low_wr
+
+    def _summarize(store: dict) -> dict:
+        out = {}
+        for key, v in store.items():
+            n = v["trades"]
+            out[key] = {
+                "trades": n,
+                "win_rate": round(v["wins"] / n * 100, 1) if n else 0,
+                "avg_pnl_pct": round(v["pnl_sum"] / n * 100, 2) if n else 0,
+            }
+        return out
+
+    report = {
+        "ready": True,
+        "generated_at": tr_now_text(),
+        "closed_trades": len(rows),
+        "overall_win_rate": round(all_wr * 100, 1),
+        "high_score_win_rate": round(high_wr * 100, 1),
+        "low_score_win_rate": round(low_wr * 100, 1),
+        "weight_consistency_edge": round(separation, 3),
+        "interpretation": (
+            "Güçlü" if separation >= 0.15 else
+            "Orta" if separation >= 0.05 else
+            "Zayıf / overfit riski"
+        ),
+        "by_regime": _summarize(regime_stats),
+        "by_group": _summarize(group_stats),
+        "by_direction": _summarize(direction_stats),
+    }
+
+    try:
+        with open(STRATEGY_SIMULATION_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, sort_keys=True, ensure_ascii=False)
+    except OSError as e:
+        log.warning("Strategy simulation raporu yazılamadı: %s", e)
+
+    return report
+
+
+def format_strategy_simulation_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    sim = strategy_simulation_analysis(state_mgr)
+    if not sim.get("ready"):
+        return f"Sim: WAIT ({sim.get('closed_trades', 0)}/{STRATEGY_SIMULATION_MIN_TRADES})"
+    return (
+        f"Sim: WR %{sim['overall_win_rate']} | "
+        f"HighScore %{sim['high_score_win_rate']} vs LowScore %{sim['low_score_win_rate']} | "
+        f"Edge {sim['weight_consistency_edge']} ({sim['interpretation']})"
+    )
+
 def generate_parameter_suggestions_from_weight_learning(
     state_mgr: StateManager = _STATE_MGR,
     *,
@@ -4198,6 +4623,8 @@ def _process_symbol(
         regime = detect_market_regime(btc, eth, news_ctx)
         result["regime"] = regime
         result["trade_quality"] = compute_trade_quality(result, regime)
+        result["entry_engine"] = evaluate_entry_engine(result)
+        result["regime_commander"] = regime_commander_decision(result, regime)
         result["portfolio_check"] = portfolio_risk_check(result, state_mgr)
         result = apply_trade_filters(result)
 
@@ -4227,7 +4654,10 @@ def _process_symbol(
             "raw_signal": result.get("raw_signal"),
             "blocked_signal": result.get("blocked_signal"),
             "quality_grade": result.get("trade_quality", {}).get("grade"),
+            "entry_status": result.get("entry_engine", {}).get("status"),
             "regime": result.get("regime", {}).get("regime"),
+            "direction_bias": result.get("regime", {}).get("direction_bias"),
+            "regime_allowed": result.get("regime_commander", {}).get("allowed"),
             "last_alert_ts": last_alert_ts,
             "pending_alert_type": pending,
             "updated_at": now_ts(),
@@ -4238,6 +4668,23 @@ def _process_symbol(
     except Exception as e:
         log.warning("%s sinyal işlemi başarısız: %s", symbol, e)
         return None
+
+
+
+def format_regime_strategy_brief(results: list[dict]) -> str:
+    """Short heartbeat summary of current Regime Commander decision."""
+    if not results:
+        return "Regime: veri yok."
+    btc = next((r for r in results if r.get("symbol") == "BTCUSDT"), results[0])
+    rg = btc.get("regime") or {}
+    if not rg:
+        return "Regime: yok."
+    return (
+        f"Regime: {rg.get('regime', '-')} | "
+        f"Bias {rg.get('direction_bias', '-')} | "
+        f"Risk x{rg.get('risk_multiplier', '-')} | "
+        f"MinQ {rg.get('min_quality', '-')}"
+    )
 
 
 def _send_periodic_messages(
@@ -4269,6 +4716,8 @@ def _send_periodic_messages(
             f"{format_edge_brief(state_mgr)}\n"
             f"{format_feature_importance_brief(state_mgr)}\n"
             f"{format_weight_learning_brief(state_mgr)}\n"
+            f"{format_regime_strategy_brief(results)}\n"
+            f"{format_strategy_simulation_brief(state_mgr)}\n"
             f"PS: base %{POSITION_SIZING_BASE_RISK_PCT*100:.2f} | clamp %{POSITION_SIZING_MIN_RISK_PCT*100:.2f}-%{POSITION_SIZING_MAX_RISK_PCT*100:.2f}\n"
             f"{format_backtest_validation_brief()}\n"
             f"Pending suggestions: {pending_count}"
@@ -4423,7 +4872,6 @@ def main() -> None:
     import signal as _signal
 
     validate_env()
-    validate_runtime_config()
     load_and_apply_adaptive_config()
     atexit.register(shutdown_resources)
 
