@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# State / runtime
+state.json
+state.json.*.tmp
+
+# Env
+.env
+.venv/
+venv/
+
+# Editor
+.idea/
+.vscode/
+*.swp
