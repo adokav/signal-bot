@@ -36,7 +36,7 @@ from flask import Flask
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # ============================================================
 # LOGGING
@@ -167,17 +167,33 @@ ERROR_BACKOFF_LONG = env_int("ERROR_BACKOFF_LONG", 300, min_value=1)
 
 KLINE_LIMIT = env_int("KLINE_LIMIT", 100, min_value=20)
 VOLUME_WINDOW = env_int("VOLUME_WINDOW", 30, min_value=5)
-MIN_KLINES_5M = 13
-MIN_KLINES_15M = 17
 
-RET_5M_OFFSET = 2
-RET_15M_OFFSET = 4
-RET_1H_OFFSET = 12
-RET_4H_OFFSET = 16
+# closes[-1] ile closes[-N] arasinda (N-1) bar fark vardir.
+# 1h = 12 bar (5m), 4h = 16 bar (15m); offset = bar_count + 1.
+RET_5M_OFFSET = 2     # 1 bar  *  5m =   5dk
+RET_15M_OFFSET = 4    # 3 bar  *  5m =  15dk
+RET_1H_OFFSET = 13    # 12 bar *  5m =  60dk
+RET_4H_OFFSET = 17    # 16 bar * 15m = 240dk
 
+# Indikator periyotlari
 EMA_FAST = 9
 EMA_MID = 21
 EMA_SLOW = 50
+ATR_PERIOD = 14
+RSI_PERIOD = 14
+
+# Asgari kline sayisi: indikator periyodu + return offset + emniyet payi.
+MIN_KLINES_5M = max(EMA_SLOW + 5, RET_1H_OFFSET + 2, ATR_PERIOD + 2, RSI_PERIOD + 2)
+MIN_KLINES_15M = max(EMA_SLOW + 5, RET_4H_OFFSET + 2)
+
+# Volatilite filtresi: ATR%/spot bu sinirin ustundeyse veto (flash event korumasi).
+ATR_PCT_VETO = env_float("ATR_PCT_VETO", 8.0, min_value=0.5)
+ATR_PCT_HIGH = env_float("ATR_PCT_HIGH", 4.0, min_value=0.1)
+ATR_PCT_LOW = env_float("ATR_PCT_LOW", 0.4, min_value=0.0)
+
+# Funding rate esikleri (yuzde - 8h periyodu icin tipik range +/- 0.01..0.05)
+FUNDING_EXTREME = env_float("FUNDING_EXTREME", 0.05, min_value=0.0)
+FUNDING_HIGH = env_float("FUNDING_HIGH", 0.02, min_value=0.0)
 
 # ============================================================
 # MOVEMENT ALERT THRESHOLDS
@@ -196,9 +212,28 @@ ACCOUNT_SIZE_USD = env_float("ACCOUNT_SIZE_USD", 800.0, min_value=1.0)
 RISK_PCT_PER_TRADE = env_float("RISK_PCT_PER_TRADE", 0.01, min_value=0.0001)
 
 TRADE_PLAN_CONFIG: dict[str, dict[str, float]] = {
-    "CORE": {"stop_pct": 0.020, "tp1_r": 1.0, "tp2_r": 2.0, "tp3_r": 3.0},
-    "HIGH_BETA": {"stop_pct": 0.035, "tp1_r": 1.0, "tp2_r": 2.0, "tp3_r": 3.0},
+    "CORE": {
+        "stop_pct": 0.020,
+        "tp1_r": 1.0,
+        "tp2_r": 2.0,
+        "tp3_r": 3.0,
+        "atr_mult": 1.8,
+        "stop_pct_min": 0.008,
+        "stop_pct_max": 0.040,
+    },
+    "HIGH_BETA": {
+        "stop_pct": 0.035,
+        "tp1_r": 1.0,
+        "tp2_r": 2.0,
+        "tp3_r": 3.0,
+        "atr_mult": 2.0,
+        "stop_pct_min": 0.015,
+        "stop_pct_max": 0.070,
+    },
 }
+
+# ATR-bazli dinamik stop kullanilsin mi (false = klasik sabit yuzde)
+USE_ATR_STOPS = os.getenv("USE_ATR_STOPS", "1") == "1"
 
 # ============================================================
 # SIGNAL CONFIG
@@ -248,9 +283,30 @@ SCORE_PARAMS: dict[str, dict[str, float]] = {
         "weight_ret_4h": 1.5,
     },
     "market": {"ret_1h_strong": 0.5},
-    "momentum": {"ret_5m_strong": 0.15, "ret_15m_strong": 0.35, "ret_1h_strong": 0.8},
+    "momentum": {
+        "ret_5m_strong": 0.15,
+        "ret_15m_strong": 0.35,
+        "ret_1h_strong": 0.8,
+        # RSI esikleri (Wilder, period=14). 30/70 standart, 20/80 ekstrem.
+        "rsi_overbought": 70.0,
+        "rsi_oversold": 30.0,
+        "rsi_extreme_high": 80.0,
+        "rsi_extreme_low": 20.0,
+    },
     "volume": {"spike": 2.0, "high": 1.3, "low": 0.6},
-    "veto": {"vol_low_high_beta": 0.7, "btc_unclear_1h": 0.25, "btc_unclear_4h": 0.40},
+    "veto": {
+        "vol_low_high_beta": 0.7,
+        "btc_unclear_1h": 0.25,
+        "btc_unclear_4h": 0.40,
+        # Volatilite vetolari
+        "atr_pct_veto": ATR_PCT_VETO,
+        "atr_pct_low": ATR_PCT_LOW,
+    },
+    "basis": {
+        # Funding extreme + ayni yon = mean reversion kontrasi
+        "funding_extreme": FUNDING_EXTREME,
+        "funding_high": FUNDING_HIGH,
+    },
 }
 
 # ============================================================
@@ -807,18 +863,73 @@ def get_futures_fair_price(symbol: str) -> Optional[float]:
     return None
 
 
+def get_futures_funding_rate(symbol: str) -> Optional[float]:
+    """MEXC futures perpetual funding rate.
+
+    Pozitif funding -> long'lar short'lara odeme yapiyor (long crowded).
+    Negatif funding -> short'lar long'lara odeme yapiyor (short crowded).
+    Asiri funding mean reversion sinyali; basis ile birlikte kullanilir.
+    """
+    futures_symbol = to_futures_symbol(symbol)
+    url = f"{MEXC_FUTURES_BASE}/api/v1/contract/funding_rate/{futures_symbol}"
+
+    try:
+        data = request_json(url)
+    except (TransientHTTPError, PermanentHTTPError) as e:
+        log.debug("%s funding rate alinamadi: %s", symbol, e)
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    candidates = []
+    if isinstance(data.get("data"), dict):
+        candidates.append(data["data"])
+    candidates.append(data)
+
+    for src in candidates:
+        for key in ("fundingRate", "funding_rate", "rate"):
+            if key in src:
+                try:
+                    # MEXC oranlari fraction olarak donduruyor (0.0001 = %0.01).
+                    return float(src[key]) * 100.0
+                except (TypeError, ValueError):
+                    continue
+    return None
+
+
 # ============================================================
 # MATH HELPERS
 # ============================================================
 
 
+import math
+
+
+def _is_finite(x: float) -> bool:
+    return isinstance(x, (int, float)) and math.isfinite(float(x))
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """NaN/Inf guard: trading hesaplarinda zehirli sayilarin yayilmasini engeller."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(v):
+        return default
+    return v
+
+
 def pct(a: float, b: float) -> float:
-    if b == 0:
+    if not _is_finite(a) or not _is_finite(b) or b == 0:
         return 0.0
     return (a - b) / b * 100.0
 
 
 def clamp(x: float, lo: float, hi: float) -> float:
+    if not _is_finite(x):
+        return lo
     return max(lo, min(hi, x))
 
 
@@ -834,6 +945,59 @@ def ema(values: list[float], period: int) -> float:
     for price in values[period:]:
         result = price * k + result * (1 - k)
     return result
+
+
+def atr(highs: list[float], lows: list[float], closes: list[float], period: int = ATR_PERIOD) -> float:
+    """Wilder ATR. True Range = max(H-L, |H-prev_close|, |L-prev_close|).
+
+    Volatilite-bazli stop loss ve flash event vetosu icin kullanilir.
+    """
+    n = min(len(highs), len(lows), len(closes))
+    if n < 2:
+        return 0.0
+
+    trs: list[float] = []
+    for i in range(1, n):
+        h, l, prev_c = highs[i], lows[i], closes[i - 1]
+        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+        trs.append(tr)
+
+    if not trs:
+        return 0.0
+
+    if len(trs) < period:
+        return sum(trs) / len(trs)
+
+    # Wilder smoothing: alpha = 1/period
+    atr_val = sum(trs[:period]) / period
+    for tr in trs[period:]:
+        atr_val = (atr_val * (period - 1) + tr) / period
+    return atr_val
+
+
+def rsi(closes: list[float], period: int = RSI_PERIOD) -> float:
+    """Wilder RSI. Yetersiz veride 50 (neutral) doner."""
+    if len(closes) <= period:
+        return 50.0
+
+    gains: list[float] = []
+    losses: list[float] = []
+    for i in range(1, len(closes)):
+        delta = closes[i] - closes[i - 1]
+        gains.append(max(delta, 0.0))
+        losses.append(max(-delta, 0.0))
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+    if avg_loss == 0:
+        return 100.0 if avg_gain > 0 else 50.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
 
 
 def bar(value: float, max_abs: float, width: int = 4) -> str:
@@ -1300,6 +1464,9 @@ def get_features(symbol: str) -> dict:
     book = results["book"]
     spot_price = results["spot"]
 
+    # MEXC kline format: [open_time, open, high, low, close, volume, ...]
+    highs_5 = [_to_float(x[2], f"{symbol}.k5.high") for x in k5]
+    lows_5 = [_to_float(x[3], f"{symbol}.k5.low") for x in k5]
     closes_5 = [_to_float(x[4], f"{symbol}.k5.close") for x in k5]
     closes_15 = [_to_float(x[4], f"{symbol}.k15.close") for x in k15]
     volumes_5 = [_to_float(x[5], f"{symbol}.k5.volume") for x in k5]
@@ -1322,6 +1489,13 @@ def get_features(symbol: str) -> dict:
     ret_1h = pct(closes_5[-1], closes_5[-RET_1H_OFFSET])
     ret_4h = pct(closes_15[-1], closes_15[-RET_4H_OFFSET])
 
+    # Volatilite ve momentum gostergeleri
+    atr_value = atr(highs_5, lows_5, closes_5, ATR_PERIOD)
+    last_close = closes_5[-1]
+    atr_pct = (atr_value / last_close * 100.0) if last_close > 0 else 0.0
+    rsi_5m = rsi(closes_5, RSI_PERIOD)
+    rsi_15m = rsi(closes_15, RSI_PERIOD)
+
     recent_vols = volumes_5[-(VOLUME_WINDOW + 1) : -1]
     if recent_vols:
         median_vol = statistics.median(recent_vols)
@@ -1336,6 +1510,7 @@ def get_features(symbol: str) -> dict:
 
     change_24h = _to_float(ticker.get("priceChangePercent", 0), f"{symbol}.change_24h")
 
+    # Futures verileri non-kritik: basis ve funding ayri ayri try edilir.
     futures_price = None
     basis_pct = None
     try:
@@ -1345,11 +1520,18 @@ def get_features(symbol: str) -> dict:
     except Exception as e:
         log.debug("%s futures basis alinamadi: %s", symbol, e)
 
+    funding_rate = None
+    try:
+        funding_rate = get_futures_funding_rate(symbol)
+    except Exception as e:
+        log.debug("%s funding rate alinamadi: %s", symbol, e)
+
     return {
-        "last": closes_5[-1],
+        "last": last_close,
         "spot_price": spot_price,
         "futures_price": futures_price,
         "basis_pct": basis_pct,
+        "funding_rate": funding_rate,
         "ema9": ema9,
         "ema21": ema21,
         "ema50": ema50,
@@ -1360,6 +1542,10 @@ def get_features(symbol: str) -> dict:
         "ret_15m": ret_15m,
         "ret_1h": ret_1h,
         "ret_4h": ret_4h,
+        "atr": atr_value,
+        "atr_pct": atr_pct,
+        "rsi_5m": rsi_5m,
+        "rsi_15m": rsi_15m,
         "vol_ratio": vol_ratio,
         "spread_bps": spread_bps,
         "change_24h": change_24h,
@@ -1415,20 +1601,52 @@ def score_trend(f: dict) -> float:
 
 
 def score_momentum(f: dict) -> float:
+    """Momentum skoru: kisa-orta vade getiri yonu + RSI confluence/divergence.
+
+    RSI mantigi:
+      - Pozitif return + RSI >= 70 (asiri alim) -> exhaust riski, momentum -0.4
+      - Pozitif return + RSI < 70 ve > 50       -> saglikli yukselen momentum, +0.3
+      - Negatif return + RSI <= 30 (asiri satim)-> exhaust riski, momentum +0.4
+      - Negatif return + RSI > 30 ve < 50       -> saglikli dusen momentum, -0.3
+      - Ekstrem RSI (>=80 veya <=20)            -> ek 0.3 mean reversion bayragi
+    """
     p = SCORE_PARAMS["momentum"]
     score = 0.0
+
     if f["ret_5m"] > p["ret_5m_strong"]:
         score += 0.4
     elif f["ret_5m"] < -p["ret_5m_strong"]:
         score -= 0.4
+
     if f["ret_15m"] > p["ret_15m_strong"]:
         score += 0.6
     elif f["ret_15m"] < -p["ret_15m_strong"]:
         score -= 0.6
+
     if f["ret_1h"] > p["ret_1h_strong"]:
         score += 1.0
     elif f["ret_1h"] < -p["ret_1h_strong"]:
         score -= 1.0
+
+    # RSI confluence/divergence: 15m ve 5m'in ortalamasini kullan.
+    rsi_avg = (safe_float(f.get("rsi_5m"), 50.0) + safe_float(f.get("rsi_15m"), 50.0)) / 2.0
+    ret_1h = f["ret_1h"]
+
+    if ret_1h > 0:
+        if rsi_avg >= p["rsi_extreme_high"]:
+            score -= 0.7  # asiri alim + yukselen -> donus riski
+        elif rsi_avg >= p["rsi_overbought"]:
+            score -= 0.4
+        elif rsi_avg > 50:
+            score += 0.3  # saglikli momentum confluence
+    elif ret_1h < 0:
+        if rsi_avg <= p["rsi_extreme_low"]:
+            score += 0.7
+        elif rsi_avg <= p["rsi_oversold"]:
+            score += 0.4
+        elif rsi_avg < 50:
+            score -= 0.3
+
     return clamp(score, -2, 2)
 
 
@@ -1454,22 +1672,55 @@ def score_liquidity(f: dict, group: str) -> float:
 
 
 def score_basis(basis_pct: Optional[float], f: dict) -> float:
-    if basis_pct is None:
-        return 0
-    score = 0.0
-    if 0.05 <= basis_pct <= 0.35 and f["ret_1h"] > 0:
-        score += 1.2
-    elif basis_pct > 0.60:
-        score -= 1.0
-    elif basis_pct < -0.05 and f["ret_1h"] < 0:
-        score -= 1.2
-    elif basis_pct < -0.60:
-        score += 0.5
+    """Basis (futures premium) + funding rate ile yon teyidi.
 
-    if basis_pct > 0 and f["ret_1h"] < -0.5:
-        score -= 0.5
-    if basis_pct < 0 and f["ret_1h"] > 0.5:
-        score += 0.5
+    - Saglikli premium + pozitif momentum -> long bias
+    - Asiri pozitif premium veya extreme positive funding -> long crowded, kontra
+    - Saglikli iskonto + negatif momentum -> short bias
+    - Asiri negatif funding -> short crowded, mean reversion long
+    """
+    if basis_pct is None and f.get("funding_rate") is None:
+        return 0
+
+    score = 0.0
+    p = SCORE_PARAMS["basis"]
+
+    # Klasik basis confluence
+    if basis_pct is not None:
+        if 0.05 <= basis_pct <= 0.35 and f["ret_1h"] > 0:
+            score += 1.2
+        elif basis_pct > 0.60:
+            score -= 1.0
+        elif basis_pct < -0.05 and f["ret_1h"] < 0:
+            score -= 1.2
+        elif basis_pct < -0.60:
+            score += 0.5
+
+        if basis_pct > 0 and f["ret_1h"] < -0.5:
+            score -= 0.5
+        if basis_pct < 0 and f["ret_1h"] > 0.5:
+            score += 0.5
+
+    # Funding rate confluence
+    funding = f.get("funding_rate")
+    if funding is not None:
+        # Extreme funding -> contrarian (mean reversion)
+        if funding >= p["funding_extreme"]:
+            score -= 0.8
+        elif funding <= -p["funding_extreme"]:
+            score += 0.8
+        # High but not extreme funding -> direction agreement gerekli
+        elif funding >= p["funding_high"]:
+            if f["ret_1h"] > 0:
+                score += 0.3  # high funding ama momentum destekliyor
+            else:
+                score -= 0.3
+        elif funding <= -p["funding_high"]:
+            if f["ret_1h"] < 0:
+                score -= 0.3
+            else:
+                score += 0.3
+
     return clamp(score, -2, 2)
 
 
@@ -1487,6 +1738,15 @@ def veto_signal(symbol: str, f: dict, btc: dict, eth: dict) -> Optional[str]:
         return "Spread yuksek"
     if group == "HIGH_BETA" and f["vol_ratio"] < p["vol_low_high_beta"]:
         return "Hacim zayif"
+
+    # Volatilite extremeleri: flash crash / pump esnasinda sinyal almamak
+    atr_pct = safe_float(f.get("atr_pct"), 0.0)
+    if atr_pct >= p["atr_pct_veto"]:
+        return f"Asiri volatilite (ATR%={atr_pct:.2f})"
+    if atr_pct > 0 and atr_pct <= p["atr_pct_low"]:
+        # Olu piyasa: stop'a takilmaktan baska sansi yok, sinyal uretme.
+        return f"Yetersiz volatilite (ATR%={atr_pct:.2f})"
+
     if symbol not in ("BTCUSDT", "ETHUSDT"):
         btc_unclear = abs(btc["ret_1h"]) < p["btc_unclear_1h"] and abs(btc["ret_4h"]) < p["btc_unclear_4h"]
         if btc_unclear:
@@ -1561,7 +1821,7 @@ def weighted_signal(
     }
 
     pre_news_total = sum(raw[k] * weights[k] for k in raw)
-    news_risk = float(news_context.get("news_risk_score", 0))
+    news_risk = safe_float(news_context.get("news_risk_score"), 0.0)
     modulated_total, news_action = apply_news_modulation(pre_news_total, news_risk, news_mult)
 
     max_components = {
@@ -1573,7 +1833,9 @@ def weighted_signal(
         "liquidity": 2,
         "basis": 2 * abs(micro_mult),
     }
-    max_total = sum(weights[k] * max_components[k] for k in raw)
+    base_max_total = sum(weights[k] * max_components[k] for k in raw)
+    # News boost (1.1x) max_total'a yansitilmali ki confidence dogru bound'lansin.
+    max_total = base_max_total * NEWS_BOOST_FACTOR
 
     if modulated_total is None:
         signal = "NO_TRADE"
@@ -1624,6 +1886,25 @@ def weighted_signal(
 # ============================================================
 
 
+def _resolve_stop_pct(cfg: dict, features: dict) -> tuple[float, str]:
+    """ATR-bazli dinamik stop yuzdesi. ATR yoksa veya ATR_STOPS kapaliysa
+    sabit cfg['stop_pct'] kullanilir. Min/max sinirlarla bound edilir."""
+    fixed_pct = float(cfg["stop_pct"])
+    if not USE_ATR_STOPS:
+        return fixed_pct, "fixed"
+
+    spot = safe_float(features.get("spot_price"))
+    atr_value = safe_float(features.get("atr"))
+    if spot <= 0 or atr_value <= 0:
+        return fixed_pct, "fixed_fallback"
+
+    atr_mult = float(cfg.get("atr_mult", 1.8))
+    pct_min = float(cfg.get("stop_pct_min", fixed_pct * 0.5))
+    pct_max = float(cfg.get("stop_pct_max", fixed_pct * 2.0))
+    raw = (atr_value * atr_mult) / spot
+    return clamp(raw, pct_min, pct_max), "atr"
+
+
 def build_trade_plan(result: dict) -> Optional[dict]:
     signal = result.get("signal")
     if signal not in ("LONG", "SHORT"):
@@ -1633,15 +1914,15 @@ def build_trade_plan(result: dict) -> Optional[dict]:
     f = result["features"]
     cfg = TRADE_PLAN_CONFIG[group]
 
-    spot = float(f["spot_price"])
-    ema9 = float(f["ema9"])
-    ema21 = float(f["ema21"])
-    stop_pct = float(cfg["stop_pct"])
+    spot = safe_float(f.get("spot_price"))
+    ema9 = safe_float(f.get("ema9"))
+    ema21 = safe_float(f.get("ema21"))
 
     if spot <= 0:
         log.warning("%s build_trade_plan: spot=%s, plan uretilemiyor", result["symbol"], spot)
         return None
 
+    stop_pct, stop_source = _resolve_stop_pct(cfg, f)
     reference_entry = spot
     ema_low = min(ema9, ema21)
     ema_high = max(ema9, ema21)
@@ -1674,8 +1955,14 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         tp3 = reference_entry - risk_per_unit * cfg["tp3_r"]
 
     risk_amount = ACCOUNT_SIZE_USD * RISK_PCT_PER_TRADE
-    position_notional = risk_amount / stop_pct if stop_pct > 0 else 0
-    quantity = position_notional / reference_entry if reference_entry > 0 else 0
+    # Pozisyon buyuklugu: risk_amount risk_per_unit'a bolunur (klasik formul).
+    # Boylece stop_pct degisirse notional otomatik adapte olur.
+    if risk_per_unit > 0 and reference_entry > 0:
+        quantity = risk_amount / risk_per_unit
+        position_notional = quantity * reference_entry
+    else:
+        quantity = 0.0
+        position_notional = 0.0
 
     return {
         "direction": signal,
@@ -1687,12 +1974,14 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         "entry_zone_high": zone_high,
         "stop_price": stop_price,
         "stop_pct": stop_pct,
+        "stop_source": stop_source,
         "tp1": tp1,
         "tp2": tp2,
         "tp3": tp3,
         "rr_ratio": cfg["tp2_r"],
         "position_notional": position_notional,
         "quantity": quantity,
+        "atr_pct": safe_float(f.get("atr_pct")),
     }
 
 
@@ -1700,13 +1989,20 @@ def format_trade_plan_block(plan: Optional[dict]) -> list[str]:
     if not plan:
         return []
 
+    stop_label = {
+        "atr": "ATR-bazli",
+        "fixed": "sabit",
+        "fixed_fallback": "sabit (ATR yok)",
+    }.get(plan.get("stop_source", "fixed"), "sabit")
+
     return [
         "",
         "📌 Trade Plan (emir gondermez)",
         f"Yon: {plan['direction']}",
         f"Referans Entry: {format_price(plan['reference_entry'])}",
         f"Tercihli Entry Bolgesi: {format_price(plan['entry_zone_low'])} - {format_price(plan['entry_zone_high'])}",
-        f"Stop: {format_price(plan['stop_price'])} (%{plan['stop_pct'] * 100:.2f})",
+        f"Stop: {format_price(plan['stop_price'])} (%{plan['stop_pct'] * 100:.2f}, {stop_label})",
+        f"ATR%: {plan.get('atr_pct', 0):.2f}",
         f"TP1 (1R): {format_price(plan['tp1'])}",
         f"TP2 (2R): {format_price(plan['tp2'])}",
         f"TP3 / Runner (3R): {format_price(plan['tp3'])}",
@@ -1731,6 +2027,12 @@ def format_signal(result: dict, title: str) -> str:
 
     basis_text = f"{f['basis_pct']:+.3f}%" if f["basis_pct"] is not None else "N/A"
     futures_text = format_price(f["futures_price"]) if f["futures_price"] is not None else "N/A"
+    funding_text = (
+        f"{f['funding_rate']:+.4f}%" if f.get("funding_rate") is not None else "N/A"
+    )
+    rsi_5m = safe_float(f.get("rsi_5m"), 50.0)
+    rsi_15m = safe_float(f.get("rsi_15m"), 50.0)
+    atr_pct = safe_float(f.get("atr_pct"), 0.0)
 
     lines = [
         title,
@@ -1759,7 +2061,9 @@ def format_signal(result: dict, title: str) -> str:
         "",
         f"Spot: {format_price(f['spot_price'])}",
         f"Futures Fair: {futures_text}",
-        f"Basis: {basis_text}",
+        f"Basis: {basis_text} | Funding: {funding_text}",
+        f"RSI 5m: {rsi_5m:.1f} | RSI 15m: {rsi_15m:.1f}",
+        f"ATR%: {atr_pct:.2f}",
         f"5m: %{f['ret_5m']:.2f} | 15m: %{f['ret_15m']:.2f} | "
         f"1h: %{f['ret_1h']:.2f} | 4h: %{f['ret_4h']:.2f}",
         f"Hacim Orani: {f['vol_ratio']:.2f}x | Spread: {f['spread_bps']:.2f} bps",
