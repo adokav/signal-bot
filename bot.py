@@ -36,7 +36,7 @@ from flask import Flask
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-__version__ = "1.6.0-weight-learning"
+__version__ = "1.8.0-position-sizing-v2"
 
 # ============================================================
 # LOGGING
@@ -194,6 +194,34 @@ TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS = env_int(
 PARAMETER_SUGGESTION_MIN_CONFIDENCE = env_float(
     "PARAMETER_SUGGESTION_MIN_CONFIDENCE", 0.45, min_value=0.0
 )
+
+# Backtest Validation v1
+# V1 gerçek tarihsel replay değildir; kapalı trade hafızasındaki raw skor snapshotlarını
+# kullanarak mevcut ve önerilen ağırlıkların kazanan/kaybeden trade ayrımını kıyaslar.
+BACKTEST_VALIDATION_ENABLED = os.getenv("BACKTEST_VALIDATION_ENABLED", "1") == "1"
+BACKTEST_VALIDATION_MIN_TRADES = env_int("BACKTEST_VALIDATION_MIN_TRADES", 20, min_value=5)
+BACKTEST_VALIDATION_MIN_IMPROVEMENT = env_float(
+    "BACKTEST_VALIDATION_MIN_IMPROVEMENT", 0.02, min_value=0.0
+)
+BACKTEST_VALIDATION_REQUIRE_PASS = os.getenv("BACKTEST_VALIDATION_REQUIRE_PASS", "1") == "1"
+BACKTEST_VALIDATION_REPORT_FILE = os.getenv(
+    "BACKTEST_VALIDATION_REPORT_FILE", "backtest_validation_report.json"
+)
+
+# Position Sizing Engine v2
+# Risk artık sadece sabit RISK_PCT_PER_TRADE değildir; sinyal kalitesi,
+# confidence, piyasa rejimi, sembol/grup edge'i ve loss-streak'e göre
+# kontrollü şekilde ölçeklenir.
+POSITION_SIZING_ENABLED = os.getenv("POSITION_SIZING_ENABLED", "1") == "1"
+POSITION_SIZING_MIN_RISK_PCT = env_float("POSITION_SIZING_MIN_RISK_PCT", 0.0025, min_value=0.0001)
+POSITION_SIZING_MAX_RISK_PCT = env_float("POSITION_SIZING_MAX_RISK_PCT", 0.03, min_value=0.001)
+POSITION_SIZING_BASE_RISK_PCT = env_float(
+    "POSITION_SIZING_BASE_RISK_PCT", RISK_PCT_PER_TRADE, min_value=0.0001
+)
+POSITION_SIZING_MIN_EDGE_TRADES = env_int("POSITION_SIZING_MIN_EDGE_TRADES", 6, min_value=2)
+POSITION_SIZING_LOOKBACK_TRADES = env_int("POSITION_SIZING_LOOKBACK_TRADES", 60, min_value=10)
+POSITION_SIZING_LOSS_STREAK_CUT_1 = env_int("POSITION_SIZING_LOSS_STREAK_CUT_1", 2, min_value=1)
+POSITION_SIZING_LOSS_STREAK_CUT_2 = env_int("POSITION_SIZING_LOSS_STREAK_CUT_2", 3, min_value=2)
 
 # Hata sonrası bekleme süreleri
 ERROR_BACKOFF_SHORT = env_int("ERROR_BACKOFF_SHORT", 60, min_value=1)
@@ -1915,6 +1943,273 @@ def weighted_signal(
 
 
 
+
+# ============================================================
+# POSITION SIZING ENGINE v2
+# ============================================================
+
+def _ps_outcome_value(trade: dict) -> Optional[float]:
+    """Closed trade outcome for sizing:
+    WIN = +1, LOSS = -1, EXIT uses pnl sign / magnitude.
+    """
+    if trade.get("result") is None:
+        return None
+    result = trade.get("result")
+    pnl_pct = float(trade.get("pnl_pct", 0) or 0)
+    if result == "WIN":
+        return 1.0
+    if result == "LOSS":
+        return -1.0
+    if pnl_pct > 0:
+        return 0.5
+    if pnl_pct < 0:
+        return -0.5
+    return 0.0
+
+
+def _ps_closed_trades(state_mgr: StateManager = _STATE_MGR) -> list[dict]:
+    trades = [
+        t for t in state_mgr.get_trades().values()
+        if isinstance(t, dict) and t.get("result") is not None
+    ]
+    trades.sort(key=lambda t: int(t.get("closed_at") or t.get("opened_at") or 0))
+    if POSITION_SIZING_LOOKBACK_TRADES > 0:
+        trades = trades[-POSITION_SIZING_LOOKBACK_TRADES:]
+    return trades
+
+
+def _ps_loss_streak(closed: list[dict]) -> int:
+    streak = 0
+    for t in reversed(closed):
+        outcome = _ps_outcome_value(t)
+        if outcome is None:
+            continue
+        if outcome < 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def _ps_edge_for(
+    closed: list[dict],
+    *,
+    symbol: Optional[str] = None,
+    group: Optional[str] = None,
+    direction: Optional[str] = None,
+) -> dict:
+    rows = []
+    for t in closed:
+        if symbol and t.get("symbol") != symbol:
+            continue
+        if group and t.get("group") != group:
+            continue
+        if direction and t.get("direction") != direction:
+            continue
+        outcome = _ps_outcome_value(t)
+        if outcome is None:
+            continue
+        rows.append((outcome, float(t.get("pnl_pct", 0) or 0)))
+
+    sample = len(rows)
+    if sample < POSITION_SIZING_MIN_EDGE_TRADES:
+        return {
+            "ready": False,
+            "sample": sample,
+            "win_rate": None,
+            "avg_pnl_pct": None,
+            "edge_score": 0.0,
+            "multiplier": 1.0,
+            "note": f"Veri yetersiz ({sample}/{POSITION_SIZING_MIN_EDGE_TRADES}).",
+        }
+
+    wins = sum(1 for outcome, _ in rows if outcome > 0)
+    win_rate = wins / sample
+    avg_pnl_pct = sum(pnl for _, pnl in rows) / sample
+    edge_score = clamp((win_rate - 0.50) * 2.0 + avg_pnl_pct * 4.0, -1.0, 1.0)
+
+    if edge_score >= 0.35:
+        multiplier = 1.30
+    elif edge_score >= 0.15:
+        multiplier = 1.15
+    elif edge_score <= -0.35:
+        multiplier = 0.50
+    elif edge_score <= -0.15:
+        multiplier = 0.75
+    else:
+        multiplier = 1.0
+
+    return {
+        "ready": True,
+        "sample": sample,
+        "win_rate": round(win_rate * 100, 1),
+        "avg_pnl_pct": round(avg_pnl_pct * 100, 2),
+        "edge_score": round(edge_score, 3),
+        "multiplier": multiplier,
+        "note": f"sample={sample}, WR={win_rate*100:.1f}%, avgPnL={avg_pnl_pct*100:.2f}%",
+    }
+
+
+def _ps_quality_multiplier(grade: Optional[str]) -> float:
+    return {
+        "A+": 1.60,
+        "A": 1.20,
+        "B": 0.80,
+        "C": 0.50,
+        "D": 0.25,
+    }.get(str(grade or "").upper(), 1.0)
+
+
+def _ps_confidence_multiplier(confidence: float) -> float:
+    if confidence >= 85:
+        return 1.35
+    if confidence >= 75:
+        return 1.20
+    if confidence >= 65:
+        return 1.05
+    if confidence >= 55:
+        return 0.85
+    return 0.65
+
+
+def _ps_regime_multiplier(signal: str, regime_name: str) -> float:
+    regime_name = regime_name or "UNKNOWN"
+    if regime_name == "RISK_OFF":
+        return 0.35
+    if regime_name == "CHOP":
+        return 0.55
+    if signal == "LONG" and regime_name == "TREND_UP":
+        return 1.25
+    if signal == "SHORT" and regime_name == "TREND_DOWN":
+        return 1.25
+    if signal == "LONG" and regime_name == "TREND_DOWN":
+        return 0.55
+    if signal == "SHORT" and regime_name == "TREND_UP":
+        return 0.55
+    return 1.0
+
+
+def _ps_loss_streak_multiplier(streak: int) -> float:
+    if streak >= POSITION_SIZING_LOSS_STREAK_CUT_2:
+        return 0.35
+    if streak >= POSITION_SIZING_LOSS_STREAK_CUT_1:
+        return 0.60
+    return 1.0
+
+
+def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManager = _STATE_MGR) -> dict:
+    """Dynamic risk sizing for trade plan.
+
+    The engine is deliberately conservative:
+    - base risk starts from POSITION_SIZING_BASE_RISK_PCT
+    - multipliers are capped by min/max risk
+    - no data means neutral multiplier, not aggressive sizing
+    """
+    base_risk = float(POSITION_SIZING_BASE_RISK_PCT)
+    if not POSITION_SIZING_ENABLED:
+        risk_pct = clamp(base_risk, POSITION_SIZING_MIN_RISK_PCT, POSITION_SIZING_MAX_RISK_PCT)
+        risk_amount = ACCOUNT_SIZE_USD * risk_pct
+        return {
+            "enabled": False,
+            "risk_pct": risk_pct,
+            "risk_amount": risk_amount,
+            "position_notional": risk_amount / stop_pct if stop_pct > 0 else 0.0,
+            "multiplier": 1.0,
+            "mode": "STATIC",
+            "loss_streak": 0,
+            "reasons": ["Position sizing kapalı; sabit risk kullanıldı."],
+        }
+
+    symbol = result.get("symbol")
+    group = result.get("group")
+    signal = result.get("signal")
+    confidence = float(result.get("confidence", 0) or 0)
+    tq = result.get("trade_quality") or {}
+    grade = tq.get("grade")
+    regime = result.get("regime") or {}
+    regime_name = regime.get("regime", "UNKNOWN")
+
+    closed = _ps_closed_trades(state_mgr)
+    loss_streak = _ps_loss_streak(closed)
+
+    symbol_edge = _ps_edge_for(closed, symbol=symbol, direction=signal)
+    group_edge = _ps_edge_for(closed, group=group, direction=signal)
+
+    edge_multiplier = 1.0
+    edge_notes = []
+    if symbol_edge.get("ready"):
+        edge_multiplier *= float(symbol_edge["multiplier"])
+        edge_notes.append(f"Sembol edge: {symbol_edge['note']}")
+    if group_edge.get("ready"):
+        edge_multiplier *= (1.0 + (float(group_edge["multiplier"]) - 1.0) * 0.60)
+        edge_notes.append(f"Grup edge: {group_edge['note']}")
+    if not edge_notes:
+        edge_notes.append("Edge verisi yetersiz; edge çarpanı nötr.")
+
+    q_mult = _ps_quality_multiplier(grade)
+    c_mult = _ps_confidence_multiplier(confidence)
+    r_mult = _ps_regime_multiplier(signal, regime_name)
+    ls_mult = _ps_loss_streak_multiplier(loss_streak)
+
+    raw_multiplier = q_mult * c_mult * r_mult * edge_multiplier * ls_mult
+
+    if regime_name == "RISK_OFF" or loss_streak >= POSITION_SIZING_LOSS_STREAK_CUT_2:
+        raw_multiplier = min(raw_multiplier, 1.0)
+
+    risk_pct = clamp(
+        base_risk * raw_multiplier,
+        POSITION_SIZING_MIN_RISK_PCT,
+        POSITION_SIZING_MAX_RISK_PCT,
+    )
+    risk_amount = ACCOUNT_SIZE_USD * risk_pct
+    position_notional = risk_amount / stop_pct if stop_pct > 0 else 0.0
+
+    if risk_pct >= base_risk * 1.35:
+        mode = "GROWTH"
+    elif risk_pct <= base_risk * 0.70:
+        mode = "DEFENSIVE"
+    else:
+        mode = "NORMAL"
+
+    reasons = [
+        f"Quality {grade or '-'} çarpanı x{q_mult:.2f}",
+        f"Confidence %{confidence:.1f} çarpanı x{c_mult:.2f}",
+        f"Regime {regime_name} çarpanı x{r_mult:.2f}",
+        f"Loss streak {loss_streak} çarpanı x{ls_mult:.2f}",
+        *edge_notes,
+    ]
+
+    return {
+        "enabled": True,
+        "mode": mode,
+        "base_risk_pct": base_risk,
+        "risk_pct": risk_pct,
+        "risk_amount": risk_amount,
+        "position_notional": position_notional,
+        "multiplier": round(raw_multiplier, 3),
+        "loss_streak": loss_streak,
+        "quality_multiplier": q_mult,
+        "confidence_multiplier": c_mult,
+        "regime_multiplier": r_mult,
+        "edge_multiplier": round(edge_multiplier, 3),
+        "loss_streak_multiplier": ls_mult,
+        "symbol_edge": symbol_edge,
+        "group_edge": group_edge,
+        "reasons": reasons,
+    }
+
+
+def format_position_sizing_brief(ps: Optional[dict]) -> str:
+    if not ps:
+        return "PS: yok"
+    return (
+        f"PS: {ps.get('mode', '-')} | "
+        f"Risk %{float(ps.get('risk_pct', 0))*100:.2f} | "
+        f"Çarpan x{ps.get('multiplier', 1.0)} | "
+        f"LossStreak {ps.get('loss_streak', 0)}"
+    )
+
+
 # ============================================================
 # TRADE PLAN ENGINE (bilgilendirme amaçlı, emir göndermez)
 # ============================================================
@@ -1997,8 +2292,10 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         tp2 = reference_entry - risk_per_unit * cfg["tp2_r"]
         tp3 = reference_entry - risk_per_unit * cfg["tp3_r"]
 
-    risk_amount = ACCOUNT_SIZE_USD * RISK_PCT_PER_TRADE
-    position_notional = risk_amount / stop_pct if stop_pct > 0 else 0
+    position_sizing = compute_position_sizing(result, stop_pct)
+    risk_pct = float(position_sizing["risk_pct"])
+    risk_amount = float(position_sizing["risk_amount"])
+    position_notional = float(position_sizing["position_notional"])
     quantity = position_notional / reference_entry if reference_entry > 0 else 0
 
     # R:R sanity check — trader'a görünür olsun
@@ -2007,8 +2304,9 @@ def build_trade_plan(result: dict) -> Optional[dict]:
     return {
         "direction": signal,
         "account_size": ACCOUNT_SIZE_USD,
-        "risk_pct": RISK_PCT_PER_TRADE,
+        "risk_pct": risk_pct,
         "risk_amount": risk_amount,
+        "position_sizing": position_sizing,
         "reference_entry": reference_entry,
         "entry_zone_low": zone_low,
         "entry_zone_high": zone_high,
@@ -2039,6 +2337,7 @@ def format_trade_plan_block(plan: Optional[dict]) -> list[str]:
         f"TP3 / Runner (3R): {format_price(plan['tp3'])}",
         f"Hesap: {format_money(plan['account_size'])}",
         f"İşlem Riski: %{plan['risk_pct'] * 100:.2f} = {format_money(plan['risk_amount'])}",
+        format_position_sizing_brief(plan.get("position_sizing")),
         f"Önerilen Notional: {format_money(plan['position_notional'])}",
         f"Yaklaşık Miktar: {plan['quantity']:.6f}",
         "Not: Sinyal geldi diye anlık piyasa emri şart değildir; entry bölgesine pullback beklemek daha sağlıklıdır.",
@@ -2507,7 +2806,8 @@ def format_trade_open_msg(t: dict) -> str:
         f"Confidence: %{t.get('confidence', 0)}\n"
         f"Quality: {tq.get('grade', '-')}, score {tq.get('score', '-')}\n"
         f"Regime: {regime.get('regime', '-')}\n"
-        f"Risk: {format_money(t.get('risk_amount'))} | Notional: {format_money(t.get('position_notional'))}\n\n"
+        f"Risk: {format_money(t.get('risk_amount'))} (%{float(t.get('risk_pct', 0))*100:.2f}) | Notional: {format_money(t.get('position_notional'))}\\n"
+        f"{format_position_sizing_brief(t.get('position_sizing'))}\\n\\n"
         f"Not: Bu mesaj otomatik emir değildir; botun trade tracking kaydıdır.\n"
         f"Zaman: {tr_now_text()}"
     )
@@ -2578,9 +2878,11 @@ def open_trade(result: dict, plan: dict, state_mgr: StateManager = _STATE_MGR) -
         "tp1": float(plan["tp1"]),
         "tp2": float(plan["tp2"]),
         "tp3": float(plan["tp3"]),
+        "risk_pct": float(plan.get("risk_pct", 0)),
         "risk_amount": float(plan.get("risk_amount", 0)),
         "position_notional": float(plan.get("position_notional", 0)),
         "quantity": float(plan.get("quantity", 0)),
+        "position_sizing": copy.deepcopy(plan.get("position_sizing", {})),
         "opened_at": now_ts(),
         "closed_at": None,
         "result": None,
@@ -3277,6 +3579,7 @@ def _format_weight_group_suggestion_message(suggestion: dict) -> str:
         f"Tip: {suggestion.get('type', '-')}",
         f"Grup: {suggestion.get('group', '-')}",
         f"Güven: %{suggestion.get('confidence', 0) * 100:.1f}",
+        f"Validation: {(suggestion.get('backtest_validation') or {}).get('summary', 'Backtest validation yok.')}",
         "",
         "Önerilen değişiklikler:",
     ]
@@ -3296,6 +3599,189 @@ def _format_weight_group_suggestion_message(suggestion: dict) -> str:
     ])
     return "\n".join(lines)
 
+
+# ============================================================
+# BACKTEST VALIDATION v1 (closed-trade memory validation)
+# ============================================================
+
+def _bv_trade_group(t: dict) -> Optional[str]:
+    group = t.get("group")
+    if group in WEIGHTS:
+        return group
+    symbol = t.get("symbol")
+    if symbol in COINS:
+        return COINS[symbol]
+    return None
+
+
+def _bv_trade_direction(t: dict) -> Optional[str]:
+    direction = t.get("direction")
+    return direction if direction in ("LONG", "SHORT") else None
+
+
+def _bv_raw_aligned(raw: dict, direction: str) -> dict[str, float]:
+    """Raw skorları trade yönüne göre hizalar."""
+    out = {}
+    sign = -1.0 if direction == "SHORT" else 1.0
+    for comp in FEATURE_IMPORTANCE_COMPONENTS:
+        try:
+            out[comp] = float(raw.get(comp, 0.0)) * sign
+        except (TypeError, ValueError):
+            out[comp] = 0.0
+    return out
+
+
+def _bv_weighted_support(aligned_raw: dict[str, float], weights: dict[str, float]) -> float:
+    score = 0.0
+    for comp, weight in weights.items():
+        score += float(weight) * float(aligned_raw.get(comp, 0.0))
+    return score
+
+
+def _bv_outcome_value(t: dict) -> Optional[float]:
+    if t.get("result") is None:
+        return None
+    result = t.get("result")
+    pnl = float(t.get("pnl_pct", 0) or 0)
+    if result == "WIN":
+        return 1.0
+    if result == "LOSS":
+        return -1.0
+    if pnl > 0:
+        return 0.5
+    if pnl < 0:
+        return -0.5
+    return 0.0
+
+
+def _bv_metrics(rows: list[dict]) -> dict:
+    if not rows:
+        return {"sample": 0, "edge_score": 0.0, "win_support_avg": 0.0, "loss_support_avg": 0.0}
+
+    wins = [r for r in rows if r["outcome"] > 0]
+    losses = [r for r in rows if r["outcome"] < 0]
+    win_support_avg = sum(r["support"] for r in wins) / len(wins) if wins else 0.0
+    loss_support_avg = sum(r["support"] for r in losses) / len(losses) if losses else 0.0
+    separation = win_support_avg - loss_support_avg
+    directional = sum(r["outcome"] * r["support"] for r in rows) / len(rows)
+
+    sorted_rows = sorted(rows, key=lambda x: x["support"])
+    half = max(1, len(sorted_rows) // 2)
+    low = sorted_rows[:half]
+    high = sorted_rows[-half:]
+    high_wr = sum(1 for r in high if r["outcome"] > 0) / len(high)
+    low_wr = sum(1 for r in low if r["outcome"] > 0) / len(low)
+    bucket_edge = high_wr - low_wr
+
+    edge_score = 0.55 * separation + 0.30 * directional + 0.15 * bucket_edge
+    return {
+        "sample": len(rows),
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_support_avg": round(win_support_avg, 5),
+        "loss_support_avg": round(loss_support_avg, 5),
+        "separation": round(separation, 5),
+        "directional_score": round(directional, 5),
+        "bucket_edge": round(bucket_edge, 5),
+        "edge_score": round(edge_score, 5),
+    }
+
+
+def validate_weight_suggestion_backtest(
+    group: str,
+    proposed_weights: dict[str, float],
+    state_mgr: StateManager = _STATE_MGR,
+) -> dict:
+    """Weight önerisini kapalı trade hafızasında doğrular.
+
+    Bu v1 geçmiş mumları baştan replay etmez; açık/kapanmış trade kayıtlarındaki
+    raw skor snapshotlarını kullanarak eski ve önerilen ağırlıkların kazanan/kaybeden
+    trade'leri ne kadar iyi ayırdığını karşılaştırır.
+    """
+    if not BACKTEST_VALIDATION_ENABLED:
+        return {"enabled": False, "ready": True, "passed": True, "summary": "Backtest validation kapalı."}
+
+    if group not in WEIGHTS:
+        return {"enabled": True, "ready": False, "passed": False, "summary": f"Geçersiz grup: {group}"}
+
+    current_weights = {k: float(v) for k, v in WEIGHTS[group].items()}
+    proposed = {k: float(proposed_weights.get(k, current_weights.get(k, 0.0))) for k in current_weights}
+
+    rows_current = []
+    rows_proposed = []
+    for t in get_trades(state_mgr).values():
+        if t.get("result") is None:
+            continue
+        if _bv_trade_group(t) != group:
+            continue
+        direction = _bv_trade_direction(t)
+        outcome = _bv_outcome_value(t)
+        raw = t.get("raw") or {}
+        if direction is None or outcome is None or not isinstance(raw, dict):
+            continue
+        aligned = _bv_raw_aligned(raw, direction)
+        rows_current.append({"support": _bv_weighted_support(aligned, current_weights), "outcome": outcome})
+        rows_proposed.append({"support": _bv_weighted_support(aligned, proposed), "outcome": outcome})
+
+    sample = len(rows_current)
+    if sample < BACKTEST_VALIDATION_MIN_TRADES:
+        return {
+            "enabled": True,
+            "ready": False,
+            "passed": False,
+            "sample": sample,
+            "min_required": BACKTEST_VALIDATION_MIN_TRADES,
+            "summary": f"Backtest validation için veri yetersiz ({sample}/{BACKTEST_VALIDATION_MIN_TRADES}).",
+        }
+
+    current_metrics = _bv_metrics(rows_current)
+    proposed_metrics = _bv_metrics(rows_proposed)
+    improvement = float(proposed_metrics["edge_score"]) - float(current_metrics["edge_score"])
+    passed = improvement >= BACKTEST_VALIDATION_MIN_IMPROVEMENT
+    return {
+        "enabled": True,
+        "ready": True,
+        "passed": passed,
+        "group": group,
+        "sample": sample,
+        "min_improvement": BACKTEST_VALIDATION_MIN_IMPROVEMENT,
+        "improvement": round(improvement, 5),
+        "current": current_metrics,
+        "proposed": proposed_metrics,
+        "summary": (
+            f"BV {group}: edge {current_metrics['edge_score']:.4f} → "
+            f"{proposed_metrics['edge_score']:.4f} ({improvement:+.4f}) | "
+            f"{'PASS' if passed else 'FAIL'}"
+        ),
+    }
+
+
+def persist_backtest_validation_report(report: dict) -> None:
+    payload = _safe_read_json(BACKTEST_VALIDATION_REPORT_FILE, {"version": 1, "reports": []})
+    if not isinstance(payload, dict):
+        payload = {"version": 1, "reports": []}
+    payload.setdefault("version", 1)
+    payload.setdefault("reports", [])
+    if not isinstance(payload["reports"], list):
+        payload["reports"] = []
+    payload["reports"].append({
+        "ts": now_ts(),
+        "ts_tr": tr_now_text(),
+        "version": __version__,
+        "report": report,
+    })
+    payload["reports"] = payload["reports"][-200:]
+    payload["updated_at"] = now_ts()
+    _safe_write_json(BACKTEST_VALIDATION_REPORT_FILE, payload)
+
+
+def format_backtest_validation_brief() -> str:
+    payload = _safe_read_json(BACKTEST_VALIDATION_REPORT_FILE, {"reports": []})
+    reports = payload.get("reports") if isinstance(payload, dict) else []
+    if not reports:
+        return "BV: henüz rapor yok"
+    last = reports[-1].get("report", {}) if isinstance(reports[-1], dict) else {}
+    return "BV: " + last.get("summary", "rapor okunamadı")
 
 def generate_parameter_suggestions_from_weight_learning(
     state_mgr: StateManager = _STATE_MGR,
@@ -3330,6 +3816,17 @@ def generate_parameter_suggestions_from_weight_learning(
         if not proposed:
             continue
 
+        validation = validate_weight_suggestion_backtest(group, proposed, state_mgr)
+        persist_backtest_validation_report(validation)
+        if BACKTEST_VALIDATION_REQUIRE_PASS:
+            if not validation.get("ready") or not validation.get("passed"):
+                log.info(
+                    "Weight suggestion %s validation nedeniyle atlandı: %s",
+                    group,
+                    validation.get("summary"),
+                )
+                continue
+
         sid = _suggestion_id("WEIGHTS", group, proposed)
         if sid in existing_ids:
             continue
@@ -3358,6 +3855,7 @@ def generate_parameter_suggestions_from_weight_learning(
             "changes": changes,
             "confidence": round(confidence, 3),
             "reason": "Feature Importance + Weight Learning sonuçlarına göre grup ağırlık güncellemesi.",
+            "backtest_validation": validation,
         }
         existing.append(suggestion)
         existing_ids.add(sid)
@@ -3699,6 +4197,8 @@ def _send_periodic_messages(
             f"{format_edge_brief(state_mgr)}\n"
             f"{format_feature_importance_brief(state_mgr)}\n"
             f"{format_weight_learning_brief(state_mgr)}\n"
+            f"PS: base %{POSITION_SIZING_BASE_RISK_PCT*100:.2f} | clamp %{POSITION_SIZING_MIN_RISK_PCT*100:.2f}-%{POSITION_SIZING_MAX_RISK_PCT*100:.2f}\n"
+            f"{format_backtest_validation_brief()}\n"
             f"Pending suggestions: {pending_count}"
         )
         state_mgr.set_meta("last_heartbeat_ts", now_ts())
