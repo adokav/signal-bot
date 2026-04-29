@@ -36,7 +36,7 @@ from flask import Flask
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-__version__ = "2.0.0-regime-commander"
+__version__ = "2.3.0-position-management-v1"
 
 # ============================================================
 # LOGGING
@@ -233,6 +233,109 @@ STRATEGY_SIMULATION_MIN_TRADES = env_int("STRATEGY_SIMULATION_MIN_TRADES", 20, m
 STRATEGY_SIMULATION_REPORT_FILE = os.getenv(
     "STRATEGY_SIMULATION_REPORT_FILE", "strategy_simulation_report.json"
 )
+
+# Regime-First Architecture + Execution Preparation
+# EXECUTION_MODE varsayılan olarak PAPER'dır. LIVE emir gönderimi bilinçli olarak
+# iki ayrı kilitle kapalıdır: EXECUTION_MODE=LIVE ve ENABLE_LIVE_TRADING=1 gerekir.
+# Bu dosyada LIVE imza/ordertype altyapısı sadece güvenli iskelet olarak tutulur;
+# gerçek emir gönderimi ayrıca doğrulama ve küçük dry-run sonrası açılmalıdır.
+REGIME_FIRST_ENABLED = os.getenv("REGIME_FIRST_ENABLED", "1") == "1"
+EXECUTION_MODE = os.getenv("EXECUTION_MODE", "PAPER").upper()  # TRACKING / PAPER / LIVE
+ENABLE_LIVE_TRADING = os.getenv("ENABLE_LIVE_TRADING", "0") == "1"
+EXECUTION_LOG_FILE = os.getenv("EXECUTION_LOG_FILE", "execution_log.jsonl")
+
+# Paper Execution Reconciliation v1
+PAPER_EXECUTION_ENABLED = os.getenv("PAPER_EXECUTION_ENABLED", "1") == "1"
+PAPER_ORDER_TYPE = os.getenv("PAPER_ORDER_TYPE", "MARKET").upper()  # MARKET / LIMIT_AT_ENTRY
+PAPER_ORDERS_FILE = os.getenv("PAPER_ORDERS_FILE", "paper_orders.jsonl")
+PAPER_POSITIONS_FILE = os.getenv("PAPER_POSITIONS_FILE", "paper_positions.json")
+PAPER_EXECUTION_REPORT_FILE = os.getenv("PAPER_EXECUTION_REPORT_FILE", "paper_execution_report.json")
+PAPER_FEE_BPS = env_float("PAPER_FEE_BPS", 4.0, min_value=0.0)
+PAPER_SLIPPAGE_BPS_CORE = env_float("PAPER_SLIPPAGE_BPS_CORE", 2.0, min_value=0.0)
+PAPER_SLIPPAGE_BPS_HIGH_BETA = env_float("PAPER_SLIPPAGE_BPS_HIGH_BETA", 5.0, min_value=0.0)
+PAPER_FILL_TIMEOUT_SECONDS = env_int("PAPER_FILL_TIMEOUT_SECONDS", 30 * 60, min_value=60)
+PAPER_CLOSE_ON_MISSED_ENTRY = os.getenv("PAPER_CLOSE_ON_MISSED_ENTRY", "0") == "1"
+
+# Position Management Engine v1
+# Açık trade yönetimi: partial TP, trailing stop, time exit ve kontrollü scale-in.
+POSITION_MANAGEMENT_ENABLED = os.getenv("POSITION_MANAGEMENT_ENABLED", "1") == "1"
+POSITION_MANAGEMENT_LOG_FILE = os.getenv("POSITION_MANAGEMENT_LOG_FILE", "position_management_log.jsonl")
+POSITION_MANAGEMENT_SEND_ACTION_MESSAGES = os.getenv("POSITION_MANAGEMENT_SEND_ACTION_MESSAGES", "0") == "1"
+
+PM_CORE_SL_PCT = env_float("PM_CORE_SL_PCT", 0.020, min_value=0.001)
+PM_HIGH_BETA_SL_PCT = env_float("PM_HIGH_BETA_SL_PCT", 0.035, min_value=0.001)
+
+PM_CORE_TP1_R = env_float("PM_CORE_TP1_R", 1.0, min_value=0.1)
+PM_CORE_TP2_R = env_float("PM_CORE_TP2_R", 2.0, min_value=0.2)
+PM_CORE_TP3_R = env_float("PM_CORE_TP3_R", 3.5, min_value=0.3)
+PM_HIGH_BETA_TP1_R = env_float("PM_HIGH_BETA_TP1_R", 1.0, min_value=0.1)
+PM_HIGH_BETA_TP2_R = env_float("PM_HIGH_BETA_TP2_R", 2.0, min_value=0.2)
+PM_HIGH_BETA_TP3_R = env_float("PM_HIGH_BETA_TP3_R", 3.2, min_value=0.3)
+
+PM_TP1_CLOSE_RATIO = env_float("PM_TP1_CLOSE_RATIO", 0.50, min_value=0.0)
+PM_TP2_CLOSE_RATIO = env_float("PM_TP2_CLOSE_RATIO", 0.25, min_value=0.0)
+PM_CORE_MAX_HOLD_MIN = env_int("PM_CORE_MAX_HOLD_MIN", 180, min_value=5)
+PM_HIGH_BETA_MAX_HOLD_MIN = env_int("PM_HIGH_BETA_MAX_HOLD_MIN", 90, min_value=5)
+
+PM_SCALE_IN_ENABLED = os.getenv("PM_SCALE_IN_ENABLED", "1") == "1"
+PM_SCALE_IN_MIN_GRADE = os.getenv("PM_SCALE_IN_MIN_GRADE", "A+").upper()
+PM_CORE_SCALE_TRIGGER_R = env_float("PM_CORE_SCALE_TRIGGER_R", 1.0, min_value=0.1)
+PM_HIGH_BETA_SCALE_TRIGGER_R = env_float("PM_HIGH_BETA_SCALE_TRIGGER_R", 1.2, min_value=0.1)
+PM_CORE_SCALE_ADD_RATIO = env_float("PM_CORE_SCALE_ADD_RATIO", 0.35, min_value=0.0)
+PM_HIGH_BETA_SCALE_ADD_RATIO = env_float("PM_HIGH_BETA_SCALE_ADD_RATIO", 0.25, min_value=0.0)
+
+PM_TRAIL_STEPS_CORE = [
+    (1.0, 0.00),   # +1R -> stop breakeven
+    (1.8, 0.75),   # +1.8R -> +0.75R lock
+    (2.8, 1.50),   # +2.8R -> +1.50R lock
+]
+PM_TRAIL_STEPS_HIGH_BETA = [
+    (1.0, 0.00),
+    (1.6, 0.60),
+    (2.5, 1.25),
+]
+
+PM_CONFIG: dict[str, dict[str, Any]] = {
+    "CORE": {
+        "sl_pct": PM_CORE_SL_PCT,
+        "tp1_r": PM_CORE_TP1_R,
+        "tp2_r": PM_CORE_TP2_R,
+        "tp3_r": PM_CORE_TP3_R,
+        "tp1_close_ratio": clamp(PM_TP1_CLOSE_RATIO, 0.0, 1.0),
+        "tp2_close_ratio": clamp(PM_TP2_CLOSE_RATIO, 0.0, 1.0),
+        "max_hold_min": PM_CORE_MAX_HOLD_MIN,
+        "scale_trigger_r": PM_CORE_SCALE_TRIGGER_R,
+        "scale_add_ratio": PM_CORE_SCALE_ADD_RATIO,
+        "trail_steps": PM_TRAIL_STEPS_CORE,
+    },
+    "HIGH_BETA": {
+        "sl_pct": PM_HIGH_BETA_SL_PCT,
+        "tp1_r": PM_HIGH_BETA_TP1_R,
+        "tp2_r": PM_HIGH_BETA_TP2_R,
+        "tp3_r": PM_HIGH_BETA_TP3_R,
+        "tp1_close_ratio": clamp(PM_TP1_CLOSE_RATIO, 0.0, 1.0),
+        "tp2_close_ratio": clamp(PM_TP2_CLOSE_RATIO, 0.0, 1.0),
+        "max_hold_min": PM_HIGH_BETA_MAX_HOLD_MIN,
+        "scale_trigger_r": PM_HIGH_BETA_SCALE_TRIGGER_R,
+        "scale_add_ratio": PM_HIGH_BETA_SCALE_ADD_RATIO,
+        "trail_steps": PM_TRAIL_STEPS_HIGH_BETA,
+    },
+}
+
+
+if PAPER_ORDER_TYPE not in {"MARKET", "LIMIT_AT_ENTRY"}:
+    log.warning("PAPER_ORDER_TYPE=%r gecersiz; MARKET kullanılıyor.", PAPER_ORDER_TYPE)
+    PAPER_ORDER_TYPE = "MARKET"
+
+MEXC_API_KEY = os.getenv("MEXC_API_KEY")
+MEXC_API_SECRET = os.getenv("MEXC_API_SECRET")
+
+if EXECUTION_MODE not in {"TRACKING", "PAPER", "LIVE"}:
+    log.warning("EXECUTION_MODE=%r gecersiz; PAPER kullanılıyor.", EXECUTION_MODE)
+    EXECUTION_MODE = "PAPER"
+if EXECUTION_MODE == "LIVE" and not ENABLE_LIVE_TRADING:
+    log.warning("EXECUTION_MODE=LIVE istendi ancak ENABLE_LIVE_TRADING=1 değil; PAPER moda düşüldü.")
+    EXECUTION_MODE = "PAPER"
 
 # Hata sonrası bekleme süreleri
 ERROR_BACKOFF_SHORT = env_int("ERROR_BACKOFF_SHORT", 60, min_value=1)
@@ -2625,6 +2728,419 @@ def make_summary(results: list[dict], session_context: SessionContext, news_cont
 # REGIME / QUALITY / PORTFOLIO ENGINE
 # ============================================================
 
+
+def classify_signal_from_score(total: float, group: str) -> tuple[str, str]:
+    """Convert a regime-adjusted score back to signal/level."""
+    if total >= THRESHOLDS[group]["long"]:
+        return "LONG", classify_level(abs(total), group)
+    if total <= THRESHOLDS[group]["short"]:
+        return "SHORT", classify_level(abs(total), group)
+    return "NO_TRADE", "WEAK"
+
+
+def apply_regime_first_scoring(result: dict, regime: dict) -> dict:
+    """Regime-first architecture v2.
+
+    Eski akışta sinyal önce oluşuyor, rejim sonra filtreliyordu. Bu fonksiyon,
+    rejimi skor/sinyal seviyesine daha erken uygular: yasak yönleri no-trade'e
+    çeker, uygun yönü sınırlı biçimde güçlendirir, chop/news gibi kötü rejimlerde
+    skoru küçültür. Ama raw/pre-regime değerleri saklanır; öğrenme modülü neyin
+    neyi değiştirdiğini sonradan analiz edebilir.
+    """
+    if not REGIME_FIRST_ENABLED:
+        result["regime_first"] = {"enabled": False, "action": "disabled"}
+        return result
+
+    if result.get("signal") not in ("LONG", "SHORT"):
+        result["regime_first"] = {"enabled": True, "action": "no_signal"}
+        return result
+
+    group = result.get("group", "CORE")
+    regime_name = regime.get("regime", "NEUTRAL")
+    strategy = get_regime_strategy(regime_name)
+    original_score = float(result.get("score", 0) or 0)
+    original_signal = result.get("signal")
+    adjusted = original_score
+    action = "neutral"
+
+    # Önce izinleri uygula: bu rejimde yön kapalıysa sinyal üretme.
+    if float(strategy.get("risk_multiplier", 1.0)) <= 0:
+        adjusted = 0.0
+        action = "blocked_no_new_trade"
+    elif original_signal == "LONG" and not strategy.get("allow_long", True):
+        adjusted = 0.0
+        action = "blocked_long_by_regime"
+    elif original_signal == "SHORT" and not strategy.get("allow_short", True):
+        adjusted = 0.0
+        action = "blocked_short_by_regime"
+    elif group == "HIGH_BETA" and not strategy.get("high_beta_allowed", False):
+        adjusted = 0.0
+        action = "blocked_high_beta_by_regime"
+    else:
+        # Rejim uyumlu yönleri sınırlı güçlendir, uyumsuz yönleri sönümle.
+        if regime_name == "RISK_ON_ALTSEASON":
+            adjusted = original_score * (1.15 if original_score > 0 else 0.45)
+            action = "altseason_long_bias"
+        elif regime_name == "RISK_ON_TREND_UP":
+            adjusted = original_score * (1.08 if original_score > 0 else 0.65)
+            action = "trend_up_long_bias"
+        elif regime_name == "RISK_OFF_TREND_DOWN":
+            adjusted = original_score * (1.10 if original_score < 0 else 0.50)
+            action = "risk_off_short_bias"
+        elif regime_name == "CHOP_RANGE":
+            adjusted = original_score * 0.72
+            action = "chop_score_dampen"
+        elif regime_name == "SQUEEZE_LONG":
+            adjusted = original_score * (1.08 if original_score > 0 else 0.40)
+            action = "squeeze_long_bias"
+        elif regime_name == "SQUEEZE_SHORT":
+            adjusted = original_score * (1.08 if original_score < 0 else 0.40)
+            action = "squeeze_short_bias"
+        elif regime_name == "NEWS_CHAOS":
+            adjusted = 0.0
+            action = "news_chaos_no_trade"
+
+    new_signal, new_level = classify_signal_from_score(adjusted, group)
+
+    result["pre_regime_signal"] = original_signal
+    result["pre_regime_score"] = original_score
+    result["score"] = round(adjusted, 3)
+    result["signal"] = new_signal
+    result["level"] = new_level
+    if new_signal in ("LONG", "SHORT") and result.get("max_score", 0):
+        result["confidence"] = round(clamp(abs(adjusted) / float(result["max_score"]) * 100, 0, 100), 1)
+    else:
+        result["confidence"] = 0.0
+    result["regime_first"] = {
+        "enabled": True,
+        "action": action,
+        "original_signal": original_signal,
+        "original_score": round(original_score, 3),
+        "adjusted_score": round(adjusted, 3),
+        "regime": regime_name,
+    }
+    return result
+
+
+def append_jsonl(path: str, payload: dict) -> None:
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError as e:
+        log.error("%s yazılamadı: %s", path, e)
+
+
+class ExecutionAdapter:
+    """Execution preparation layer.
+
+    TRACKING: sadece trade tracking mesajı üretir, execution intent yok.
+    PAPER: emir niyetini execution_log.jsonl'ye yazar; gerçek emir yok.
+    LIVE: şu an güvenlik gereği NotImplemented döner. Gerçek MEXC signed order
+    modülü ayrıca küçük miktarlı dry-run ve izin kontrollerinden sonra açılmalı.
+    """
+
+    def __init__(self, mode: str = EXECUTION_MODE):
+        self.mode = mode
+
+    def submit_order(self, trade: dict) -> dict:
+        intent = {
+            "ts": now_ts(),
+            "time_tr": tr_now_text(),
+            "mode": self.mode,
+            "symbol": trade.get("symbol"),
+            "side": "BUY" if trade.get("direction") == "LONG" else "SELL",
+            "direction": trade.get("direction"),
+            "quantity": trade.get("quantity"),
+            "notional": trade.get("position_notional"),
+            "entry_reference": trade.get("entry"),
+            "stop": trade.get("stop"),
+            "tp1": trade.get("tp1"),
+            "tp2": trade.get("tp2"),
+            "tp3": trade.get("tp3"),
+            "regime": (trade.get("regime") or {}).get("regime"),
+        }
+
+        if self.mode == "TRACKING":
+            return {"submitted": False, "mode": self.mode, "reason": "tracking_only"}
+
+        if self.mode == "PAPER":
+            payload = {**intent, "submitted": True, "paper": True, "reason": "paper_order_logged"}
+            append_jsonl(EXECUTION_LOG_FILE, payload)
+            return payload
+
+        if self.mode == "LIVE":
+            if not ENABLE_LIVE_TRADING:
+                return {"submitted": False, "mode": self.mode, "reason": "live_disabled"}
+            if not MEXC_API_KEY or not MEXC_API_SECRET:
+                return {"submitted": False, "mode": self.mode, "reason": "missing_mexc_keys"}
+            # Bilerek kapalı: imza, precision, reduceOnly, order lifecycle, retry ve
+            # duplicate-order guard tamamlanmadan canlı emir açmıyoruz.
+            return {"submitted": False, "mode": self.mode, "reason": "live_not_implemented_safe_guard"}
+
+        return {"submitted": False, "mode": self.mode, "reason": "unknown_mode"}
+
+
+_EXECUTION_ADAPTER = ExecutionAdapter()
+
+
+def maybe_submit_execution_order(trade: dict) -> dict:
+    result = _EXECUTION_ADAPTER.submit_order(trade)
+    trade["execution"] = result
+    if result.get("submitted") and result.get("paper"):
+        log.info("PAPER execution logged: %s %s", trade.get("symbol"), trade.get("direction"))
+    elif EXECUTION_MODE == "LIVE":
+        log.warning("LIVE execution not sent: %s", result.get("reason"))
+    return result
+
+def _paper_json_read(path: str, default):
+    try:
+        if not os.path.exists(path):
+            return copy.deepcopy(default)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if data is not None else copy.deepcopy(default)
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("%s okunamadı: %s", path, e)
+        return copy.deepcopy(default)
+
+
+def _paper_json_write(path: str, data) -> None:
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        os.makedirs(parent, exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError as e:
+        log.warning("%s yazılamadı: %s", path, e)
+
+
+def _paper_slippage_bps(group: str) -> float:
+    return PAPER_SLIPPAGE_BPS_HIGH_BETA if group == "HIGH_BETA" else PAPER_SLIPPAGE_BPS_CORE
+
+
+def _paper_cost_adjusted_price(reference_price: float, *, direction: str, action: str, spread_bps: float, group: str) -> float:
+    price = max(float(reference_price), 0.0)
+    if price <= 0:
+        return 0.0
+    cost = (max(float(spread_bps or 0.0), 0.0) / 2.0 + _paper_slippage_bps(group)) / 10000.0
+    worse_up = (direction == "LONG") if action == "open" else (direction == "SHORT")
+    return price * (1 + cost) if worse_up else price * (1 - cost)
+
+
+def _paper_fee(notional: float) -> float:
+    return abs(float(notional or 0.0)) * PAPER_FEE_BPS / 10000.0
+
+
+def _paper_limit_price(trade: dict) -> float:
+    entry = float(trade.get("entry", 0) or 0)
+    if trade.get("direction") == "LONG":
+        return float(trade.get("entry_zone_high") or entry)
+    return float(trade.get("entry_zone_low") or entry)
+
+
+def _paper_positions_payload() -> dict:
+    payload = _paper_json_read(PAPER_POSITIONS_FILE, {"version": 1, "positions": {}})
+    if not isinstance(payload, dict):
+        payload = {"version": 1, "positions": {}}
+    payload.setdefault("version", 1)
+    payload.setdefault("positions", {})
+    if not isinstance(payload["positions"], dict):
+        payload["positions"] = {}
+    return payload
+
+
+def _paper_positions_upsert(paper: dict) -> None:
+    if not paper or paper.get("status") == "DISABLED":
+        return
+    payload = _paper_positions_payload()
+    tid = paper.get("trade_id") or paper.get("paper_order_id")
+    if tid:
+        payload["positions"][tid] = copy.deepcopy(paper)
+        payload["updated_at"] = now_ts()
+        payload["updated_at_tr"] = tr_now_text()
+        _paper_json_write(PAPER_POSITIONS_FILE, payload)
+
+
+def paper_create_order_from_trade(trade: dict) -> dict:
+    if not PAPER_EXECUTION_ENABLED or EXECUTION_MODE != "PAPER":
+        paper = {"enabled": PAPER_EXECUTION_ENABLED, "status": "DISABLED", "mode": EXECUTION_MODE}
+        trade["paper_execution"] = paper
+        return paper
+    direction = trade.get("direction")
+    group = trade.get("group", "CORE")
+    reference = float(trade.get("entry", 0) or 0)
+    spread_bps = float(trade.get("open_spread_bps", 0) or 0)
+    notional = float(trade.get("position_notional", 0) or 0)
+    qty = float(trade.get("quantity", 0) or 0)
+    now = now_ts()
+    order = {
+        "paper_order_id": f"paper_{trade.get('id', _trade_id(str(trade.get('symbol', 'UNK'))))}",
+        "trade_id": trade.get("id"), "symbol": trade.get("symbol"), "group": group,
+        "direction": direction, "order_type": PAPER_ORDER_TYPE, "status": "NEW",
+        "created_at": now, "created_at_tr": tr_now_text(),
+        "reference_entry": reference, "limit_price": _paper_limit_price(trade),
+        "requested_qty": qty, "requested_notional": notional,
+        "spread_bps_at_signal": spread_bps,
+        "slippage_bps_assumption": _paper_slippage_bps(group), "fee_bps": PAPER_FEE_BPS,
+        "fill_timeout_seconds": PAPER_FILL_TIMEOUT_SECONDS,
+    }
+    if PAPER_ORDER_TYPE == "MARKET":
+        fill_price = _paper_cost_adjusted_price(reference, direction=direction, action="open", spread_bps=spread_bps, group=group)
+        open_fee = _paper_fee(notional)
+        order.update({"status": "FILLED", "filled_at": now, "filled_at_tr": tr_now_text(),
+                      "fill_price": fill_price, "fill_qty": qty,
+                      "fill_notional": abs(qty * fill_price) if qty else notional,
+                      "open_fee_usd": open_fee,
+                      "entry_slippage_pct": pct(fill_price, reference) / 100.0 if reference else 0.0,
+                      "unrealized_pnl_pct": 0.0, "net_pnl_usd": -open_fee,
+                      "max_favor": 0.0, "max_adverse": 0.0})
+    trade["paper_execution"] = order
+    append_jsonl(PAPER_ORDERS_FILE, {"event": "ORDER_CREATED", **order})
+    _paper_positions_upsert(order)
+    return order
+
+
+def paper_reconcile_open_trade(t: dict, latest_result: dict) -> bool:
+    if not PAPER_EXECUTION_ENABLED or EXECUTION_MODE != "PAPER":
+        return False
+    paper = t.get("paper_execution") or {}
+    if not paper or paper.get("status") == "DISABLED":
+        paper = paper_create_order_from_trade(t)
+    if paper.get("status") in ("CLOSED", "MISSED", "CANCELLED"):
+        return False
+    f = latest_result.get("features", {}) if latest_result else {}
+    last = float(f.get("last") or f.get("spot_price") or t.get("entry") or 0)
+    spread_bps = float(f.get("spread_bps", t.get("open_spread_bps", 0)) or 0)
+    direction = t.get("direction")
+    group = t.get("group", "CORE")
+    now = now_ts()
+    changed = False
+    if paper.get("status") == "NEW" and paper.get("order_type") == "LIMIT_AT_ENTRY":
+        limit_price = float(paper.get("limit_price") or _paper_limit_price(t))
+        fill = (direction == "LONG" and last <= limit_price) or (direction == "SHORT" and last >= limit_price)
+        timed_out = now - int(paper.get("created_at", now) or now) >= PAPER_FILL_TIMEOUT_SECONDS
+        if fill:
+            notional = float(paper.get("requested_notional", t.get("position_notional", 0)) or 0)
+            qty = float(paper.get("requested_qty", t.get("quantity", 0)) or 0)
+            fill_price = _paper_cost_adjusted_price(limit_price, direction=direction, action="open", spread_bps=spread_bps, group=group)
+            open_fee = _paper_fee(notional)
+            paper.update({"status": "FILLED", "filled_at": now, "filled_at_tr": tr_now_text(),
+                          "fill_price": fill_price, "fill_qty": qty,
+                          "fill_notional": abs(qty * fill_price) if qty else notional,
+                          "open_fee_usd": open_fee,
+                          "entry_slippage_pct": pct(fill_price, limit_price) / 100.0 if limit_price else 0.0,
+                          "unrealized_pnl_pct": 0.0, "net_pnl_usd": -open_fee,
+                          "max_favor": 0.0, "max_adverse": 0.0})
+            append_jsonl(PAPER_ORDERS_FILE, {"event": "ORDER_FILLED", **paper})
+            changed = True
+        elif timed_out:
+            paper.update({"status": "MISSED", "missed_at": now, "missed_at_tr": tr_now_text(),
+                          "miss_reason": "fill_timeout", "last_seen_price": last})
+            append_jsonl(PAPER_ORDERS_FILE, {"event": "ORDER_MISSED", **paper})
+            changed = True
+    if paper.get("status") == "FILLED":
+        fill_price = float(paper.get("fill_price") or t.get("entry") or 0)
+        exit_price_est = _paper_cost_adjusted_price(last, direction=direction, action="close", spread_bps=spread_bps, group=group)
+        pnl_pct = _trade_pnl(direction, fill_price, exit_price_est)
+        paper["last_mark_price"] = last
+        paper["estimated_exit_price"] = exit_price_est
+        paper["unrealized_pnl_pct"] = pnl_pct
+        paper["max_favor"] = max(float(paper.get("max_favor", 0) or 0), pnl_pct)
+        paper["max_adverse"] = min(float(paper.get("max_adverse", 0) or 0), pnl_pct)
+        changed = True
+    t["paper_execution"] = paper
+    if changed:
+        _paper_positions_upsert(paper)
+    return changed
+
+
+def paper_close_trade(t: dict, price: float, reason: str) -> None:
+    if not PAPER_EXECUTION_ENABLED or EXECUTION_MODE != "PAPER":
+        return
+    paper = t.get("paper_execution") or {}
+    if not paper or paper.get("status") != "FILLED":
+        return
+    direction = t.get("direction")
+    group = t.get("group", "CORE")
+    spread_bps = float(t.get("last_spread_bps", t.get("open_spread_bps", 0)) or 0)
+    fill_price = float(paper.get("fill_price") or t.get("entry") or 0)
+    qty = float(paper.get("fill_qty") or t.get("quantity") or 0)
+    open_fee = float(paper.get("open_fee_usd", 0) or 0)
+    exit_price = _paper_cost_adjusted_price(float(price), direction=direction, action="close", spread_bps=spread_bps, group=group)
+    gross_pnl_usd = (exit_price - fill_price) * qty if direction == "LONG" else (fill_price - exit_price) * qty
+    close_fee = _paper_fee(abs(qty * exit_price))
+    net_pnl_usd = gross_pnl_usd - open_fee - close_fee
+    basis_notional = abs(qty * fill_price) if qty else float(t.get("position_notional", 0) or 0)
+    net_pnl_pct = net_pnl_usd / basis_notional if basis_notional > 0 else 0.0
+    paper.update({"status": "CLOSED", "closed_at": now_ts(), "closed_at_tr": tr_now_text(),
+                  "close_reason": reason, "exit_reference_price": float(price), "exit_fill_price": exit_price,
+                  "close_fee_usd": close_fee, "gross_pnl_usd": gross_pnl_usd, "net_pnl_usd": net_pnl_usd,
+                  "net_pnl_pct": net_pnl_pct, "total_fee_usd": open_fee + close_fee,
+                  "roundtrip_cost_pct": (open_fee + close_fee) / basis_notional if basis_notional > 0 else 0.0})
+    t["paper_execution"] = paper
+    append_jsonl(PAPER_ORDERS_FILE, {"event": "POSITION_CLOSED", **paper})
+    _paper_positions_upsert(paper)
+
+
+def reconcile_paper_execution(results_by_symbol: dict, state_mgr: StateManager = _STATE_MGR) -> None:
+    if not PAPER_EXECUTION_ENABLED or EXECUTION_MODE != "PAPER":
+        return
+    trades = get_trades(state_mgr)
+    changed = False
+    for tid, t in list(trades.items()):
+        if not isinstance(t, dict) or t.get("result") is not None:
+            continue
+        result = results_by_symbol.get(t.get("symbol"))
+        if not result:
+            continue
+        try:
+            t["last_spread_bps"] = float((result.get("features") or {}).get("spread_bps", 0) or 0)
+            if paper_reconcile_open_trade(t, result):
+                trades[tid] = t
+                changed = True
+                if (t.get("paper_execution") or {}).get("status") == "MISSED" and PAPER_CLOSE_ON_MISSED_ENTRY:
+                    close_trade(trades, tid, t, float(result["features"]["last"]), "EXIT", "PAPER_ENTRY_MISSED")
+        except Exception as e:
+            log.warning("Paper reconciliation hata (%s): %s", tid, e)
+    if changed:
+        save_trades(trades, state_mgr)
+        persist_paper_execution_report(state_mgr)
+
+
+def paper_execution_report(state_mgr: StateManager = _STATE_MGR) -> dict:
+    trades = list(get_trades(state_mgr).values())
+    rows = [t.get("paper_execution") for t in trades if isinstance(t.get("paper_execution"), dict)]
+    if not rows:
+        return {"ready": False, "summary": "PaperExec: veri yok"}
+    filled = [p for p in rows if p.get("status") in ("FILLED", "CLOSED")]
+    closed = [p for p in rows if p.get("status") == "CLOSED"]
+    missed = [p for p in rows if p.get("status") == "MISSED"]
+    total_net = sum(float(p.get("net_pnl_usd", 0) or 0) for p in closed)
+    total_fees = sum(float(p.get("total_fee_usd", p.get("open_fee_usd", 0)) or 0) for p in rows)
+    avg_net_pct = sum(float(p.get("net_pnl_pct", 0) or 0) for p in closed) / len(closed) if closed else 0.0
+    fill_rate = len(filled) / len(rows) * 100 if rows else 0.0
+    missed_rate = len(missed) / len(rows) * 100 if rows else 0.0
+    return {"ready": True, "generated_at": now_ts(), "generated_at_tr": tr_now_text(),
+            "total_paper_orders": len(rows), "filled_or_open": len(filled), "closed_positions": len(closed),
+            "missed_entries": len(missed), "fill_rate_pct": round(fill_rate, 1), "missed_rate_pct": round(missed_rate, 1),
+            "total_net_pnl_usd": round(total_net, 4), "avg_net_pnl_pct": round(avg_net_pct * 100, 3),
+            "total_estimated_fees_usd": round(total_fees, 4),
+            "summary": f"PaperExec: fill %{fill_rate:.1f} | missed %{missed_rate:.1f} | net {format_money(total_net)} | closed {len(closed)}"}
+
+
+def persist_paper_execution_report(state_mgr: StateManager = _STATE_MGR) -> dict:
+    report = paper_execution_report(state_mgr)
+    _paper_json_write(PAPER_EXECUTION_REPORT_FILE, {"version": 1, "bot_version": __version__, "updated_at": now_ts(), "updated_at_tr": tr_now_text(), "report": report})
+    return report
+
+
+def format_paper_execution_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    return paper_execution_report(state_mgr).get("summary", "PaperExec: rapor yok")
+
 def detect_market_regime(btc: dict, eth: dict, news_context: dict) -> dict:
     """Market Regime Engine v2.
 
@@ -3138,6 +3654,348 @@ def mark_movement_alert_sent(state_mgr: StateManager, symbol: str) -> None:
 
 
 
+
+# ============================================================
+# POSITION MANAGEMENT ENGINE v1
+# ============================================================
+
+def _pm_cfg(group: str) -> dict:
+    return PM_CONFIG.get(group, PM_CONFIG["CORE"])
+
+
+def _pm_direction_sign(direction: str) -> int:
+    return 1 if direction == "LONG" else -1
+
+
+def _pm_risk_per_unit(t: dict, pm: Optional[dict] = None) -> float:
+    entry = float((pm or {}).get("avg_entry", t.get("entry", 0)) or 0)
+    stop = float((pm or {}).get("initial_stop", t.get("stop", 0)) or 0)
+    return abs(entry - stop)
+
+
+def _pm_price_at_r(entry: float, risk_per_unit: float, direction: str, r_mult: float) -> float:
+    if direction == "LONG":
+        return entry + risk_per_unit * r_mult
+    return entry - risk_per_unit * r_mult
+
+
+def _pm_pnl_pct(direction: str, entry: float, price: float) -> float:
+    return _trade_pnl(direction, entry, price)
+
+
+def _pm_realized_pnl_usd(direction: str, entry: float, exit_price: float, qty: float) -> float:
+    if direction == "LONG":
+        return (exit_price - entry) * qty
+    return (entry - exit_price) * qty
+
+
+def init_position_management(trade: dict) -> dict:
+    """Create position-management state for a newly opened tracking trade."""
+    group = trade.get("group", "CORE")
+    cfg = _pm_cfg(group)
+    direction = trade.get("direction")
+    entry = float(trade.get("entry") or 0)
+    qty = float(trade.get("quantity") or 0)
+    stop = float(trade.get("stop") or (entry * (1 - cfg["sl_pct"]) if direction == "LONG" else entry * (1 + cfg["sl_pct"])))
+    risk_per_unit = abs(entry - stop)
+    if risk_per_unit <= 0 and entry > 0:
+        risk_per_unit = entry * float(cfg["sl_pct"])
+        stop = entry - risk_per_unit if direction == "LONG" else entry + risk_per_unit
+
+    tp1 = _pm_price_at_r(entry, risk_per_unit, direction, float(cfg["tp1_r"]))
+    tp2 = _pm_price_at_r(entry, risk_per_unit, direction, float(cfg["tp2_r"]))
+    tp3 = _pm_price_at_r(entry, risk_per_unit, direction, float(cfg["tp3_r"]))
+
+    # Keep plan values if they are already more conservative/consistent with strategy.
+    trade["stop"] = stop
+    trade["tp1"] = tp1
+    trade["tp2"] = tp2
+    trade["tp3"] = tp3
+
+    return {
+        "enabled": POSITION_MANAGEMENT_ENABLED,
+        "status": "OPEN",
+        "avg_entry": entry,
+        "initial_entry": entry,
+        "initial_stop": stop,
+        "managed_stop": stop,
+        "initial_qty": qty,
+        "remaining_qty": qty,
+        "realized_qty": 0.0,
+        "scaled_qty": 0.0,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "tp1_done": False,
+        "tp2_done": False,
+        "scale_in_done": False,
+        "trailing_active": False,
+        "max_r": 0.0,
+        "max_favor_pct": 0.0,
+        "max_adverse_pct": 0.0,
+        "realized_pnl_usd": 0.0,
+        "last_action": "INIT",
+        "last_action_ts": now_ts(),
+        "events": [],
+    }
+
+
+def _pm_append_event(trade: dict, event: dict) -> None:
+    pm = trade.setdefault("position_management", {})
+    event = {"ts": now_ts(), "ts_tr": tr_now_text(), **event}
+    pm.setdefault("events", []).append(event)
+    pm["events"] = pm["events"][-20:]
+    pm["last_action"] = event.get("event", pm.get("last_action"))
+    pm["last_action_ts"] = event["ts"]
+    _append_jsonl(POSITION_MANAGEMENT_LOG_FILE, {
+        "trade_id": trade.get("id"),
+        "symbol": trade.get("symbol"),
+        "direction": trade.get("direction"),
+        **event,
+    })
+
+
+def _pm_send_action_message(trade: dict, event: dict) -> None:
+    if not POSITION_MANAGEMENT_SEND_ACTION_MESSAGES:
+        return
+    send_message(
+        "🧭 POSITION MANAGEMENT\n\n"
+        f"{trade.get('symbol')} → {trade.get('direction')}\n"
+        f"Event: {event.get('event')}\n"
+        f"Price: {format_price(event.get('price'))}\n"
+        f"R: {event.get('r_now', '-')}\n"
+        f"Remaining Qty: {float((trade.get('position_management') or {}).get('remaining_qty', 0)):.6f}\n"
+        f"Managed Stop: {format_price((trade.get('position_management') or {}).get('managed_stop'))}\n"
+        f"Realized: {format_money((trade.get('position_management') or {}).get('realized_pnl_usd'))}\n"
+        f"Zaman: {tr_now_text()}"
+    )
+
+
+def _pm_should_hit(direction: str, price: float, target: float, *, target_type: str) -> bool:
+    if target_type in ("TP", "SCALE"):
+        return price >= target if direction == "LONG" else price <= target
+    if target_type == "STOP":
+        return price <= target if direction == "LONG" else price >= target
+    return False
+
+
+def update_position_management(trade: dict, latest_result: dict) -> tuple[bool, Optional[str], Optional[str]]:
+    """Update open trade management.
+
+    Returns:
+        (changed, close_result, close_reason)
+        close_result is WIN/LOSS/EXIT when the trade should be closed.
+    """
+    if not POSITION_MANAGEMENT_ENABLED:
+        return False, None, None
+
+    if trade.get("result") is not None:
+        return False, None, None
+
+    pm = trade.get("position_management")
+    if not isinstance(pm, dict) or not pm:
+        pm = init_position_management(trade)
+        trade["position_management"] = pm
+
+    features = latest_result.get("features", {}) if latest_result else {}
+    price = float(features.get("last") or features.get("spot_price") or trade.get("entry") or 0)
+    if price <= 0:
+        return False, None, None
+
+    direction = trade.get("direction")
+    group = trade.get("group", "CORE")
+    cfg = _pm_cfg(group)
+    avg_entry = float(pm.get("avg_entry") or trade.get("entry") or 0)
+    remaining_qty = float(pm.get("remaining_qty") or 0)
+    risk_per_unit = _pm_risk_per_unit(trade, pm)
+    if avg_entry <= 0 or risk_per_unit <= 0:
+        return False, None, None
+
+    pnl_pct = _pm_pnl_pct(direction, avg_entry, price)
+    r_now = ((price - avg_entry) / risk_per_unit) if direction == "LONG" else ((avg_entry - price) / risk_per_unit)
+    changed = False
+
+    pm["max_r"] = max(float(pm.get("max_r", 0) or 0), r_now)
+    pm["max_favor_pct"] = max(float(pm.get("max_favor_pct", 0) or 0), pnl_pct)
+    pm["max_adverse_pct"] = min(float(pm.get("max_adverse_pct", 0) or 0), pnl_pct)
+    trade["max_favor"] = max(float(trade.get("max_favor", 0) or 0), pnl_pct)
+    trade["max_adverse"] = min(float(trade.get("max_adverse", 0) or 0), pnl_pct)
+
+    # Scale-in: only for high-quality trades, once, after favorable movement.
+    grade = ((trade.get("trade_quality") or {}).get("grade") or "").upper()
+    can_scale_grade = quality_meets_min(grade, PM_SCALE_IN_MIN_GRADE)
+    if (
+        PM_SCALE_IN_ENABLED
+        and not pm.get("scale_in_done")
+        and can_scale_grade
+        and r_now >= float(cfg.get("scale_trigger_r", 999))
+        and remaining_qty > 0
+    ):
+        add_ratio = float(cfg.get("scale_add_ratio", 0) or 0)
+        add_qty = float(pm.get("initial_qty", remaining_qty) or remaining_qty) * add_ratio
+        if add_qty > 0:
+            new_qty = remaining_qty + add_qty
+            new_avg = ((avg_entry * remaining_qty) + (price * add_qty)) / new_qty
+            pm["avg_entry"] = new_avg
+            pm["remaining_qty"] = new_qty
+            pm["scaled_qty"] = float(pm.get("scaled_qty", 0) or 0) + add_qty
+            pm["scale_in_done"] = True
+            trade["quantity"] = new_qty
+            trade["entry"] = new_avg
+            event = {"event": "SCALE_IN", "price": price, "r_now": round(r_now, 3), "add_qty": add_qty, "new_avg_entry": new_avg}
+            _pm_append_event(trade, event)
+            _pm_send_action_message(trade, event)
+            changed = True
+            avg_entry = new_avg
+            remaining_qty = new_qty
+            risk_per_unit = _pm_risk_per_unit(trade, pm)
+
+    # Partial TP1.
+    if not pm.get("tp1_done") and _pm_should_hit(direction, price, float(pm.get("tp1", trade.get("tp1"))), target_type="TP"):
+        close_ratio = clamp(float(cfg.get("tp1_close_ratio", 0.5) or 0), 0.0, 1.0)
+        close_qty = remaining_qty * close_ratio
+        if close_qty > 0:
+            realized = _pm_realized_pnl_usd(direction, avg_entry, price, close_qty)
+            pm["remaining_qty"] = max(0.0, remaining_qty - close_qty)
+            pm["realized_qty"] = float(pm.get("realized_qty", 0) or 0) + close_qty
+            pm["realized_pnl_usd"] = float(pm.get("realized_pnl_usd", 0) or 0) + realized
+            pm["tp1_done"] = True
+            # After TP1, protect capital: stop at breakeven or better.
+            breakeven_stop = avg_entry
+            if direction == "LONG":
+                pm["managed_stop"] = max(float(pm.get("managed_stop", trade.get("stop"))), breakeven_stop)
+            else:
+                pm["managed_stop"] = min(float(pm.get("managed_stop", trade.get("stop"))), breakeven_stop)
+            trade["stop"] = float(pm["managed_stop"])
+            event = {"event": "PARTIAL_TP1", "price": price, "r_now": round(r_now, 3), "close_qty": close_qty, "realized_pnl_usd": realized}
+            _pm_append_event(trade, event)
+            _pm_send_action_message(trade, event)
+            changed = True
+            remaining_qty = float(pm.get("remaining_qty", 0) or 0)
+
+    # Partial TP2.
+    if remaining_qty > 0 and not pm.get("tp2_done") and _pm_should_hit(direction, price, float(pm.get("tp2", trade.get("tp2"))), target_type="TP"):
+        close_ratio = clamp(float(cfg.get("tp2_close_ratio", 0.25) or 0), 0.0, 1.0)
+        close_qty = remaining_qty * close_ratio
+        if close_qty > 0:
+            realized = _pm_realized_pnl_usd(direction, avg_entry, price, close_qty)
+            pm["remaining_qty"] = max(0.0, remaining_qty - close_qty)
+            pm["realized_qty"] = float(pm.get("realized_qty", 0) or 0) + close_qty
+            pm["realized_pnl_usd"] = float(pm.get("realized_pnl_usd", 0) or 0) + realized
+            pm["tp2_done"] = True
+            event = {"event": "PARTIAL_TP2", "price": price, "r_now": round(r_now, 3), "close_qty": close_qty, "realized_pnl_usd": realized}
+            _pm_append_event(trade, event)
+            _pm_send_action_message(trade, event)
+            changed = True
+            remaining_qty = float(pm.get("remaining_qty", 0) or 0)
+
+    # Trailing stop based on R achieved.
+    managed_stop = float(pm.get("managed_stop", trade.get("stop")) or trade.get("stop"))
+    for trigger_r, lock_r in cfg.get("trail_steps", []):
+        if r_now >= float(trigger_r):
+            candidate = _pm_price_at_r(avg_entry, risk_per_unit, direction, float(lock_r))
+            if direction == "LONG":
+                managed_stop = max(managed_stop, candidate)
+            else:
+                managed_stop = min(managed_stop, candidate)
+            pm["trailing_active"] = True
+    if managed_stop != float(pm.get("managed_stop", trade.get("stop"))):
+        pm["managed_stop"] = managed_stop
+        trade["stop"] = managed_stop
+        event = {"event": "TRAIL_STOP_UPDATE", "price": price, "r_now": round(r_now, 3), "managed_stop": managed_stop}
+        _pm_append_event(trade, event)
+        changed = True
+
+    # Exit rules: managed stop, final TP3, time exit.
+    close_result = None
+    close_reason = None
+
+    if remaining_qty <= 0:
+        close_result = "WIN" if float(pm.get("realized_pnl_usd", 0) or 0) >= 0 else "LOSS"
+        close_reason = "PM_FULLY_REALIZED"
+    elif _pm_should_hit(direction, price, float(pm.get("managed_stop", trade.get("stop"))), target_type="STOP"):
+        total_est = float(pm.get("realized_pnl_usd", 0) or 0) + _pm_realized_pnl_usd(direction, avg_entry, price, remaining_qty)
+        close_result = "WIN" if total_est >= 0 else "LOSS"
+        close_reason = "PM_TRAILING_STOP" if pm.get("trailing_active") else "PM_STOP"
+    elif _pm_should_hit(direction, price, float(pm.get("tp3", trade.get("tp3"))), target_type="TP"):
+        close_result = "WIN"
+        close_reason = "PM_TP3_RUNNER"
+    else:
+        opened_at = int(trade.get("opened_at", now_ts()) or now_ts())
+        hold_min = (now_ts() - opened_at) / 60.0
+        if hold_min >= float(cfg.get("max_hold_min", 10**9)):
+            total_est = float(pm.get("realized_pnl_usd", 0) or 0) + _pm_realized_pnl_usd(direction, avg_entry, price, remaining_qty)
+            close_result = "WIN" if total_est > 0 else "EXIT"
+            close_reason = "PM_TIME_EXIT"
+
+    pm["last_price"] = price
+    pm["last_r"] = round(r_now, 3)
+    pm["unrealized_pnl_pct"] = pnl_pct
+    trade["position_management"] = pm
+    return changed or bool(close_reason), close_result, close_reason
+
+
+def finalize_position_management_on_close(trade: dict, exit_price: float) -> None:
+    pm = trade.get("position_management")
+    if not isinstance(pm, dict) or not pm:
+        return
+    direction = trade.get("direction")
+    avg_entry = float(pm.get("avg_entry", trade.get("entry", 0)) or 0)
+    remaining_qty = float(pm.get("remaining_qty", trade.get("quantity", 0)) or 0)
+    realized = float(pm.get("realized_pnl_usd", 0) or 0)
+    if remaining_qty > 0 and avg_entry > 0:
+        realized += _pm_realized_pnl_usd(direction, avg_entry, float(exit_price), remaining_qty)
+    basis_notional = abs(float(pm.get("initial_qty", trade.get("quantity", 0)) or 0) * float(pm.get("initial_entry", trade.get("entry", 0)) or 0))
+    pm["status"] = "CLOSED"
+    pm["closed_at"] = now_ts()
+    pm["closed_at_tr"] = tr_now_text()
+    pm["final_exit_price"] = float(exit_price)
+    pm["final_realized_pnl_usd"] = realized
+    pm["final_realized_pnl_pct"] = realized / basis_notional if basis_notional > 0 else 0.0
+    pm["remaining_qty"] = 0.0
+    trade["position_management"] = pm
+    trade["pm_realized_pnl_usd"] = realized
+    trade["pm_realized_pnl_pct"] = pm["final_realized_pnl_pct"]
+
+
+def format_position_management_brief(t: dict) -> str:
+    pm = t.get("position_management") or {}
+    if not pm:
+        return "PM: yok"
+    return (
+        f"PM: {pm.get('status', 'OPEN')} | "
+        f"RemQty {float(pm.get('remaining_qty', 0)):.6f} | "
+        f"Stop {format_price(pm.get('managed_stop'))} | "
+        f"R {pm.get('last_r', 0)} | "
+        f"TP1 {'✓' if pm.get('tp1_done') else '-'} / TP2 {'✓' if pm.get('tp2_done') else '-'} | "
+        f"Scale {'✓' if pm.get('scale_in_done') else '-'}"
+    )
+
+
+def position_management_report(state_mgr: StateManager = _STATE_MGR) -> dict:
+    trades = list(get_trades(state_mgr).values())
+    open_trades = [t for t in trades if t.get("result") is None]
+    managed = [t for t in open_trades if isinstance(t.get("position_management"), dict)]
+    partials = sum(1 for t in managed if (t.get("position_management") or {}).get("tp1_done") or (t.get("position_management") or {}).get("tp2_done"))
+    scaled = sum(1 for t in managed if (t.get("position_management") or {}).get("scale_in_done"))
+    trailing = sum(1 for t in managed if (t.get("position_management") or {}).get("trailing_active"))
+    closed_pm = [t for t in trades if isinstance(t.get("position_management"), dict) and (t.get("position_management") or {}).get("status") == "CLOSED"]
+    pm_realized = sum(float(t.get("pm_realized_pnl_usd", 0) or 0) for t in closed_pm)
+    return {
+        "ready": True,
+        "open_managed": len(managed),
+        "partials": partials,
+        "scaled": scaled,
+        "trailing": trailing,
+        "closed_pm": len(closed_pm),
+        "pm_realized_pnl_usd": round(pm_realized, 4),
+        "summary": f"PM: open {len(managed)} | partial {partials} | scale {scaled} | trail {trailing} | realized {format_money(pm_realized)}",
+    }
+
+
+def format_position_management_heartbeat(state_mgr: StateManager = _STATE_MGR) -> str:
+    return position_management_report(state_mgr).get("summary", "PM: rapor yok")
+
 # ============================================================
 # TRADE TRACKING + EDGE ANALYZER
 # ============================================================
@@ -3184,32 +4042,35 @@ def can_open_new_trade(result: dict, state_mgr: StateManager) -> tuple[bool, str
 def format_trade_open_msg(t: dict) -> str:
     tq = t.get("trade_quality") or {}
     regime = t.get("regime") or {}
+    pm = t.get("position_management") or {}
     return (
         "🚀 TRADE OPENED\n\n"
         f"{t['symbol']} → {t['direction']}\n\n"
         f"Entry: {format_price(t['entry'])}\n"
         f"Entry Zone: {format_price(t.get('entry_zone_low'))} - {format_price(t.get('entry_zone_high'))}\n"
-        f"Stop: {format_price(t['stop'])}\n"
-        f"TP1: {format_price(t['tp1'])}\n"
-        f"TP2: {format_price(t['tp2'])}\n"
-        f"TP3: {format_price(t['tp3'])}\n\n"
+        f"Initial Stop: {format_price(pm.get('managed_stop', t.get('stop')))}\n"
+        f"TP1 partial: {format_price(pm.get('tp1', t.get('tp1')))}\n"
+        f"TP2 partial: {format_price(pm.get('tp2', t.get('tp2')))}\n"
+        f"TP3 runner: {format_price(pm.get('tp3', t.get('tp3')))}\n\n"
         f"Score: {t.get('score')}\n"
         f"Confidence: %{t.get('confidence', 0)}\n"
         f"Quality: {tq.get('grade', '-')}, score {tq.get('score', '-')}\n"
         f"Regime: {regime.get('regime', '-')}\n"
         f"Bias: {regime.get('direction_bias', '-')}, Risk x{regime.get('risk_multiplier', '-')}\n"
         f"Entry: {(t.get('entry_engine') or {}).get('status', '-')} — {(t.get('entry_engine') or {}).get('reason', '-')}\n"
-        f"Risk: {format_money(t.get('risk_amount'))} (%{float(t.get('risk_pct', 0))*100:.2f}) | Notional: {format_money(t.get('position_notional'))}\\n"
-        f"{format_position_sizing_brief(t.get('position_sizing'))}\\n\\n"
-        f"Not: Bu mesaj otomatik emir değildir; botun trade tracking kaydıdır.\n"
+        f"Risk: {format_money(t.get('risk_amount'))} (%{float(t.get('risk_pct', 0))*100:.2f}) | Notional: {format_money(t.get('position_notional'))}\n"
+        f"{format_position_sizing_brief(t.get('position_sizing'))}\n"
+        f"{format_position_management_brief(t)}\n"
+        f"PaperExec: {(t.get('paper_execution') or {}).get('status', '-')} | Fill: {format_price((t.get('paper_execution') or {}).get('fill_price'))} | Fee: {format_money((t.get('paper_execution') or {}).get('open_fee_usd'))}\n\n"
+        f"Not: Bu mesaj otomatik emir değildir; botun trade tracking + paper execution + position management kaydıdır.\n"
         f"Zaman: {tr_now_text()}"
     )
-
 
 def format_trade_close_msg(t: dict) -> str:
     duration = 0
     if t.get("closed_at") and t.get("opened_at"):
         duration = (int(t["closed_at"]) - int(t["opened_at"])) // 60
+    pm = t.get("position_management") or {}
 
     return (
         "🏁 TRADE CLOSED\n\n"
@@ -3217,13 +4078,16 @@ def format_trade_close_msg(t: dict) -> str:
         f"Result: {t['result']}\n"
         f"Close Reason: {t.get('close_reason', '-')}\n"
         f"Exit Price: {format_price(t.get('exit_price'))}\n\n"
-        f"PnL: %{t.get('pnl_pct', 0) * 100:.2f}\n"
+        f"Classic PnL: %{t.get('pnl_pct', 0) * 100:.2f}\n"
+        f"PM Realized: {format_money(pm.get('final_realized_pnl_usd', t.get('pm_realized_pnl_usd')))} (%{float(pm.get('final_realized_pnl_pct', t.get('pm_realized_pnl_pct', 0)))*100:.2f})\n"
+        f"Paper Net PnL: {format_money((t.get('paper_execution') or {}).get('net_pnl_usd'))} (%{float((t.get('paper_execution') or {}).get('net_pnl_pct', 0))*100:.2f})\n"
+        f"Paper Fees: {format_money((t.get('paper_execution') or {}).get('total_fee_usd'))}\n"
         f"Max Favorable: %{t.get('max_favor', 0) * 100:.2f}\n"
-        f"Max Adverse: %{t.get('max_adverse', 0) * 100:.2f}\n\n"
+        f"Max Adverse: %{t.get('max_adverse', 0) * 100:.2f}\n"
+        f"{format_position_management_brief(t)}\n\n"
         f"Süre: {duration} dk\n"
         f"Zaman: {tr_now_text()}"
     )
-
 
 def _mark_trade_notification(
     t: dict,
@@ -3294,6 +4158,8 @@ def open_trade(result: dict, plan: dict, state_mgr: StateManager = _STATE_MGR) -
         "session": copy.deepcopy(result.get("session_context", {})),
         "news_context": copy.deepcopy(result.get("news_context", {})),
         "raw": copy.deepcopy(result.get("raw", {})),
+        "open_price": float((result.get("features") or {}).get("last", plan["reference_entry"])),
+        "open_spread_bps": float((result.get("features") or {}).get("spread_bps", 0) or 0),
         "open_alert_sent": False,
         "open_alert_pending": True,
         "close_alert_sent": False,
@@ -3301,13 +4167,18 @@ def open_trade(result: dict, plan: dict, state_mgr: StateManager = _STATE_MGR) -
         "last_notify_attempt_ts": 0,
     }
 
+    trade["position_management"] = init_position_management(trade)
+
+    # Execution preparation: paper/live adapter runs after the tracking trade is built.
+    # Default mode is PAPER; real orders remain disabled unless explicitly enabled later.
+    maybe_submit_execution_order(trade)
+    paper_create_order_from_trade(trade)
     sent = _send_trade_notification(trade, "open")
     trades[trade_id] = trade
     state_mgr.set_meta(f"last_trade_open_ts_{result['symbol']}", now_ts())
     save_trades(trades, state_mgr)
 
     return sent
-
 
 def _trade_pnl(direction: str, entry: float, price: float) -> float:
     if entry <= 0:
@@ -3318,18 +4189,22 @@ def _trade_pnl(direction: str, entry: float, price: float) -> float:
 
 
 def close_trade(trades: dict, tid: str, t: dict, price: float, result: str, reason: str) -> None:
+    finalize_position_management_on_close(t, float(price))
     t["result"] = result
     t["close_reason"] = reason
     t["closed_at"] = now_ts()
     t["exit_price"] = float(price)
     t["pnl_pct"] = _trade_pnl(t["direction"], float(t["entry"]), float(price))
+    paper_close_trade(t, float(price), reason)
     t["open_alert_pending"] = False
     _send_trade_notification(t, "close")
     trades[tid] = t
 
-
 def update_trades(results_by_symbol: dict, state_mgr: StateManager = _STATE_MGR) -> None:
-    """TP2/STOP ve MFE/MAE tracking. TP2 = WIN, STOP = LOSS."""
+    """Position Management Engine: partial TP, scale-in, trailing stop, time exit.
+
+    Legacy TP2/STOP tracking is intentionally replaced by active position management.
+    """
     if not TRADE_TRACKING_ENABLED:
         return
 
@@ -3346,33 +4221,25 @@ def update_trades(results_by_symbol: dict, state_mgr: StateManager = _STATE_MGR)
             continue
 
         price = float(result["features"]["last"])
-        entry = float(t["entry"])
-        direction = t["direction"]
+        entry = float(t.get("entry") or 0)
+        direction = t.get("direction")
         pnl = _trade_pnl(direction, entry, price)
 
         t["max_favor"] = max(float(t.get("max_favor", 0)), pnl)
         t["max_adverse"] = min(float(t.get("max_adverse", 0)), pnl)
 
-        if (direction == "LONG" and price <= float(t["stop"])) or (
-            direction == "SHORT" and price >= float(t["stop"])
-        ):
-            close_trade(trades, tid, t, price, "LOSS", "STOP")
-            changed = True
-            continue
+        pm_changed, close_result, close_reason = update_position_management(t, result)
 
-        if (direction == "LONG" and price >= float(t["tp2"])) or (
-            direction == "SHORT" and price <= float(t["tp2"])
-        ):
-            close_trade(trades, tid, t, price, "WIN", "TP2")
+        if close_reason:
+            close_trade(trades, tid, t, price, close_result or "EXIT", close_reason)
             changed = True
             continue
 
         trades[tid] = t
-        changed = True
+        changed = True or pm_changed
 
     if changed:
         save_trades(trades, state_mgr)
-
 
 def close_trades_on_signal_change(symbol: str, result: dict, state_mgr: StateManager = _STATE_MGR) -> None:
     """Sinyal yönü bozulursa açık trade'i EXIT_SIGNAL ile kapat."""
@@ -4627,12 +5494,17 @@ def _process_symbol(
     session_ctx: SessionContext,
     news_ctx: dict,
     state_mgr: StateManager,
+    global_regime: Optional[dict] = None,
 ) -> Optional[dict]:
     """Tek coin için sinyal üretip gerekirse alert gönderir."""
     try:
+        # Regime-first architecture: global regime is computed once per scan from BTC/ETH
+        # before individual symbols are processed. The regime then modifies signal/score
+        # before quality, entry and portfolio filters run.
+        regime = global_regime or detect_market_regime(btc, eth, news_ctx)
         result = weighted_signal(symbol, features, btc, eth, session_ctx, news_ctx)
-        regime = detect_market_regime(btc, eth, news_ctx)
         result["regime"] = regime
+        result = apply_regime_first_scoring(result, regime)
         result["trade_quality"] = compute_trade_quality(result, regime)
         result["entry_engine"] = evaluate_entry_engine(result)
         result["regime_commander"] = regime_commander_decision(result, regime)
@@ -4729,6 +5601,8 @@ def _send_periodic_messages(
             f"{format_weight_learning_brief(state_mgr)}\n"
             f"{format_regime_strategy_brief(results)}\n"
             f"{format_strategy_simulation_brief(state_mgr)}\n"
+            f"{format_paper_execution_brief(state_mgr)}\n"
+            f"{format_position_management_heartbeat(state_mgr)}\n"
             f"PS: base %{POSITION_SIZING_BASE_RISK_PCT*100:.2f} | clamp %{POSITION_SIZING_MIN_RISK_PCT*100:.2f}-%{POSITION_SIZING_MAX_RISK_PCT*100:.2f}\n"
             f"{format_backtest_validation_brief()}\n"
             f"Pending suggestions: {pending_count}"
@@ -4740,7 +5614,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
     """Ana bot döngüsü."""
     log.info("BOT BAŞLADI v%s", __version__)
     send_message(
-        f"BOT BAŞLADI 🚀 v{__version__} — News (yön-bağımlı veto/dampener) + session + basis aktif."
+        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + Paper Execution Reconciliation + news/session/basis aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}"
     )
 
     state_mgr = _STATE_MGR
@@ -4801,6 +5675,11 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
                     except Exception as e:
                         log.warning("%s features alınamadı: %s", sym, e)
 
+            # Regime-first: piyasa rejimi tüm sembollerden önce bir kez belirlenir.
+            # Böylece her coin aynı piyasa oyununa göre değerlendirilir.
+            global_regime = detect_market_regime(btc, eth, news_context)
+            state_mgr.set_meta("last_global_regime", global_regime)
+
             results: list[dict] = []
             for symbol in COINS:
                 features = features_cache.get(symbol)
@@ -4808,12 +5687,13 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
                     continue
 
                 result = _process_symbol(
-                    symbol, features, btc, eth, session_ctx, news_context, state_mgr
+                    symbol, features, btc, eth, session_ctx, news_context, state_mgr, global_regime
                 )
                 if result:
                     results.append(result)
 
             results_by_symbol = {r["symbol"]: r for r in results}
+            reconcile_paper_execution(results_by_symbol, state_mgr)
             update_trades(results_by_symbol, state_mgr)
             close_trades_on_signal_changes(results_by_symbol, state_mgr)
             retry_pending_trade_alerts(state_mgr)
