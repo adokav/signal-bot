@@ -422,6 +422,8 @@ MOVEMENT_ALERT_THRESHOLDS: dict[str, dict[str, float]] = {
 # ============================================================
 
 ACCOUNT_SIZE_USD = env_float("ACCOUNT_SIZE_USD", 800.0, min_value=1.0)
+POSITION_SIZING_MIN_STOP_PCT = env_float("POSITION_SIZING_MIN_STOP_PCT", 0.003, min_value=0.0001)
+POSITION_SIZING_MAX_NOTIONAL_MULT = env_float("POSITION_SIZING_MAX_NOTIONAL_MULT", 3.0, min_value=0.25)
 
 TRADE_PLAN_CONFIG: dict[str, dict[str, float]] = {
     "CORE": {
@@ -2386,6 +2388,10 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
     - no data means neutral multiplier, not aggressive sizing
     """
     base_risk = float(POSITION_SIZING_BASE_RISK_PCT)
+    stop_pct_raw = float(stop_pct or 0.0)
+    effective_stop_pct = max(stop_pct_raw, float(POSITION_SIZING_MIN_STOP_PCT))
+    stop_floor_applied = stop_pct_raw < POSITION_SIZING_MIN_STOP_PCT
+    max_notional_cap = ACCOUNT_SIZE_USD * float(POSITION_SIZING_MAX_NOTIONAL_MULT)
     if not POSITION_SIZING_ENABLED:
         risk_pct = clamp(base_risk, POSITION_SIZING_MIN_RISK_PCT, POSITION_SIZING_MAX_RISK_PCT)
         risk_amount = ACCOUNT_SIZE_USD * risk_pct
@@ -2393,11 +2399,19 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
             "enabled": False,
             "risk_pct": risk_pct,
             "risk_amount": risk_amount,
-            "position_notional": risk_amount / stop_pct if stop_pct > 0 else 0.0,
+            "position_notional": min(risk_amount / effective_stop_pct, max_notional_cap),
             "multiplier": 1.0,
             "mode": "STATIC",
             "loss_streak": 0,
-            "reasons": ["Position sizing kapalı; sabit risk kullanıldı."],
+            "reasons": [
+                "Position sizing kapalı; sabit risk kullanıldı.",
+                (
+                    f"Stop floor uygulandı: %{stop_pct_raw*100:.2f} → %{effective_stop_pct*100:.2f}"
+                    if stop_floor_applied else
+                    f"Stop: %{effective_stop_pct*100:.2f}"
+                ),
+                f"Notional cap: {format_money(max_notional_cap)}",
+            ],
         }
 
     symbol = result.get("symbol")
@@ -2448,7 +2462,9 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         POSITION_SIZING_MAX_RISK_PCT,
     )
     risk_amount = ACCOUNT_SIZE_USD * risk_pct
-    position_notional = risk_amount / stop_pct if stop_pct > 0 else 0.0
+    theoretical_notional = risk_amount / effective_stop_pct
+    position_notional = min(theoretical_notional, max_notional_cap)
+    notional_capped = position_notional < theoretical_notional
 
     if risk_pct >= base_risk * 1.35:
         mode = "GROWTH"
@@ -2464,6 +2480,16 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         f"Risk Governor {rg_snapshot.get('mode', '-')} çarpanı x{rg_mult:.2f}",
         f"Portfolio correlation çarpanı x{corr_mult:.2f}",
         f"Loss streak {loss_streak} çarpanı x{ls_mult:.2f}",
+        (
+            f"Stop floor uygulandı: %{stop_pct_raw*100:.2f} → %{effective_stop_pct*100:.2f}"
+            if stop_floor_applied else
+            f"Stop: %{effective_stop_pct*100:.2f}"
+        ),
+        (
+            f"Notional cap aktif: teori {format_money(theoretical_notional)} → cap {format_money(position_notional)}"
+            if notional_capped else
+            f"Notional cap sınırı: {format_money(max_notional_cap)}"
+        ),
         *edge_notes,
     ]
 
