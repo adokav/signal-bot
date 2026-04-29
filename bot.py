@@ -2391,7 +2391,9 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
 
     raw_multiplier = q_mult * c_mult * r_mult * edge_multiplier * ls_mult
 
-    if regime_name == "RISK_OFF" or loss_streak >= POSITION_SIZING_LOSS_STREAK_CUT_2:
+    # Risk-off / chaos rejimlerinde pozisyon büyütmeyi kapat.
+    # Not: Rejim isimleri detect_market_regime() ile birebir eşleşmeli.
+    if regime_name in {"RISK_OFF_TREND_DOWN", "NEWS_CHAOS", "CHOP_RANGE"} or loss_streak >= POSITION_SIZING_LOSS_STREAK_CUT_2:
         raw_multiplier = min(raw_multiplier, 1.0)
 
     risk_pct = clamp(
