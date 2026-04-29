@@ -36,7 +36,7 @@ from flask import Flask
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-__version__ = "2.4.0-risk-governor-portfolio-ai-v1"
+__version__ = "2.5.0-ml-validation-gate-v1"
 
 # ============================================================
 # LOGGING
@@ -365,6 +365,22 @@ LIVE_READY_MIN_PROFIT_FACTOR = env_float("LIVE_READY_MIN_PROFIT_FACTOR", 1.10, m
 LIVE_READY_MAX_DRAWDOWN_PCT = env_float("LIVE_READY_MAX_DRAWDOWN_PCT", 0.12, min_value=0.0)
 LIVE_READY_REQUIRE_PAPER = os.getenv("LIVE_READY_REQUIRE_PAPER", "1") == "1"
 
+# ML Validation Gate v1
+ML_VALIDATION_ENABLED = os.getenv("ML_VALIDATION_ENABLED", "1") == "1"
+ML_VALIDATION_THRESHOLD = env_float("ML_VALIDATION_THRESHOLD", 0.75, min_value=0.50)
+ML_VALIDATION_MIN_VIRTUAL_TRADES = env_int("ML_VALIDATION_MIN_VIRTUAL_TRADES", 40, min_value=5)
+ML_VALIDATION_MIN_TOTAL_TRADES = env_int("ML_VALIDATION_MIN_TOTAL_TRADES", 50, min_value=5)
+ML_VALIDATION_REPORT_FILE = os.getenv("ML_VALIDATION_REPORT_FILE", "ml_validation_report.json")
+ML_VIRTUAL_POSITIONS_FILE = os.getenv("ML_VIRTUAL_POSITIONS_FILE", "ml_virtual_positions.json")
+ML_VIRTUAL_LOG_FILE = os.getenv("ML_VIRTUAL_LOG_FILE", "ml_virtual_trades.jsonl")
+ML_VIRTUAL_MIN_GRADE = os.getenv("ML_VIRTUAL_MIN_GRADE", "B").upper()
+ML_VIRTUAL_MAX_HOLD_SECONDS = env_int("ML_VIRTUAL_MAX_HOLD_SECONDS", 6 * 60 * 60, min_value=300)
+ML_VIRTUAL_TP_R = env_float("ML_VIRTUAL_TP_R", 2.0, min_value=0.25)
+ML_VIRTUAL_STOP_R = env_float("ML_VIRTUAL_STOP_R", 1.0, min_value=0.25)
+ML_VIRTUAL_COOLDOWN_SECONDS = env_int("ML_VIRTUAL_COOLDOWN_SECONDS", 30 * 60, min_value=0)
+ML_LIVE_REQUIRE_VALIDATION = os.getenv("ML_LIVE_REQUIRE_VALIDATION", "1") == "1"
+ML_AUTO_SUGGEST_AFTER_REPORT = os.getenv("ML_AUTO_SUGGEST_AFTER_REPORT", "1") == "1"
+
 if PAPER_ORDER_TYPE not in {"MARKET", "LIMIT_AT_ENTRY"}:
     log.warning("PAPER_ORDER_TYPE=%r gecersiz; MARKET kullanılıyor.", PAPER_ORDER_TYPE)
     PAPER_ORDER_TYPE = "MARKET"
@@ -422,8 +438,6 @@ MOVEMENT_ALERT_THRESHOLDS: dict[str, dict[str, float]] = {
 # ============================================================
 
 ACCOUNT_SIZE_USD = env_float("ACCOUNT_SIZE_USD", 800.0, min_value=1.0)
-POSITION_SIZING_MIN_STOP_PCT = env_float("POSITION_SIZING_MIN_STOP_PCT", 0.003, min_value=0.0001)
-POSITION_SIZING_MAX_NOTIONAL_MULT = env_float("POSITION_SIZING_MAX_NOTIONAL_MULT", 3.0, min_value=0.25)
 
 TRADE_PLAN_CONFIG: dict[str, dict[str, float]] = {
     "CORE": {
@@ -2388,10 +2402,6 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
     - no data means neutral multiplier, not aggressive sizing
     """
     base_risk = float(POSITION_SIZING_BASE_RISK_PCT)
-    stop_pct_raw = float(stop_pct or 0.0)
-    effective_stop_pct = max(stop_pct_raw, float(POSITION_SIZING_MIN_STOP_PCT))
-    stop_floor_applied = stop_pct_raw < POSITION_SIZING_MIN_STOP_PCT
-    max_notional_cap = ACCOUNT_SIZE_USD * float(POSITION_SIZING_MAX_NOTIONAL_MULT)
     if not POSITION_SIZING_ENABLED:
         risk_pct = clamp(base_risk, POSITION_SIZING_MIN_RISK_PCT, POSITION_SIZING_MAX_RISK_PCT)
         risk_amount = ACCOUNT_SIZE_USD * risk_pct
@@ -2399,19 +2409,11 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
             "enabled": False,
             "risk_pct": risk_pct,
             "risk_amount": risk_amount,
-            "position_notional": min(risk_amount / effective_stop_pct, max_notional_cap),
+            "position_notional": risk_amount / stop_pct if stop_pct > 0 else 0.0,
             "multiplier": 1.0,
             "mode": "STATIC",
             "loss_streak": 0,
-            "reasons": [
-                "Position sizing kapalı; sabit risk kullanıldı.",
-                (
-                    f"Stop floor uygulandı: %{stop_pct_raw*100:.2f} → %{effective_stop_pct*100:.2f}"
-                    if stop_floor_applied else
-                    f"Stop: %{effective_stop_pct*100:.2f}"
-                ),
-                f"Notional cap: {format_money(max_notional_cap)}",
-            ],
+            "reasons": ["Position sizing kapalı; sabit risk kullanıldı."],
         }
 
     symbol = result.get("symbol")
@@ -2462,9 +2464,7 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         POSITION_SIZING_MAX_RISK_PCT,
     )
     risk_amount = ACCOUNT_SIZE_USD * risk_pct
-    theoretical_notional = risk_amount / effective_stop_pct
-    position_notional = min(theoretical_notional, max_notional_cap)
-    notional_capped = position_notional < theoretical_notional
+    position_notional = risk_amount / stop_pct if stop_pct > 0 else 0.0
 
     if risk_pct >= base_risk * 1.35:
         mode = "GROWTH"
@@ -2480,16 +2480,6 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         f"Risk Governor {rg_snapshot.get('mode', '-')} çarpanı x{rg_mult:.2f}",
         f"Portfolio correlation çarpanı x{corr_mult:.2f}",
         f"Loss streak {loss_streak} çarpanı x{ls_mult:.2f}",
-        (
-            f"Stop floor uygulandı: %{stop_pct_raw*100:.2f} → %{effective_stop_pct*100:.2f}"
-            if stop_floor_applied else
-            f"Stop: %{effective_stop_pct*100:.2f}"
-        ),
-        (
-            f"Notional cap aktif: teori {format_money(theoretical_notional)} → cap {format_money(position_notional)}"
-            if notional_capped else
-            f"Notional cap sınırı: {format_money(max_notional_cap)}"
-        ),
         *edge_notes,
     ]
 
@@ -2948,6 +2938,8 @@ class ExecutionAdapter:
             return payload
 
         if self.mode == "LIVE":
+            if ML_LIVE_REQUIRE_VALIDATION and not ml_validation_allows_live():
+                return {"submitted": False, "mode": self.mode, "reason": "ml_validation_gate_not_passed"}
             if not ENABLE_LIVE_TRADING:
                 return {"submitted": False, "mode": self.mode, "reason": "live_disabled"}
             if not MEXC_API_KEY or not MEXC_API_SECRET:
@@ -4331,6 +4323,283 @@ def format_portfolio_correlation_brief(state_mgr: StateManager = _STATE_MGR) -> 
     return f"PortfolioCorr: active {len(active)} | L/S {longs}/{shorts} | HB {hb}"
 
 
+
+# ============================================================
+# ML VALIDATION GATE v1 — paper learning / shadow virtual trades
+# ============================================================
+
+def _ml_grade_ok(grade: Optional[str], minimum: str = ML_VIRTUAL_MIN_GRADE) -> bool:
+    return quality_meets_min(grade or "D", minimum)
+
+def _ml_payload() -> dict:
+    payload = _safe_read_json(ML_VIRTUAL_POSITIONS_FILE, {"version": 1, "positions": {}, "closed": []})
+    if not isinstance(payload, dict):
+        payload = {"version": 1, "positions": {}, "closed": []}
+    payload.setdefault("version", 1)
+    payload.setdefault("positions", {})
+    payload.setdefault("closed", [])
+    if not isinstance(payload["positions"], dict):
+        payload["positions"] = {}
+    if not isinstance(payload["closed"], list):
+        payload["closed"] = []
+    return payload
+
+def _ml_save_payload(payload: dict) -> None:
+    payload["updated_at"] = now_ts()
+    payload["updated_at_tr"] = tr_now_text()
+    _safe_write_json(ML_VIRTUAL_POSITIONS_FILE, payload)
+
+def _ml_virtual_id(symbol: str) -> str:
+    return f"mlv_{symbol}_{now_ts()}_{random.randint(1000, 9999)}"
+
+def _ml_virtual_stop_tp(direction: str, entry: float, group: str) -> tuple[float, float]:
+    stop_pct = float(TRADE_PLAN_CONFIG.get(group, TRADE_PLAN_CONFIG["CORE"]).get("stop_pct", 0.02)) * ML_VIRTUAL_STOP_R
+    target_pct = stop_pct * ML_VIRTUAL_TP_R
+    if direction == "LONG":
+        return entry * (1 - stop_pct), entry * (1 + target_pct)
+    return entry * (1 + stop_pct), entry * (1 - target_pct)
+
+def ml_virtual_open_if_needed(result: dict) -> bool:
+    """Open a shadow virtual trade for ML validation.
+
+    It is independent of tracking/paper execution. It lets the learning layer
+    test parameter and weight behavior even when normal risk filters block trades.
+    """
+    if not ML_VALIDATION_ENABLED:
+        return False
+    raw_signal = result.get("raw_signal") or result.get("signal")
+    if raw_signal not in ("LONG", "SHORT"):
+        return False
+    tq = result.get("trade_quality") or {}
+    if not _ml_grade_ok(tq.get("grade")):
+        return False
+    symbol = result.get("symbol")
+    group = result.get("group") or COINS.get(symbol, "CORE")
+    if not symbol:
+        return False
+    payload = _ml_payload()
+    positions = payload["positions"]
+    if any(p.get("symbol") == symbol and p.get("status") == "OPEN" for p in positions.values()):
+        return False
+    last_key = f"last_open_{symbol}"
+    if ML_VIRTUAL_COOLDOWN_SECONDS and now_ts() - int(payload.get(last_key, 0) or 0) < ML_VIRTUAL_COOLDOWN_SECONDS:
+        return False
+    f = result.get("features") or {}
+    entry = float(f.get("last") or f.get("spot_price") or 0)
+    if entry <= 0:
+        return False
+    stop, target = _ml_virtual_stop_tp(raw_signal, entry, group)
+    vid = _ml_virtual_id(symbol)
+    pos = {
+        "id": vid,
+        "status": "OPEN",
+        "symbol": symbol,
+        "group": group,
+        "direction": raw_signal,
+        "entry": entry,
+        "stop": stop,
+        "target": target,
+        "opened_at": now_ts(),
+        "opened_at_tr": tr_now_text(),
+        "score": result.get("score"),
+        "pre_filter_signal": raw_signal,
+        "post_filter_signal": result.get("signal"),
+        "confidence": result.get("confidence"),
+        "quality": copy.deepcopy(tq),
+        "regime": copy.deepcopy(result.get("regime", {})),
+        "raw": copy.deepcopy(result.get("raw", {})),
+        "max_favor": 0.0,
+        "max_adverse": 0.0,
+    }
+    positions[vid] = pos
+    payload[last_key] = now_ts()
+    _ml_save_payload(payload)
+    _append_jsonl(ML_VIRTUAL_LOG_FILE, {"event": "ML_VIRTUAL_OPEN", **pos})
+    return True
+
+def ml_virtual_reconcile(results_by_symbol: dict) -> None:
+    if not ML_VALIDATION_ENABLED:
+        return
+    payload = _ml_payload()
+    positions = payload.get("positions", {})
+    closed_rows = payload.get("closed", [])
+    changed = False
+    now = now_ts()
+    for vid, pos in list(positions.items()):
+        if not isinstance(pos, dict) or pos.get("status") != "OPEN":
+            continue
+        result = results_by_symbol.get(pos.get("symbol"))
+        if not result:
+            continue
+        price = float((result.get("features") or {}).get("last") or 0)
+        if price <= 0:
+            continue
+        direction = pos.get("direction")
+        pnl = _trade_pnl(direction, float(pos.get("entry") or 0), price)
+        pos["max_favor"] = max(float(pos.get("max_favor", 0) or 0), pnl)
+        pos["max_adverse"] = min(float(pos.get("max_adverse", 0) or 0), pnl)
+        close_reason = None
+        if direction == "LONG":
+            if price <= float(pos.get("stop") or 0):
+                close_reason = "STOP"
+            elif price >= float(pos.get("target") or 0):
+                close_reason = "TARGET"
+        else:
+            if price >= float(pos.get("stop") or 0):
+                close_reason = "STOP"
+            elif price <= float(pos.get("target") or 0):
+                close_reason = "TARGET"
+        raw_now = result.get("raw_signal") or result.get("signal")
+        if close_reason is None and raw_now in ("LONG", "SHORT") and raw_now != direction:
+            close_reason = "SIGNAL_REVERSAL"
+        if close_reason is None and now - int(pos.get("opened_at", now) or now) >= ML_VIRTUAL_MAX_HOLD_SECONDS:
+            close_reason = "TIME_EXIT"
+        if close_reason:
+            pos.update({
+                "status": "CLOSED",
+                "closed_at": now,
+                "closed_at_tr": tr_now_text(),
+                "exit_price": price,
+                "close_reason": close_reason,
+                "pnl_pct": pnl,
+                "correct": pnl > 0,
+            })
+            positions.pop(vid, None)
+            closed_rows.append(pos)
+            _append_jsonl(ML_VIRTUAL_LOG_FILE, {"event": "ML_VIRTUAL_CLOSE", **pos})
+            changed = True
+        else:
+            positions[vid] = pos
+            changed = True
+    if changed:
+        payload["closed"] = closed_rows[-1000:]
+        payload["positions"] = positions
+        _ml_save_payload(payload)
+
+def _ml_trade_rows(state_mgr: StateManager = _STATE_MGR) -> list[dict]:
+    rows: list[dict] = []
+    for t in state_mgr.get_trades().values():
+        if not isinstance(t, dict) or t.get("result") is None:
+            continue
+        pnl = float(t.get("pnl_pct", 0) or 0)
+        rows.append({
+            "source": "tracking",
+            "symbol": t.get("symbol"),
+            "group": t.get("group"),
+            "direction": t.get("direction"),
+            "pnl_pct": pnl,
+            "correct": pnl > 0 or t.get("result") == "WIN",
+            "regime": (t.get("regime") or {}).get("regime"),
+            "raw": t.get("raw") or {},
+        })
+    payload = _ml_payload()
+    for t in payload.get("closed", []):
+        if not isinstance(t, dict):
+            continue
+        pnl = float(t.get("pnl_pct", 0) or 0)
+        rows.append({
+            "source": "virtual",
+            "symbol": t.get("symbol"),
+            "group": t.get("group"),
+            "direction": t.get("direction"),
+            "pnl_pct": pnl,
+            "correct": bool(t.get("correct", pnl > 0)),
+            "regime": (t.get("regime") or {}).get("regime"),
+            "raw": t.get("raw") or {},
+        })
+    return rows
+
+def _ml_profit_factor(rows: list[dict]) -> Optional[float]:
+    gross_win = sum(max(float(r.get("pnl_pct", 0) or 0), 0.0) for r in rows)
+    gross_loss = abs(sum(min(float(r.get("pnl_pct", 0) or 0), 0.0) for r in rows))
+    if gross_loss <= 0:
+        return None if gross_win <= 0 else 99.0
+    return gross_win / gross_loss
+
+def ml_validation_report(state_mgr: StateManager = _STATE_MGR) -> dict:
+    if not ML_VALIDATION_ENABLED:
+        return {"enabled": False, "passed": True, "reliability": 1.0, "summary": "ML validation kapalı."}
+    rows = _ml_trade_rows(state_mgr)
+    virtual_rows = [r for r in rows if r.get("source") == "virtual"]
+    tracking_rows = [r for r in rows if r.get("source") == "tracking"]
+    total = len(rows)
+    correct = sum(1 for r in rows if r.get("correct"))
+    accuracy = correct / total if total else 0.0
+    pf = _ml_profit_factor(rows)
+    pf_score = clamp(((pf or 0.0) - 1.0) / max(LIVE_READY_MIN_PROFIT_FACTOR - 1.0, 0.10), 0.0, 1.0) if pf is not None else (1.0 if total and correct == total else 0.0)
+    sim = strategy_simulation_analysis(state_mgr)
+    sim_edge = float(sim.get("weight_consistency_edge", 0) or 0) if sim.get("ready") else 0.0
+    sim_score = clamp(sim_edge / 0.15, 0.0, 1.0)
+    paper = paper_execution_report(state_mgr) if 'paper_execution_report' in globals() else {"ready": False}
+    fill_rate = float(paper.get("fill_rate_pct", 0) or 0) / 100.0 if paper.get("ready") else 0.0
+    missed_rate = float(paper.get("missed_rate_pct", 100) or 100) / 100.0 if paper.get("ready") else 1.0
+    paper_score = clamp(fill_rate * (1 - missed_rate), 0.0, 1.0)
+    sample_score = min(total / max(ML_VALIDATION_MIN_TOTAL_TRADES, 1), 1.0)
+    virtual_sample_ok = len(virtual_rows) >= ML_VALIDATION_MIN_VIRTUAL_TRADES
+    sample_ok = total >= ML_VALIDATION_MIN_TOTAL_TRADES and virtual_sample_ok
+    raw_reliability = 0.45 * accuracy + 0.25 * pf_score + 0.20 * sim_score + 0.10 * paper_score
+    reliability = raw_reliability * sample_score
+    passed = sample_ok and reliability >= ML_VALIDATION_THRESHOLD
+    report = {
+        "enabled": True,
+        "passed": passed,
+        "threshold": ML_VALIDATION_THRESHOLD,
+        "reliability": round(reliability, 4),
+        "reliability_pct": round(reliability * 100, 2),
+        "raw_reliability": round(raw_reliability, 4),
+        "accuracy_pct": round(accuracy * 100, 2),
+        "correct": correct,
+        "total_samples": total,
+        "virtual_samples": len(virtual_rows),
+        "tracking_samples": len(tracking_rows),
+        "min_total_required": ML_VALIDATION_MIN_TOTAL_TRADES,
+        "min_virtual_required": ML_VALIDATION_MIN_VIRTUAL_TRADES,
+        "sample_ok": sample_ok,
+        "profit_factor": round(pf, 3) if pf is not None else None,
+        "component_scores": {
+            "accuracy": round(accuracy, 4),
+            "profit_factor_score": round(pf_score, 4),
+            "strategy_consistency_score": round(sim_score, 4),
+            "paper_execution_score": round(paper_score, 4),
+            "sample_score": round(sample_score, 4),
+        },
+        "active_virtual_positions": len((_ml_payload().get("positions") or {})),
+        "summary": (
+            f"MLGate: {'PASS' if passed else 'TRAINING'} | rel %{reliability*100:.1f}/{ML_VALIDATION_THRESHOLD*100:.0f} | "
+            f"acc %{accuracy*100:.1f} | samples {total}/{ML_VALIDATION_MIN_TOTAL_TRADES} | virtual {len(virtual_rows)}/{ML_VALIDATION_MIN_VIRTUAL_TRADES}"
+        ),
+        "updated_at": now_ts(),
+        "updated_at_tr": tr_now_text(),
+    }
+    _safe_write_json(ML_VALIDATION_REPORT_FILE, report)
+    return report
+
+def ml_validation_allows_live(state_mgr: StateManager = _STATE_MGR) -> bool:
+    return bool(ml_validation_report(state_mgr).get("passed"))
+
+def format_ml_validation_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    return ml_validation_report(state_mgr).get("summary", "MLGate: rapor yok")
+
+def ml_validation_learning_cycle(results_by_symbol: dict, state_mgr: StateManager = _STATE_MGR) -> dict:
+    if not ML_VALIDATION_ENABLED:
+        return {"enabled": False}
+    for result in results_by_symbol.values():
+        try:
+            ml_virtual_open_if_needed(result)
+        except Exception as e:
+            log.debug("ML virtual open hata: %s", e)
+    try:
+        ml_virtual_reconcile(results_by_symbol)
+    except Exception as e:
+        log.debug("ML virtual reconcile hata: %s", e)
+    report = ml_validation_report(state_mgr)
+    if ML_AUTO_SUGGEST_AFTER_REPORT and not report.get("passed"):
+        try:
+            generate_parameter_suggestions_from_weight_learning(state_mgr, notify=False)
+        except Exception as e:
+            log.debug("ML learning suggestion cycle hata: %s", e)
+    return report
+
 def live_readiness_report(state_mgr: StateManager = _STATE_MGR) -> dict:
     edge = edge_analysis(state_mgr)
     rg = risk_governor_snapshot(state_mgr)
@@ -4342,11 +4611,13 @@ def live_readiness_report(state_mgr: StateManager = _STATE_MGR) -> dict:
     paper_ok = True
     if LIVE_READY_REQUIRE_PAPER:
         paper_ok = bool(paper.get("ready", False)) and int(paper.get("filled", 0) or 0) >= max(5, LIVE_READY_MIN_CLOSED_TRADES // 3)
+    mlv = ml_validation_report(state_mgr)
     checks = {
         "closed_trades_ok": closed >= LIVE_READY_MIN_CLOSED_TRADES,
         "profit_factor_ok": pf_ok,
         "drawdown_ok": dd_ok,
         "paper_ok": paper_ok,
+        "ml_validation_ok": bool(mlv.get("passed")),
         "risk_mode_ok": rg.get("mode") not in {"STOP"},
         "live_keys_present": bool(MEXC_API_KEY and MEXC_API_SECRET),
         "explicit_live_flag": ENABLE_LIVE_TRADING,
@@ -4360,6 +4631,7 @@ def live_readiness_report(state_mgr: StateManager = _STATE_MGR) -> dict:
         "profit_factor": pf,
         "drawdown_pct": rg.get("drawdown_pct"),
         "paper": paper,
+        "ml_validation": mlv,
         "summary": "LIVE_READY" if ready else "LIVE_NOT_READY_SAFE_GUARD",
         "updated_at": now_ts(),
         "updated_at_tr": tr_now_text(),
@@ -6080,6 +6352,7 @@ def _send_periodic_messages(
             f"{format_portfolio_correlation_brief(state_mgr)}\n"
             f"{format_live_readiness_brief(state_mgr)}\n"
             f"{format_ai_optimization_brief(state_mgr)}\n"
+            f"{format_ml_validation_brief(state_mgr)}\n"
             f"PS: base %{POSITION_SIZING_BASE_RISK_PCT*100:.2f} | clamp %{POSITION_SIZING_MIN_RISK_PCT*100:.2f}-%{POSITION_SIZING_MAX_RISK_PCT*100:.2f}\n"
             f"{format_backtest_validation_brief()}\n"
             f"Pending suggestions: {pending_count}"
@@ -6171,6 +6444,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
                     results.append(result)
 
             results_by_symbol = {r["symbol"]: r for r in results}
+            ml_validation_learning_cycle(results_by_symbol, state_mgr)
             reconcile_paper_execution(results_by_symbol, state_mgr)
             update_trades(results_by_symbol, state_mgr)
             close_trades_on_signal_changes(results_by_symbol, state_mgr)
