@@ -78,6 +78,10 @@ def env_float(name: str, default: float, *, min_value: Optional[float] = None) -
         return default
     return value
 
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
 # ============================================================
 # ENV VARIABLES (validation at startup)
 # ============================================================
@@ -1173,10 +1177,6 @@ def closed_bar_return(closes: list[float], bars: int, *, series_name: str) -> fl
     latest_closed = closes[-2]
     reference = closes[-(bars + 2)]
     return pct(latest_closed, reference)
-
-
-def clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
 
 
 def ema(values: list[float], period: int) -> float:
