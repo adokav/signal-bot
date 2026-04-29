@@ -39,7 +39,7 @@ from urllib.parse import quote
 
 from urllib3.util.retry import Retry
 
-__version__ = "3.0.0-regime-performance-dashboard-v1"
+__version__ = "3.2.0-leverage-mentality-risk-edge-v1"
 
 # ============================================================
 # LOGGING
@@ -329,6 +329,62 @@ EXEC_Q_DEPTH_FAILURE_MODE = os.getenv("EXEC_Q_DEPTH_FAILURE_MODE", "WARN").upper
 if EXEC_Q_DEPTH_FAILURE_MODE not in {"WARN", "BLOCK", "IGNORE"}:
     log.warning("EXEC_Q_DEPTH_FAILURE_MODE=%r geçersiz; WARN kullanılıyor.", EXEC_Q_DEPTH_FAILURE_MODE)
     EXEC_Q_DEPTH_FAILURE_MODE = "WARN"
+
+# Liquidation-Aware Leverage Policy v1
+# Amaç: küçük sermaye basamaklarında, risk-on + kaliteli setup geldiğinde
+# ekonomik kaldıraçtan kaçmamak; ama likidasyon fiyatını stopun güvenli
+# şekilde dışında tutmak. Bu katman borsa kaldıraç ayarını değil, hedef
+# ekonomik kaldıraç ve notional büyüklüğünü belirler.
+LEVERAGE_POLICY_ENABLED = os.getenv("LEVERAGE_POLICY_ENABLED", "1") == "1"
+LEVERAGE_POLICY_MIN_LIQ_TO_STOP = env_float("LEVERAGE_POLICY_MIN_LIQ_TO_STOP", 2.50, min_value=1.0)
+LEVERAGE_POLICY_EXTRA_LIQ_BUFFER_PCT = env_float("LEVERAGE_POLICY_EXTRA_LIQ_BUFFER_PCT", 0.005, min_value=0.0)
+LEVERAGE_POLICY_MAINT_MARGIN_CORE = env_float("LEVERAGE_POLICY_MAINT_MARGIN_CORE", 0.005, min_value=0.0)
+LEVERAGE_POLICY_MAINT_MARGIN_HIGH_BETA = env_float("LEVERAGE_POLICY_MAINT_MARGIN_HIGH_BETA", 0.010, min_value=0.0)
+LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE = env_float("LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE", 5.0, min_value=1.0)
+LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA = env_float("LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA", 3.0, min_value=1.0)
+LEVERAGE_POLICY_MIN_ECON_LEV = env_float("LEVERAGE_POLICY_MIN_ECON_LEV", 0.10, min_value=0.0)
+LEVERAGE_POLICY_BLOCK_IF_UNSAFE = os.getenv("LEVERAGE_POLICY_BLOCK_IF_UNSAFE", "1") == "1"
+LEVERAGE_POLICY_RISK_ON_AGGRESSIVE = os.getenv("LEVERAGE_POLICY_RISK_ON_AGGRESSIVE", "1") == "1"
+LEVERAGE_POLICY_REQUIRE_EXECQ_PASS_FOR_BOOST = os.getenv("LEVERAGE_POLICY_REQUIRE_EXECQ_PASS_FOR_BOOST", "1") == "1"
+LEVERAGE_POLICY_REQUIRE_A_PLUS_FOR_MAX = os.getenv("LEVERAGE_POLICY_REQUIRE_A_PLUS_FOR_MAX", "1") == "1"
+# v3.2 mentality fixes: agresiflik yalnızca edge + rejim + execution + risk governor izin verirse açılır.
+LEVERAGE_POLICY_AGGRESSIVE_MIN_CONFIDENCE = env_float("LEVERAGE_POLICY_AGGRESSIVE_MIN_CONFIDENCE", 72.0, min_value=0.0)
+LEVERAGE_POLICY_ALLOW_A_GRADE_AGGRESSIVE = os.getenv("LEVERAGE_POLICY_ALLOW_A_GRADE_AGGRESSIVE", "0") == "1"
+LEVERAGE_POLICY_DASHBOARD_GATE_ENABLED = os.getenv("LEVERAGE_POLICY_DASHBOARD_GATE_ENABLED", "1") == "1"
+LEVERAGE_POLICY_DASHBOARD_BAD_MULTIPLIER = env_float("LEVERAGE_POLICY_DASHBOARD_BAD_MULTIPLIER", 0.45, min_value=0.0)
+LEVERAGE_POLICY_DASHBOARD_WEAK_MULTIPLIER = env_float("LEVERAGE_POLICY_DASHBOARD_WEAK_MULTIPLIER", 0.70, min_value=0.0)
+LEVERAGE_POLICY_DASHBOARD_GOOD_MULTIPLIER = env_float("LEVERAGE_POLICY_DASHBOARD_GOOD_MULTIPLIER", 1.08, min_value=0.0)
+LEVERAGE_POLICY_DASHBOARD_BLOCK_BAD = os.getenv("LEVERAGE_POLICY_DASHBOARD_BLOCK_BAD", "0") == "1"
+LEVERAGE_POLICY_EXCHANGE_LEV_BUFFER = env_float("LEVERAGE_POLICY_EXCHANGE_LEV_BUFFER", 1.00, min_value=1.0)
+LEVERAGE_POLICY_RISK_GOVERNOR_DEFENSIVE_MULTIPLIER = env_float("LEVERAGE_POLICY_RISK_GOVERNOR_DEFENSIVE_MULTIPLIER", 0.55, min_value=0.0)
+LEVERAGE_POLICY_MIN_LIQ_TO_STOP_AGGRESSIVE = env_float("LEVERAGE_POLICY_MIN_LIQ_TO_STOP_AGGRESSIVE", 3.00, min_value=1.0)
+
+# Aşama bazlı azami trade riskleri. Başlangıç aşamasında risk-on geldiğinde
+# büyüme hedefi için daha agresif; sermaye büyüdükçe korumacı.
+LEVERAGE_POLICY_MAX_RISK_BUILD = env_float("LEVERAGE_POLICY_MAX_RISK_BUILD", 0.080, min_value=0.001)
+LEVERAGE_POLICY_MAX_RISK_GROW = env_float("LEVERAGE_POLICY_MAX_RISK_GROW", 0.055, min_value=0.001)
+LEVERAGE_POLICY_MAX_RISK_SCALE = env_float("LEVERAGE_POLICY_MAX_RISK_SCALE", 0.035, min_value=0.001)
+LEVERAGE_POLICY_MAX_RISK_PRESERVE = env_float("LEVERAGE_POLICY_MAX_RISK_PRESERVE", 0.020, min_value=0.001)
+
+# Risk-on hedef ekonomik kaldıraçlar. Nihai kaldıraç likidasyon güvenliği,
+# risk cap, execution quality ve rejim ile tekrar kırpılır.
+LEVERAGE_POLICY_BUILD_CORE_A_PLUS = env_float("LEVERAGE_POLICY_BUILD_CORE_A_PLUS", 3.0, min_value=0.1)
+LEVERAGE_POLICY_BUILD_CORE_A = env_float("LEVERAGE_POLICY_BUILD_CORE_A", 2.0, min_value=0.1)
+LEVERAGE_POLICY_BUILD_HIGH_BETA_A_PLUS = env_float("LEVERAGE_POLICY_BUILD_HIGH_BETA_A_PLUS", 2.0, min_value=0.1)
+LEVERAGE_POLICY_BUILD_HIGH_BETA_A = env_float("LEVERAGE_POLICY_BUILD_HIGH_BETA_A", 1.25, min_value=0.1)
+LEVERAGE_POLICY_GROW_CORE_A_PLUS = env_float("LEVERAGE_POLICY_GROW_CORE_A_PLUS", 2.5, min_value=0.1)
+LEVERAGE_POLICY_GROW_CORE_A = env_float("LEVERAGE_POLICY_GROW_CORE_A", 1.5, min_value=0.1)
+LEVERAGE_POLICY_GROW_HIGH_BETA_A_PLUS = env_float("LEVERAGE_POLICY_GROW_HIGH_BETA_A_PLUS", 1.5, min_value=0.1)
+LEVERAGE_POLICY_GROW_HIGH_BETA_A = env_float("LEVERAGE_POLICY_GROW_HIGH_BETA_A", 1.0, min_value=0.1)
+LEVERAGE_POLICY_SCALE_CORE_A_PLUS = env_float("LEVERAGE_POLICY_SCALE_CORE_A_PLUS", 2.0, min_value=0.1)
+LEVERAGE_POLICY_SCALE_CORE_A = env_float("LEVERAGE_POLICY_SCALE_CORE_A", 1.25, min_value=0.1)
+LEVERAGE_POLICY_SCALE_HIGH_BETA_A_PLUS = env_float("LEVERAGE_POLICY_SCALE_HIGH_BETA_A_PLUS", 1.25, min_value=0.1)
+LEVERAGE_POLICY_SCALE_HIGH_BETA_A = env_float("LEVERAGE_POLICY_SCALE_HIGH_BETA_A", 0.75, min_value=0.1)
+LEVERAGE_POLICY_PRESERVE_CORE_A_PLUS = env_float("LEVERAGE_POLICY_PRESERVE_CORE_A_PLUS", 1.5, min_value=0.1)
+LEVERAGE_POLICY_PRESERVE_CORE_A = env_float("LEVERAGE_POLICY_PRESERVE_CORE_A", 1.0, min_value=0.1)
+LEVERAGE_POLICY_PRESERVE_HIGH_BETA_A_PLUS = env_float("LEVERAGE_POLICY_PRESERVE_HIGH_BETA_A_PLUS", 1.0, min_value=0.1)
+LEVERAGE_POLICY_PRESERVE_HIGH_BETA_A = env_float("LEVERAGE_POLICY_PRESERVE_HIGH_BETA_A", 0.50, min_value=0.1)
+
 
 # Historical Replay Backtest Engine v1
 # RUN_HISTORICAL_REPLAY=1 ile normal bot döngüsünden ayrı çalışır.
@@ -3184,6 +3240,358 @@ def format_execution_quality_brief(results: Optional[list[dict]] = None) -> str:
     return f"ExecQ: PASS {len(checks)-blocked-warn} / WARN {warn} / BLOCK {blocked} | avg cost {avg_cost:.1f} bps"
 
 
+
+
+# ============================================================
+# LIQUIDATION-AWARE LEVERAGE POLICY
+# ============================================================
+
+def _lp_stage_key(equity_usd: float) -> str:
+    label = str(capital_ladder_profile(equity_usd).get("label", "BUILD_100_TO_1K"))
+    if label.startswith("BUILD"):
+        return "BUILD"
+    if label.startswith("GROW"):
+        return "GROW"
+    if label.startswith("SCALE"):
+        return "SCALE"
+    return "PRESERVE"
+
+def _lp_max_risk_pct(stage: str) -> float:
+    return {
+        "BUILD": LEVERAGE_POLICY_MAX_RISK_BUILD,
+        "GROW": LEVERAGE_POLICY_MAX_RISK_GROW,
+        "SCALE": LEVERAGE_POLICY_MAX_RISK_SCALE,
+        "PRESERVE": LEVERAGE_POLICY_MAX_RISK_PRESERVE,
+    }.get(stage, LEVERAGE_POLICY_MAX_RISK_BUILD)
+
+def _lp_target_leverage(stage: str, group: str, grade: str) -> float:
+    grade = str(grade or "B").upper()
+    is_aplus = grade == "A+"
+    is_a = grade in {"A", "A+"}
+    if group == "HIGH_BETA":
+        table = {
+            "BUILD": (LEVERAGE_POLICY_BUILD_HIGH_BETA_A_PLUS, LEVERAGE_POLICY_BUILD_HIGH_BETA_A),
+            "GROW": (LEVERAGE_POLICY_GROW_HIGH_BETA_A_PLUS, LEVERAGE_POLICY_GROW_HIGH_BETA_A),
+            "SCALE": (LEVERAGE_POLICY_SCALE_HIGH_BETA_A_PLUS, LEVERAGE_POLICY_SCALE_HIGH_BETA_A),
+            "PRESERVE": (LEVERAGE_POLICY_PRESERVE_HIGH_BETA_A_PLUS, LEVERAGE_POLICY_PRESERVE_HIGH_BETA_A),
+        }
+    else:
+        table = {
+            "BUILD": (LEVERAGE_POLICY_BUILD_CORE_A_PLUS, LEVERAGE_POLICY_BUILD_CORE_A),
+            "GROW": (LEVERAGE_POLICY_GROW_CORE_A_PLUS, LEVERAGE_POLICY_GROW_CORE_A),
+            "SCALE": (LEVERAGE_POLICY_SCALE_CORE_A_PLUS, LEVERAGE_POLICY_SCALE_CORE_A),
+            "PRESERVE": (LEVERAGE_POLICY_PRESERVE_CORE_A_PLUS, LEVERAGE_POLICY_PRESERVE_CORE_A),
+        }
+    a_plus_target, a_target = table.get(stage, table["BUILD"])
+    if is_aplus:
+        return float(a_plus_target)
+    if is_a:
+        return float(a_target)
+    return max(LEVERAGE_POLICY_MIN_ECON_LEV, float(a_target) * 0.55)
+
+def _lp_regime_multiplier(result: dict) -> float:
+    """Regime multiplier for leverage, not for signal direction.
+
+    v3.2 mantalite düzeltmesi:
+    - Risk-on rejimde agresiflik mümkün, ancak bu tek başına yeterli değil.
+    - NEWS_CHAOS / risk-off / chop tarafı kaldıraç büyütmez.
+    - Nihai agresiflik ayrıca quality, execution, dashboard ve risk governor kapılarından geçer.
+    """
+    regime = (result.get("regime") or {}).get("regime", "NEUTRAL")
+    macro_regime = ((result.get("regime") or {}).get("diagnostics") or {}).get("macro_regime")
+    if regime == "NEWS_CHAOS":
+        return 0.0
+    if macro_regime == "MACRO_STRONG_RISK_OFF":
+        return 0.35
+    if regime == "RISK_OFF_TREND_DOWN":
+        return 0.40
+    if macro_regime == "MACRO_RISK_OFF":
+        return 0.60
+    if regime == "CHOP_RANGE":
+        return 0.45
+    if regime in {"SQUEEZE_LONG", "SQUEEZE_SHORT"}:
+        return 0.70
+    if LEVERAGE_POLICY_RISK_ON_AGGRESSIVE and regime == "RISK_ON_ALTSEASON":
+        return 1.18
+    if LEVERAGE_POLICY_RISK_ON_AGGRESSIVE and regime == "RISK_ON_TREND_UP":
+        return 1.10
+    return 0.90
+
+
+def _lp_quality_multiplier(grade: str, confidence: float) -> float:
+    """Quality multiplier. A+ ve yüksek confidence olmadan turbo kaldıraç açılmaz."""
+    grade = str(grade or "D").upper()
+    conf = float(confidence or 0.0)
+    if grade == "A+" and conf >= 80:
+        return 1.15
+    if grade == "A+" and conf >= LEVERAGE_POLICY_AGGRESSIVE_MIN_CONFIDENCE:
+        return 1.05
+    if grade == "A+":
+        return 0.92
+    if grade == "A" and conf >= 75:
+        return 0.78
+    if grade == "A":
+        return 0.68
+    if grade == "B":
+        return 0.42
+    return 0.25
+
+
+def _lp_exec_multiplier(exec_quality: dict) -> float:
+    status = (exec_quality or {}).get("status", "PASS")
+    if status == "BLOCKED":
+        return 0.0
+    if status == "WARN":
+        return 0.58
+    if LEVERAGE_POLICY_REQUIRE_EXECQ_PASS_FOR_BOOST and status not in {"PASS", "OFF"}:
+        return 0.75
+    return 1.0
+
+
+def _lp_dashboard_multiplier(result: dict) -> tuple[float, str, dict]:
+    """Use Regime Performance Dashboard as a leverage governor."""
+    if not LEVERAGE_POLICY_DASHBOARD_GATE_ENABLED or not REGIME_DASHBOARD_ENABLED:
+        return 1.0, "Dashboard gate kapalı.", {"status": "OFF"}
+    try:
+        regime = (result.get("regime") or {}).get("regime", "UNKNOWN")
+        direction = result.get("signal") or "UNKNOWN"
+        group = result.get("group") or "UNKNOWN"
+        key = f"{regime}|{direction}|{group}"
+        dash = regime_performance_dashboard(_STATE_MGR) if 'regime_performance_dashboard' in globals() else {}
+        bucket = ((dash.get("by_regime_direction_group") or {}).get(key) or {}) if isinstance(dash, dict) else {}
+        sample = int(bucket.get("sample", 0) or 0)
+        label = bucket.get("label", "INSUFFICIENT") if sample >= REGIME_DASHBOARD_MIN_BUCKET_TRADES else "INSUFFICIENT"
+        if label == "BAD":
+            return LEVERAGE_POLICY_DASHBOARD_BAD_MULTIPLIER, f"Dashboard BAD bucket: {key}", {"key": key, "label": label, "sample": sample, "bucket": bucket}
+        if label == "WEAK":
+            return LEVERAGE_POLICY_DASHBOARD_WEAK_MULTIPLIER, f"Dashboard WEAK bucket: {key}", {"key": key, "label": label, "sample": sample, "bucket": bucket}
+        if label == "GOOD":
+            return LEVERAGE_POLICY_DASHBOARD_GOOD_MULTIPLIER, f"Dashboard GOOD bucket: {key}", {"key": key, "label": label, "sample": sample, "bucket": bucket}
+        return 1.0, f"Dashboard {label}: {key}", {"key": key, "label": label, "sample": sample, "bucket": bucket}
+    except Exception as e:
+        return 1.0, f"Dashboard gate okunamadı: {type(e).__name__}", {"status": "ERROR"}
+
+
+def _lp_risk_governor_multiplier(result: dict) -> tuple[float, str, dict]:
+    rg = result.get("risk_governor") or {}
+    snap = rg.get("snapshot") or rg or {}
+    if not snap:
+        return 1.0, "Risk governor snapshot yok.", {}
+    if not snap.get("allow_new_trades", True):
+        return 0.0, "Risk governor yeni trade kapalı.", snap
+    mode = str(snap.get("mode", "NORMAL")).upper()
+    rg_mult = float(snap.get("risk_multiplier", 1.0) or 0.0)
+    if mode == "STOP":
+        return 0.0, "Risk governor STOP.", snap
+    if mode == "DEFENSIVE":
+        return min(rg_mult, LEVERAGE_POLICY_RISK_GOVERNOR_DEFENSIVE_MULTIPLIER), "Risk governor DEFENSIVE; kaldıraç azaltıldı.", snap
+    if mode == "AGGRESSIVE":
+        return min(max(rg_mult, 1.0), 1.12), "Risk governor AGGRESSIVE; sınırlı boost.", snap
+    return min(max(rg_mult, 0.0), 1.0), "Risk governor normal.", snap
+
+
+def _lp_aggressive_gate(result: dict, grade: str, confidence: float, exec_quality: dict, dashboard_info: dict) -> tuple[bool, str]:
+    """Allow early-stage aggressive leverage only when the setup is truly premium."""
+    regime = (result.get("regime") or {}).get("regime", "NEUTRAL")
+    macro_regime = ((result.get("regime") or {}).get("diagnostics") or {}).get("macro_regime")
+    exec_status = (exec_quality or {}).get("status", "PASS")
+    grade = str(grade or "D").upper()
+    conf = float(confidence or 0.0)
+    if regime not in {"RISK_ON_TREND_UP", "RISK_ON_ALTSEASON"}:
+        return False, "Agresif kaldıraç kapalı: rejim risk-on değil."
+    if macro_regime in {"MACRO_RISK_OFF", "MACRO_STRONG_RISK_OFF"}:
+        return False, f"Agresif kaldıraç kapalı: {macro_regime}."
+    if exec_status != "PASS":
+        return False, f"Agresif kaldıraç kapalı: ExecQ {exec_status}."
+    if grade != "A+" and not LEVERAGE_POLICY_ALLOW_A_GRADE_AGGRESSIVE:
+        return False, "Agresif kaldıraç için A+ setup gerekli."
+    if conf < LEVERAGE_POLICY_AGGRESSIVE_MIN_CONFIDENCE:
+        return False, f"Agresif kaldıraç için confidence düşük: {conf:.1f}."
+    label = (dashboard_info or {}).get("label")
+    if label in {"BAD", "WEAK"}:
+        return False, f"Agresif kaldıraç kapalı: Dashboard {label}."
+    return True, "Agresif kaldıraç şartları sağlandı."
+
+
+def liquidation_distance_pct_for_leverage(leverage: float, group: str) -> float:
+    """Approx liquidation distance based on the exchange leverage setting."""
+    lev = max(0.0001, float(leverage or 0.0))
+    maint = LEVERAGE_POLICY_MAINT_MARGIN_HIGH_BETA if group == "HIGH_BETA" else LEVERAGE_POLICY_MAINT_MARGIN_CORE
+    return max(0.0, (1.0 / lev) - maint - LEVERAGE_POLICY_EXTRA_LIQ_BUFFER_PCT)
+
+
+def max_safe_leverage_for_stop(stop_pct: float, group: str, *, min_liq_to_stop: Optional[float] = None) -> float:
+    ratio = float(min_liq_to_stop or LEVERAGE_POLICY_MIN_LIQ_TO_STOP)
+    required_distance = float(stop_pct or 0.0) * ratio + LEVERAGE_POLICY_EXTRA_LIQ_BUFFER_PCT
+    maint = LEVERAGE_POLICY_MAINT_MARGIN_HIGH_BETA if group == "HIGH_BETA" else LEVERAGE_POLICY_MAINT_MARGIN_CORE
+    denom = max(0.0001, required_distance + maint)
+    exchange_cap = LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA if group == "HIGH_BETA" else LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE
+    return max(LEVERAGE_POLICY_MIN_ECON_LEV, min(exchange_cap, 1.0 / denom))
+
+
+def _recommended_exchange_leverage(final_econ_lev: float, safe_exchange_lev: float, exchange_cap: float) -> float:
+    econ = max(0.0, float(final_econ_lev or 0.0))
+    if econ <= 0:
+        return 1.0
+    desired = max(1.0, econ * LEVERAGE_POLICY_EXCHANGE_LEV_BUFFER)
+    return round(min(exchange_cap, safe_exchange_lev, desired), 2)
+
+
+def evaluate_leverage_policy(result: dict, stop_pct: float, position_sizing: dict) -> dict:
+    equity = float(position_sizing.get("equity_used_usd", ACCOUNT_SIZE_USD) or ACCOUNT_SIZE_USD)
+    group = result.get("group", "CORE")
+    signal = result.get("signal")
+    tq = result.get("trade_quality") or {}
+    grade = str(tq.get("grade", "D")).upper()
+    confidence = float(result.get("confidence", 0) or 0)
+    exec_quality = result.get("execution_quality") or {}
+    if not LEVERAGE_POLICY_ENABLED:
+        base_notional = float(position_sizing.get("position_notional", 0.0) or 0.0)
+        econ_lev = base_notional / equity if equity > 0 else 0.0
+        return {"enabled": False, "allowed": True, "status": "OFF", "stage": _lp_stage_key(equity), "final_leverage": econ_lev, "final_notional_usd": base_notional, "risk_pct": float(position_sizing.get("risk_pct", 0.0) or 0.0), "reason": "Leverage Policy kapalı.", "reasons": ["Leverage Policy kapalı."]}
+
+    stage = _lp_stage_key(equity)
+    base_target = _lp_target_leverage(stage, group, grade)
+    regime_mult = _lp_regime_multiplier(result)
+    quality_mult = _lp_quality_multiplier(grade, confidence)
+    exec_mult = _lp_exec_multiplier(exec_quality)
+    dashboard_mult, dashboard_reason, dashboard_info = _lp_dashboard_multiplier(result)
+    rg_mult, rg_reason, rg_snapshot = _lp_risk_governor_multiplier(result)
+    aggressive_allowed, aggressive_reason = _lp_aggressive_gate(result, grade, confidence, exec_quality, dashboard_info)
+
+    raw_target_lev = max(LEVERAGE_POLICY_MIN_ECON_LEV, base_target * regime_mult * quality_mult * exec_mult * dashboard_mult * rg_mult)
+    if not aggressive_allowed:
+        raw_target_lev = min(raw_target_lev, base_target)
+
+    exchange_cap = LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA if group == "HIGH_BETA" else LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE
+    stage_max_risk = _lp_max_risk_pct(stage)
+    min_liq_ratio = LEVERAGE_POLICY_MIN_LIQ_TO_STOP_AGGRESSIVE if aggressive_allowed else LEVERAGE_POLICY_MIN_LIQ_TO_STOP
+    safe_exchange_lev = max_safe_leverage_for_stop(stop_pct, group, min_liq_to_stop=min_liq_ratio)
+    safe_econ_lev = max(LEVERAGE_POLICY_MIN_ECON_LEV, safe_exchange_lev / max(1.0, LEVERAGE_POLICY_EXCHANGE_LEV_BUFFER))
+    risk_cap_lev = stage_max_risk / max(0.0001, float(stop_pct or 0.0))
+    final_lev = max(0.0, min(raw_target_lev, safe_econ_lev, exchange_cap, risk_cap_lev))
+    recommended_exchange_leverage = _recommended_exchange_leverage(final_lev, safe_exchange_lev, exchange_cap)
+    liq_distance = liquidation_distance_pct_for_leverage(recommended_exchange_leverage, group) if final_lev > 0 else 0.0
+    required_liq_distance = float(stop_pct or 0.0) * min_liq_ratio
+    final_notional = equity * final_lev
+    final_risk_pct = final_lev * float(stop_pct or 0.0)
+    final_risk_amount = equity * final_risk_pct
+
+    status = "PASS"
+    allowed = True
+    reasons = [
+        f"Stage {stage}: base target {base_target:.2f}x",
+        f"Regime multiplier x{regime_mult:.2f}",
+        f"Quality/confidence multiplier x{quality_mult:.2f}",
+        f"Execution multiplier x{exec_mult:.2f}",
+        f"Dashboard multiplier x{dashboard_mult:.2f}: {dashboard_reason}",
+        f"Risk governor multiplier x{rg_mult:.2f}: {rg_reason}",
+        aggressive_reason,
+        f"Safe exchange leverage {safe_exchange_lev:.2f}x; risk-cap leverage {risk_cap_lev:.2f}x",
+        f"Final economic leverage {final_lev:.2f}x; exchange leverage ≈{recommended_exchange_leverage:.2f}x; liq distance %{liq_distance*100:.2f}",
+    ]
+    if exec_mult <= 0.0:
+        status, allowed, final_lev, final_notional, final_risk_pct, final_risk_amount = "BLOCKED", False, 0.0, 0.0, 0.0, 0.0
+        recommended_exchange_leverage = 1.0
+        liq_distance = 0.0
+        reasons.append("Execution Quality BLOCKED; kaldıraç kapatıldı.")
+    elif rg_mult <= 0.0:
+        status, allowed, final_lev, final_notional, final_risk_pct, final_risk_amount = "BLOCKED", False, 0.0, 0.0, 0.0, 0.0
+        recommended_exchange_leverage = 1.0
+        liq_distance = 0.0
+        reasons.append("Risk Governor yeni trade'e kapalı; kaldıraç kapatıldı.")
+    elif regime_mult <= 0.0:
+        status, allowed, final_lev, final_notional, final_risk_pct, final_risk_amount = "BLOCKED", False, 0.0, 0.0, 0.0, 0.0
+        recommended_exchange_leverage = 1.0
+        liq_distance = 0.0
+        reasons.append("Rejim yeni trade'e kapalı; kaldıraç kapatıldı.")
+    elif dashboard_info.get("label") == "BAD" and LEVERAGE_POLICY_DASHBOARD_BLOCK_BAD:
+        status, allowed, final_lev, final_notional, final_risk_pct, final_risk_amount = "BLOCKED", False, 0.0, 0.0, 0.0, 0.0
+        recommended_exchange_leverage = 1.0
+        liq_distance = 0.0
+        reasons.append("Dashboard BAD bucket blok kuralı aktif; trade bloklandı.")
+    elif liq_distance < required_liq_distance:
+        if LEVERAGE_POLICY_BLOCK_IF_UNSAFE:
+            status, allowed = "BLOCKED", False
+            reasons.append("Likidasyon mesafesi stop mesafesine göre güvenli değil; trade bloklandı.")
+        else:
+            status = "WARN"
+            reasons.append("Likidasyon mesafesi sınıra yakın; kaldıraç kırpıldı.")
+    elif final_lev < raw_target_lev * 0.70:
+        status = "WARN"
+        reasons.append("Hedef kaldıraç likidasyon/risk cap/dashboard nedeniyle ciddi kırpıldı.")
+    if final_risk_pct > stage_max_risk + 1e-9:
+        status, allowed = "BLOCKED", False
+        reasons.append("Aşama bazlı azami risk aşıldı; trade bloklandı.")
+    return {
+        "enabled": True,
+        "allowed": bool(allowed),
+        "status": status,
+        "stage": stage,
+        "group": group,
+        "direction": signal,
+        "grade": grade,
+        "aggressive_allowed": bool(aggressive_allowed),
+        "aggressive_reason": aggressive_reason,
+        "base_target_leverage": round(base_target, 4),
+        "raw_target_leverage": round(raw_target_lev, 4),
+        "target_leverage": round(raw_target_lev, 4),
+        "safe_max_exchange_leverage": round(safe_exchange_lev, 4),
+        "safe_max_leverage": round(safe_econ_lev, 4),
+        "risk_cap_leverage": round(risk_cap_lev, 4),
+        "final_leverage": round(final_lev, 4),
+        "recommended_exchange_leverage": round(recommended_exchange_leverage, 2),
+        "target_notional_usd": round(equity * raw_target_lev, 4),
+        "final_notional_usd": round(final_notional, 4),
+        "risk_pct": round(final_risk_pct, 6),
+        "risk_amount_usd": round(final_risk_amount, 4),
+        "stop_pct": round(float(stop_pct or 0.0), 6),
+        "liquidation_distance_pct": round(liq_distance, 6),
+        "required_liquidation_distance_pct": round(required_liq_distance, 6),
+        "liq_to_stop_ratio": round(liq_distance / max(0.0001, float(stop_pct or 0.0)), 4) if stop_pct else None,
+        "stage_max_risk_pct": round(stage_max_risk, 6),
+        "regime_multiplier": round(regime_mult, 4),
+        "quality_multiplier": round(quality_mult, 4),
+        "execution_multiplier": round(exec_mult, 4),
+        "dashboard_multiplier": round(dashboard_mult, 4),
+        "dashboard_info": dashboard_info,
+        "risk_governor_multiplier": round(rg_mult, 4),
+        "risk_governor_mode": rg_snapshot.get("mode") if isinstance(rg_snapshot, dict) else None,
+        "min_liq_to_stop_used": round(min_liq_ratio, 4),
+        "reason": reasons[-1] if reasons else status,
+        "reasons": reasons[:12],
+    }
+
+def apply_leverage_policy_to_position(position_sizing: dict, leverage_policy: dict, stop_pct: float) -> dict:
+    updated = copy.deepcopy(position_sizing)
+    updated["leverage_policy"] = copy.deepcopy(leverage_policy)
+    if not leverage_policy.get("enabled", True):
+        return updated
+    if not leverage_policy.get("allowed", True):
+        updated["position_notional"] = 0.0; updated["risk_amount"] = 0.0; updated["risk_pct"] = 0.0
+        updated.setdefault("reasons", []).append(f"Leverage Policy blocked: {leverage_policy.get('reason')}")
+        return updated
+    updated["leverage_policy_adjusted"] = True
+    updated["original_position_notional"] = float(position_sizing.get("position_notional", 0.0) or 0.0)
+    updated["position_notional"] = float(leverage_policy.get("final_notional_usd", 0.0) or 0.0)
+    updated["risk_pct"] = float(leverage_policy.get("risk_pct", 0.0) or 0.0)
+    updated["risk_amount"] = float(leverage_policy.get("risk_amount_usd", 0.0) or 0.0)
+    updated["economic_leverage"] = float(leverage_policy.get("final_leverage", 0.0) or 0.0)
+    updated["recommended_exchange_leverage"] = float(leverage_policy.get("recommended_exchange_leverage", 1.0) or 1.0)
+    updated.setdefault("reasons", []).append(f"Leverage Policy: {updated['original_position_notional']:,.2f}$ → {updated['position_notional']:,.2f}$ ({updated['economic_leverage']:.2f}x, risk %{updated['risk_pct']*100:.2f})")
+    return updated
+
+def format_leverage_policy_brief(lp: Optional[dict]) -> str:
+    if not lp:
+        return "LevPolicy: yok"
+    return (
+        f"LevPolicy: {lp.get('status', '-')} | {lp.get('stage', '-')} | "
+        f"EconLev {float(lp.get('final_leverage', 0) or 0):.2f}x | "
+        f"LiqDist %{float(lp.get('liquidation_distance_pct', 0) or 0)*100:.2f} | "
+        f"Liq/Stop {lp.get('liq_to_stop_ratio', '-')} | ExchLev≈{lp.get('recommended_exchange_leverage', '-')}x"
+    )
+
+
 # ============================================================
 # TRADE PLAN ENGINE (bilgilendirme amaçlı, emir göndermez)
 # ============================================================
@@ -3294,6 +3702,20 @@ def build_trade_plan(result: dict) -> Optional[dict]:
             tp3 = reference_entry - risk_per_unit * max(cfg["tp3_r"], 3.5)
 
     position_sizing = compute_position_sizing(result, stop_pct)
+
+    # Liquidation-Aware Leverage Policy: özellikle erken sermaye aşamasında
+    # risk-on + kaliteli setup geldiğinde ekonomik kaldıraç hedefini yükseltir;
+    # ama likidasyon mesafesi stopun güvenli dışında kalmıyorsa kırpar/bloklar.
+    leverage_policy = evaluate_leverage_policy(result, stop_pct, position_sizing)
+    if not leverage_policy.get("allowed", True):
+        log.info(
+            "%s trade plan iptal: Leverage Policy %s — %s",
+            result.get("symbol"),
+            leverage_policy.get("status"),
+            leverage_policy.get("reason"),
+        )
+        return None
+    position_sizing = apply_leverage_policy_to_position(position_sizing, leverage_policy, stop_pct)
     risk_pct = float(position_sizing["risk_pct"])
     risk_amount = float(position_sizing["risk_amount"])
     position_notional = float(position_sizing["position_notional"])
@@ -3331,6 +3753,23 @@ def build_trade_plan(result: dict) -> Optional[dict]:
             position_sizing["position_notional"] = position_notional
             position_sizing["risk_amount"] = risk_amount
             position_sizing["risk_pct"] = risk_pct
+            leverage_policy["execution_quality_adjusted"] = True
+            leverage_policy["pre_execq_final_notional_usd"] = original_notional
+            leverage_policy["final_notional_usd"] = round(position_notional, 4)
+            leverage_policy["final_leverage"] = round(position_notional / equity_used, 4) if equity_used > 0 else 0.0
+            leverage_policy["risk_pct"] = round(risk_pct, 6)
+            leverage_policy["risk_amount_usd"] = round(risk_amount, 4)
+            # v3.2: liquidation distance is based on recommended exchange leverage, not economic leverage.
+            safe_exchange_lev = float(leverage_policy.get("safe_max_exchange_leverage", leverage_policy.get("recommended_exchange_leverage", 1.0)) or 1.0)
+            exchange_cap = LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA if group == "HIGH_BETA" else LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE
+            leverage_policy["recommended_exchange_leverage"] = _recommended_exchange_leverage(
+                leverage_policy["final_leverage"], safe_exchange_lev, exchange_cap
+            )
+            leverage_policy["liquidation_distance_pct"] = round(
+                liquidation_distance_pct_for_leverage(leverage_policy["recommended_exchange_leverage"], group), 6
+            ) if leverage_policy["final_leverage"] else 0.0
+            leverage_policy["liq_to_stop_ratio"] = round(leverage_policy["liquidation_distance_pct"] / max(0.0001, stop_pct), 4) if stop_pct else None
+            position_sizing["leverage_policy"] = copy.deepcopy(leverage_policy)
             position_sizing.setdefault("reasons", []).append(
                 f"Execution Quality notional cap: {original_notional:,.2f}$ → {position_notional:,.2f}$"
             )
@@ -3351,6 +3790,7 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         "risk_pct": risk_pct,
         "risk_amount": risk_amount,
         "position_sizing": position_sizing,
+        "leverage_policy": copy.deepcopy(leverage_policy),
         "execution_quality": copy.deepcopy(execution_quality),
         "entry_engine": copy.deepcopy(result.get("entry_engine", {})),
         "regime_commander": copy.deepcopy(result.get("regime_commander", {})),
@@ -3385,6 +3825,7 @@ def format_trade_plan_block(plan: Optional[dict]) -> list[str]:
         f"Hesap: {format_money(plan['account_size'])}",
         f"İşlem Riski: %{plan['risk_pct'] * 100:.2f} = {format_money(plan['risk_amount'])}",
         format_position_sizing_brief(plan.get("position_sizing")),
+        format_leverage_policy_brief(plan.get("leverage_policy")),
         f"Execution Quality: {(plan.get('execution_quality') or {}).get('status', '-')} | Cost {(plan.get('execution_quality') or {}).get('estimated_entry_cost_bps', '-')} bps | Impact {(plan.get('execution_quality') or {}).get('market_impact_bps', '-')}",
         f"Önerilen Notional: {format_money(plan['position_notional'])}",
         f"Yaklaşık Miktar: {plan['quantity']:.6f}",
@@ -6000,6 +6441,7 @@ def format_trade_open_msg(t: dict) -> str:
         f"ExecQ: {(t.get('execution_quality') or {}).get('status', '-')} | Cost {(t.get('execution_quality') or {}).get('estimated_entry_cost_bps', '-')} bps | Impact {(t.get('execution_quality') or {}).get('market_impact_bps', '-')} bps\n"
         f"Risk: {format_money(t.get('risk_amount'))} (%{float(t.get('risk_pct', 0))*100:.2f}) | Notional: {format_money(t.get('position_notional'))}\n"
         f"{format_position_sizing_brief(t.get('position_sizing'))}\n"
+        f"{format_leverage_policy_brief(t.get('leverage_policy'))}\n"
         f"{format_position_management_brief(t)}\n"
         f"PaperExec: {(t.get('paper_execution') or {}).get('status', '-')} | Fill: {format_price((t.get('paper_execution') or {}).get('fill_price'))} | Fee: {format_money((t.get('paper_execution') or {}).get('open_fee_usd'))}\n\n"
         f"Not: Bu mesaj otomatik emir değildir; botun trade tracking + paper execution + position management kaydıdır.\n"
@@ -6080,6 +6522,7 @@ def open_trade(result: dict, plan: dict, state_mgr: StateManager = _STATE_MGR) -
         "position_notional": float(plan.get("position_notional", 0)),
         "quantity": float(plan.get("quantity", 0)),
         "position_sizing": copy.deepcopy(plan.get("position_sizing", {})),
+        "leverage_policy": copy.deepcopy(plan.get("leverage_policy", {})),
         "execution_quality": copy.deepcopy(plan.get("execution_quality", {})),
         "entry_engine": copy.deepcopy(plan.get("entry_engine", {})),
         "regime_commander": copy.deepcopy(plan.get("regime_commander", {})),
@@ -7812,7 +8255,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
     """Ana bot döngüsü."""
     log.info("BOT BAŞLADI v%s", __version__)
     send_message(
-        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + MacroRisk + ExecQ + RegimeDash + PaperExec + PM + RiskGov/CapitalGuard/RegimeEdge/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON"
+        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + MacroRisk + ExecQ + LiqLev + RegimeDash + PaperExec + PM + RiskGov/CapitalGuard/RegimeEdge/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON"
     )
 
     state_mgr = _STATE_MGR
