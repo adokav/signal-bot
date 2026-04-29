@@ -15,6 +15,7 @@ Mimari:
 from __future__ import annotations
 
 import copy
+import bisect
 import hashlib
 import json
 import logging
@@ -34,9 +35,11 @@ from zoneinfo import ZoneInfo
 import requests
 from flask import Flask
 from requests.adapters import HTTPAdapter
+from urllib.parse import quote
+
 from urllib3.util.retry import Retry
 
-__version__ = "2.6.0-capital-regime-guard-v1"
+__version__ = "3.0.0-regime-performance-dashboard-v1"
 
 # ============================================================
 # LOGGING
@@ -106,6 +109,15 @@ def env_float_list(name: str, default: list[float], *, min_value: Optional[float
         log.warning("%s geçerli liste üretemedi; varsayılan kullanılıyor: %s", name, default)
         return list(default)
     return values
+
+
+def env_str_list(name: str, default: list[str]) -> list[str]:
+    """Comma-separated string env parser."""
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return list(default)
+    values = [x.strip().upper() for x in str(raw).split(",") if x.strip()]
+    return values or list(default)
 
 
 # Early helper: some configuration blocks use clamp before the Math Helpers
@@ -291,6 +303,76 @@ PAPER_SLIPPAGE_BPS_HIGH_BETA = env_float("PAPER_SLIPPAGE_BPS_HIGH_BETA", 5.0, mi
 PAPER_FILL_TIMEOUT_SECONDS = env_int("PAPER_FILL_TIMEOUT_SECONDS", 30 * 60, min_value=60)
 PAPER_CLOSE_ON_MISSED_ENTRY = os.getenv("PAPER_CLOSE_ON_MISSED_ENTRY", "0") == "1"
 
+# Execution Quality Layer v1
+# Sinyal geldikten sonra asıl soru şudur: Bu pozisyona gerçekten sağlıklı
+# girilebilir mi? Bu katman spread, depth, tahmini market impact, fee/slippage
+# ve funding carry maliyetini birlikte ölçer.
+EXECUTION_QUALITY_ENABLED = os.getenv("EXECUTION_QUALITY_ENABLED", "1") == "1"
+EXECUTION_QUALITY_DEPTH_LIMIT = env_int("EXECUTION_QUALITY_DEPTH_LIMIT", 50, min_value=5)
+EXEC_Q_FAST_DEPTH_BPS = env_float("EXEC_Q_FAST_DEPTH_BPS", 10.0, min_value=1.0)
+EXEC_Q_WIDE_DEPTH_BPS = env_float("EXEC_Q_WIDE_DEPTH_BPS", 50.0, min_value=5.0)
+EXEC_Q_MIN_FAST_DEPTH_USD_CORE = env_float("EXEC_Q_MIN_FAST_DEPTH_USD_CORE", 75_000.0, min_value=0.0)
+EXEC_Q_MIN_FAST_DEPTH_USD_HIGH_BETA = env_float("EXEC_Q_MIN_FAST_DEPTH_USD_HIGH_BETA", 15_000.0, min_value=0.0)
+EXEC_Q_MIN_WIDE_DEPTH_USD_CORE = env_float("EXEC_Q_MIN_WIDE_DEPTH_USD_CORE", 250_000.0, min_value=0.0)
+EXEC_Q_MIN_WIDE_DEPTH_USD_HIGH_BETA = env_float("EXEC_Q_MIN_WIDE_DEPTH_USD_HIGH_BETA", 50_000.0, min_value=0.0)
+EXEC_Q_MAX_ENTRY_COST_BPS_CORE = env_float("EXEC_Q_MAX_ENTRY_COST_BPS_CORE", 14.0, min_value=0.0)
+EXEC_Q_MAX_ENTRY_COST_BPS_HIGH_BETA = env_float("EXEC_Q_MAX_ENTRY_COST_BPS_HIGH_BETA", 32.0, min_value=0.0)
+EXEC_Q_MAX_MARKET_IMPACT_BPS_CORE = env_float("EXEC_Q_MAX_MARKET_IMPACT_BPS_CORE", 8.0, min_value=0.0)
+EXEC_Q_MAX_MARKET_IMPACT_BPS_HIGH_BETA = env_float("EXEC_Q_MAX_MARKET_IMPACT_BPS_HIGH_BETA", 20.0, min_value=0.0)
+EXEC_Q_MAX_NOTIONAL_FAST_DEPTH_RATIO = env_float("EXEC_Q_MAX_NOTIONAL_FAST_DEPTH_RATIO", 0.35, min_value=0.01)
+EXEC_Q_MAX_NOTIONAL_WIDE_DEPTH_RATIO = env_float("EXEC_Q_MAX_NOTIONAL_WIDE_DEPTH_RATIO", 0.20, min_value=0.01)
+EXEC_Q_MIN_NOTIONAL_CAP_USD = env_float("EXEC_Q_MIN_NOTIONAL_CAP_USD", 20.0, min_value=0.0)
+EXEC_Q_FUNDING_HOLD_HOURS = env_float("EXEC_Q_FUNDING_HOLD_HOURS", 4.0, min_value=0.0)
+EXEC_Q_MAX_FUNDING_COST_R_CORE = env_float("EXEC_Q_MAX_FUNDING_COST_R_CORE", 0.10, min_value=0.0)
+EXEC_Q_MAX_FUNDING_COST_R_HIGH_BETA = env_float("EXEC_Q_MAX_FUNDING_COST_R_HIGH_BETA", 0.18, min_value=0.0)
+EXEC_Q_DEPTH_FAILURE_MODE = os.getenv("EXEC_Q_DEPTH_FAILURE_MODE", "WARN").upper()
+if EXEC_Q_DEPTH_FAILURE_MODE not in {"WARN", "BLOCK", "IGNORE"}:
+    log.warning("EXEC_Q_DEPTH_FAILURE_MODE=%r geçersiz; WARN kullanılıyor.", EXEC_Q_DEPTH_FAILURE_MODE)
+    EXEC_Q_DEPTH_FAILURE_MODE = "WARN"
+
+# Historical Replay Backtest Engine v1
+# RUN_HISTORICAL_REPLAY=1 ile normal bot döngüsünden ayrı çalışır.
+RUN_HISTORICAL_REPLAY = os.getenv("RUN_HISTORICAL_REPLAY", "0") == "1"
+HISTORICAL_REPLAY_DAYS = env_int("HISTORICAL_REPLAY_DAYS", 180, min_value=1)
+HISTORICAL_REPLAY_SYMBOLS = env_str_list("HISTORICAL_REPLAY_SYMBOLS", list(COINS.keys()))
+HISTORICAL_REPLAY_REPORT_FILE = os.getenv("HISTORICAL_REPLAY_REPORT_FILE", "historical_replay_report.json")
+HISTORICAL_REPLAY_CACHE_FILE = os.getenv("HISTORICAL_REPLAY_CACHE_FILE", "historical_replay_cache.json")
+HISTORICAL_REPLAY_USE_CACHE = os.getenv("HISTORICAL_REPLAY_USE_CACHE", "1") == "1"
+HISTORICAL_REPLAY_REFRESH_CACHE = os.getenv("HISTORICAL_REPLAY_REFRESH_CACHE", "0") == "1"
+HISTORICAL_REPLAY_RISK_PCT = env_float("HISTORICAL_REPLAY_RISK_PCT", RISK_PCT_PER_TRADE, min_value=0.0001)
+HISTORICAL_REPLAY_MIN_GRADE = os.getenv("HISTORICAL_REPLAY_MIN_GRADE", "A").upper()
+HISTORICAL_REPLAY_EXIT_ON_SIGNAL_CHANGE = os.getenv("HISTORICAL_REPLAY_EXIT_ON_SIGNAL_CHANGE", "1") == "1"
+HISTORICAL_REPLAY_MAX_BARS = env_int("HISTORICAL_REPLAY_MAX_BARS", 0, min_value=0)
+
+# Macro Risk Layer v1
+# Amaç: BTC içi hareketi gerçek risk iştahı ile ayırmak. DXY, ABD 10Y,
+# VIX ve ABD hisse vadeli/proxy verileri opsiyonel Yahoo Finance endpoint'i
+# üzerinden çekilir. Veri alınamazsa sistem neutral fallback ile devam eder.
+MACRO_RISK_ENABLED = os.getenv("MACRO_RISK_ENABLED", "1") == "1"
+MACRO_RISK_PROVIDER = os.getenv("MACRO_RISK_PROVIDER", "YAHOO").upper()
+MACRO_RISK_CACHE_FILE = os.getenv("MACRO_RISK_CACHE_FILE", "macro_risk_cache.json")
+MACRO_RISK_CACHE_TTL_SECONDS = env_int("MACRO_RISK_CACHE_TTL_SECONDS", 30 * 60, min_value=60)
+MACRO_RISK_HISTORY_DAYS = env_int("MACRO_RISK_HISTORY_DAYS", 45, min_value=10)
+MACRO_RISK_SCORE_WEIGHT = env_float("MACRO_RISK_SCORE_WEIGHT", 0.85, min_value=0.0)
+MACRO_RISK_OFF_THRESHOLD = env_float("MACRO_RISK_OFF_THRESHOLD", -1.35)
+MACRO_RISK_ON_THRESHOLD = env_float("MACRO_RISK_ON_THRESHOLD", 1.10)
+MACRO_RISK_STRONG_OFF_THRESHOLD = env_float("MACRO_RISK_STRONG_OFF_THRESHOLD", -2.10)
+MACRO_RISK_STRONG_ON_THRESHOLD = env_float("MACRO_RISK_STRONG_ON_THRESHOLD", 1.90)
+MACRO_RISK_OFF_RISK_MULTIPLIER = env_float("MACRO_RISK_OFF_RISK_MULTIPLIER", 0.65, min_value=0.0)
+MACRO_RISK_STRONG_OFF_RISK_MULTIPLIER = env_float("MACRO_RISK_STRONG_OFF_RISK_MULTIPLIER", 0.35, min_value=0.0)
+MACRO_RISK_ON_RISK_MULTIPLIER = env_float("MACRO_RISK_ON_RISK_MULTIPLIER", 1.10, min_value=0.0)
+MACRO_REPLAY_ENABLED = os.getenv("MACRO_REPLAY_ENABLED", "1") == "1"
+MACRO_REPLAY_INTERVAL = os.getenv("MACRO_REPLAY_INTERVAL", "1d")
+
+# Yahoo sembolleri şirket ağı veya veri sağlayıcı gereğine göre env ile değiştirilebilir.
+MACRO_YAHOO_SYMBOLS = {
+    "vix": os.getenv("MACRO_SYMBOL_VIX", "^VIX"),
+    "dxy": os.getenv("MACRO_SYMBOL_DXY", "DX-Y.NYB"),
+    "us10y": os.getenv("MACRO_SYMBOL_US10Y", "^TNX"),
+    "nasdaq": os.getenv("MACRO_SYMBOL_NASDAQ", "NQ=F"),
+    "sp500": os.getenv("MACRO_SYMBOL_SP500", "ES=F"),
+}
+
 # Position Management Engine v1
 # Açık trade yönetimi: partial TP, trailing stop, time exit ve kontrollü scale-in.
 POSITION_MANAGEMENT_ENABLED = os.getenv("POSITION_MANAGEMENT_ENABLED", "1") == "1"
@@ -391,6 +473,25 @@ REGIME_EDGE_MIN_WIN_RATE = env_float("REGIME_EDGE_MIN_WIN_RATE", 0.45, min_value
 REGIME_EDGE_MIN_AVG_PNL_PCT = env_float("REGIME_EDGE_MIN_AVG_PNL_PCT", 0.0)
 REGIME_EDGE_BAD_MULTIPLIER = env_float("REGIME_EDGE_BAD_MULTIPLIER", 0.50, min_value=0.0)
 REGIME_EDGE_BLOCK_BAD = os.getenv("REGIME_EDGE_BLOCK_BAD", "0") == "1"
+
+
+# Regime Performance Dashboard v1
+# Trade hafızasını rejim/yön/coin grubu/sembol bazında parçalar ve
+# botun nerede gerçekten edge ürettiğini ölçer. Dashboard sadece rapor
+# değildir; live-readiness ve risk denetimine bağlanabilecek karar etiketi üretir.
+REGIME_DASHBOARD_ENABLED = os.getenv("REGIME_DASHBOARD_ENABLED", "1") == "1"
+REGIME_DASHBOARD_REPORT_FILE = os.getenv("REGIME_DASHBOARD_REPORT_FILE", "regime_performance_dashboard.json")
+REGIME_DASHBOARD_LOOKBACK_TRADES = env_int("REGIME_DASHBOARD_LOOKBACK_TRADES", 250, min_value=10)
+REGIME_DASHBOARD_MIN_BUCKET_TRADES = env_int("REGIME_DASHBOARD_MIN_BUCKET_TRADES", 5, min_value=2)
+REGIME_DASHBOARD_TOP_N = env_int("REGIME_DASHBOARD_TOP_N", 8, min_value=1)
+REGIME_DASHBOARD_MIN_WIN_RATE = env_float("REGIME_DASHBOARD_MIN_WIN_RATE", 0.45, min_value=0.0)
+REGIME_DASHBOARD_MIN_PROFIT_FACTOR = env_float("REGIME_DASHBOARD_MIN_PROFIT_FACTOR", 1.05, min_value=0.0)
+REGIME_DASHBOARD_MIN_EXPECTANCY_PCT = env_float("REGIME_DASHBOARD_MIN_EXPECTANCY_PCT", 0.0)
+REGIME_DASHBOARD_BAD_EXPECTANCY_PCT = env_float("REGIME_DASHBOARD_BAD_EXPECTANCY_PCT", -0.0025)
+REGIME_DASHBOARD_MIN_LIVE_BUCKET_PASS_RATE = env_float(
+    "REGIME_DASHBOARD_MIN_LIVE_BUCKET_PASS_RATE", 0.55, min_value=0.0
+)
+REGIME_DASHBOARD_REQUIRE_LIVE_PASS = os.getenv("REGIME_DASHBOARD_REQUIRE_LIVE_PASS", "1") == "1"
 
 AI_SIGNAL_OPTIMIZATION_ENABLED = os.getenv("AI_SIGNAL_OPTIMIZATION_ENABLED", "1") == "1"
 AI_OPTIMIZATION_REPORT_FILE = os.getenv("AI_OPTIMIZATION_REPORT_FILE", "ai_signal_optimization_report.json")
@@ -566,6 +667,10 @@ def capital_milestone_guard(
     if state_mgr is not None and highest > stored:
         state_mgr.set_meta("highest_capital_milestone_reached", highest)
         state_mgr.set_meta("highest_capital_milestone_reached_at", now_ts())
+        try:
+            state_mgr.save()
+        except Exception as e:
+            log.warning("Capital milestone state kaydedilemedi: %s", e)
         log.info("Yeni capital milestone görüldü: %.2f USD", highest)
 
     next_milestone = _capital_next_milestone(equity)
@@ -1342,6 +1447,19 @@ def get_book(symbol: str) -> dict:
     return data
 
 
+def get_order_book_depth(symbol: str, limit: int = EXECUTION_QUALITY_DEPTH_LIMIT) -> dict:
+    """MEXC spot order book depth. Execution Quality için non-kritik kullanılır."""
+    data = request_json(
+        f"{MEXC_SPOT_BASE}/api/v3/depth",
+        {"symbol": symbol, "limit": int(limit)},
+        retries=2,
+        timeout=10.0,
+    )
+    if not isinstance(data, dict):
+        raise PermanentHTTPError(f"{symbol} depth response dict değil")
+    return data
+
+
 def get_futures_fair_price(symbol: str) -> Optional[float]:
     """MEXC futures fair price. Bulunamazsa None döner."""
     futures_symbol = to_futures_symbol(symbol)
@@ -1484,6 +1602,44 @@ def format_money(value: Optional[float]) -> str:
     if value is None:
         return "N/A"
     return f"${value:,.2f}"
+
+
+def trade_realized_pnl_pct(trade: dict) -> float:
+    """Return the PnL percentage that downstream learning/risk modules should use.
+
+    Priority:
+      1. Paper net PnL pct, if the paper position is closed. This includes
+         estimated fees/slippage and PM override when available.
+      2. Position-management realized PnL pct, if partial TP / scale-in logic ran.
+      3. Classic entry-to-exit PnL pct fallback.
+
+    This prevents the learning stack from training on a simplified entry→exit
+    approximation while execution/PM has simulated a different path.
+    """
+    if not isinstance(trade, dict):
+        return 0.0
+
+    paper = trade.get("paper_execution") or {}
+    if isinstance(paper, dict) and paper.get("status") == "CLOSED" and paper.get("net_pnl_pct") is not None:
+        try:
+            return float(paper.get("net_pnl_pct") or 0.0)
+        except (TypeError, ValueError):
+            pass
+
+    if trade.get("pm_realized_pnl_pct") is not None:
+        try:
+            return float(trade.get("pm_realized_pnl_pct") or 0.0)
+        except (TypeError, ValueError):
+            pass
+
+    try:
+        return float(trade.get("pnl_pct", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def trade_is_profitable(trade: dict) -> bool:
+    return trade_realized_pnl_pct(trade) > 0
 
 
 # ============================================================
@@ -1955,6 +2111,7 @@ def get_features(symbol: str) -> dict:
         "k4h": _FEATURE_EXECUTOR.submit(get_klines, symbol, "4h", KLINE_LIMIT),
         "ticker": _FEATURE_EXECUTOR.submit(get_ticker, symbol),
         "book": _FEATURE_EXECUTOR.submit(get_book, symbol),
+        "depth": _FEATURE_EXECUTOR.submit(get_order_book_depth, symbol, EXECUTION_QUALITY_DEPTH_LIMIT),
         "spot": _FEATURE_EXECUTOR.submit(get_spot_price, symbol),
     }
 
@@ -1981,6 +2138,7 @@ def get_features(symbol: str) -> dict:
     k4h = results["k4h"]
     ticker = results["ticker"]
     book = results["book"]
+    depth = results.get("depth") if "depth" not in errors else None
     spot_price = results["spot"]
 
     closes_5 = [_to_float(x[4], f"{symbol}.k5.close") for x in k5]
@@ -2043,6 +2201,9 @@ def get_features(symbol: str) -> dict:
     mid = (bid + ask) / 2
     raw_spread_bps = ((ask - bid) / mid) * 10000 if mid else 999.0
     spread_bps = max(0.0, raw_spread_bps)
+    order_book = compact_order_book_metrics(depth, bid=bid, ask=ask, mid=mid)
+    if "depth" in errors:
+        order_book = {"available": False, "reason": f"Depth endpoint hatası: {type(errors['depth']).__name__}"}
 
     try:
         change_24h = _to_float(ticker.get("priceChangePercent", 0), f"{symbol}.change_24h")
@@ -2079,6 +2240,7 @@ def get_features(symbol: str) -> dict:
         "ret_1h": ret_1h, "ret_4h": ret_4h,
         "vol_ratio": vol_ratio,
         "spread_bps": spread_bps,
+        "order_book": order_book,
         "change_24h": change_24h,
     }
 
@@ -2087,7 +2249,14 @@ def get_features(symbol: str) -> dict:
 # SCORING FUNCTIONS (saf fonksiyonlar — test edilebilir)
 # ============================================================
 
-def score_macro(btc: dict) -> float:
+def score_macro(btc: dict, macro_context: Optional[dict] = None) -> float:
+    """Macro score = BTC risk proxy + optional external macro risk layer.
+
+    Eski versiyon yalnızca BTC 24h/4h hareketini kullanıyordu. Macro Risk
+    Layer v1 devredeyse VIX, DXY, ABD 10Y ve ABD equity futures/proxy
+    bileşenlerinden gelen risk_score da eklenir. Pozitif değer risk-on
+    long ortamını, negatif değer risk-off/short-cash ortamını temsil eder.
+    """
     p = SCORE_PARAMS["macro"]
     score = 0.0
     if btc["change_24h"] > p["change_24h_strong"]:
@@ -2099,6 +2268,13 @@ def score_macro(btc: dict) -> float:
         score += p["weight_ret_4h"]
     elif btc["ret_4h"] < -p["ret_4h_strong"]:
         score -= p["weight_ret_4h"]
+
+    if macro_context and macro_context.get("enabled", True):
+        try:
+            macro_score = float(macro_context.get("risk_score", 0.0) or 0.0)
+            score += macro_score * MACRO_RISK_SCORE_WEIGHT
+        except (TypeError, ValueError):
+            pass
     return clamp(score, -3, 3)
 
 
@@ -2335,6 +2511,7 @@ def weighted_signal(
     eth: dict,
     session_context: SessionContext,
     news_context: dict,
+    macro_context: Optional[dict] = None,
 ) -> dict:
     group = COINS[symbol]
     base_weights = WEIGHTS[group]
@@ -2347,7 +2524,7 @@ def weighted_signal(
     news_mult = session_context.news_multiplier
 
     raw = {
-        "macro": score_macro(btc) * macro_mult,
+        "macro": score_macro(btc, macro_context) * macro_mult,
         "market": score_market(btc, eth) * micro_mult,
         "mtf": score_mtf(features),
         "trend": score_trend(features) * micro_mult,
@@ -2420,6 +2597,7 @@ def weighted_signal(
         "news_action": news_action,
         "session_context": session_context.as_dict(),
         "news_context": news_context,
+        "macro_context": macro_context or default_macro_risk_context("macro_context_missing"),
         "basis_missing": features["basis_pct"] is None,
         "funding_missing": features.get("funding_rate") is None,
     }
@@ -2432,21 +2610,14 @@ def weighted_signal(
 # ============================================================
 
 def _ps_outcome_value(trade: dict) -> Optional[float]:
-    """Closed trade outcome for sizing:
-    WIN = +1, LOSS = -1, EXIT uses pnl sign / magnitude.
-    """
+    """Closed trade outcome for sizing, based on PM/paper-aware realized PnL."""
     if trade.get("result") is None:
         return None
-    result = trade.get("result")
-    pnl_pct = float(trade.get("pnl_pct", 0) or 0)
-    if result == "WIN":
-        return 1.0
-    if result == "LOSS":
-        return -1.0
+    pnl_pct = trade_realized_pnl_pct(trade)
     if pnl_pct > 0:
-        return 0.5
+        return 1.0
     if pnl_pct < 0:
-        return -0.5
+        return -1.0
     return 0.0
 
 
@@ -2492,7 +2663,7 @@ def _ps_edge_for(
         outcome = _ps_outcome_value(t)
         if outcome is None:
             continue
-        rows.append((outcome, float(t.get("pnl_pct", 0) or 0)))
+        rows.append((outcome, trade_realized_pnl_pct(t)))
 
     sample = len(rows)
     if sample < POSITION_SIZING_MIN_EDGE_TRADES:
@@ -2655,8 +2826,10 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
     corr_mult = float(pcorr.get("risk_multiplier", 1.0) or 1.0)
     regime_edge = result.get("regime_edge_guard") or {}
     regime_edge_mult = float(regime_edge.get("risk_multiplier", 1.0) or 1.0)
+    exec_quality = result.get("execution_quality") or {}
+    exec_quality_mult = float(exec_quality.get("risk_multiplier", 1.0) or 1.0)
 
-    raw_multiplier = q_mult * c_mult * r_mult * edge_multiplier * ls_mult * rg_mult * corr_mult * regime_edge_mult
+    raw_multiplier = q_mult * c_mult * r_mult * edge_multiplier * ls_mult * rg_mult * corr_mult * regime_edge_mult * exec_quality_mult
 
     # Risk-off / chaos rejimlerinde pozisyon büyütmeyi kapat.
     # Not: Rejim isimleri detect_market_regime() ile birebir eşleşmeli.
@@ -2685,6 +2858,7 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         f"Risk Governor {rg_snapshot.get('mode', '-')} çarpanı x{rg_mult:.2f}",
         f"Portfolio correlation çarpanı x{corr_mult:.2f}",
         f"Regime edge çarpanı x{regime_edge_mult:.2f}",
+        f"Execution quality çarpanı x{exec_quality_mult:.2f}",
         f"Loss streak {loss_streak} çarpanı x{ls_mult:.2f}",
         f"Capital ladder {ladder.get('label', '-')} üst risk limiti %{max_risk_cap*100:.2f}",
         *edge_notes,
@@ -2710,6 +2884,8 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         "risk_governor_multiplier": rg_mult,
         "portfolio_correlation_multiplier": corr_mult,
         "regime_edge_multiplier": regime_edge_mult,
+        "execution_quality_multiplier": exec_quality_mult,
+        "execution_quality": exec_quality,
         "regime_edge_guard": regime_edge,
         "risk_governor": rg_snapshot,
         "symbol_edge": symbol_edge,
@@ -2727,6 +2903,285 @@ def format_position_sizing_brief(ps: Optional[dict]) -> str:
         f"Çarpan x{ps.get('multiplier', 1.0)} | "
         f"LossStreak {ps.get('loss_streak', 0)}"
     )
+
+
+# ============================================================
+# EXECUTION QUALITY LAYER
+# ============================================================
+
+def _exec_slippage_bps(group: str) -> float:
+    return PAPER_SLIPPAGE_BPS_HIGH_BETA if group == "HIGH_BETA" else PAPER_SLIPPAGE_BPS_CORE
+
+
+def _exec_group_value(group: str, core_value: float, high_beta_value: float) -> float:
+    return high_beta_value if group == "HIGH_BETA" else core_value
+
+
+def _parse_depth_levels(levels: Any, *, max_levels: int = 100) -> list[tuple[float, float]]:
+    parsed: list[tuple[float, float]] = []
+    if not isinstance(levels, list):
+        return parsed
+    for row in levels[:max_levels]:
+        try:
+            price = float(row[0])
+            qty = float(row[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if price > 0 and qty > 0:
+            parsed.append((price, qty))
+    return parsed
+
+
+def _depth_side_usd(levels: list[tuple[float, float]], *, mid: float, bps: float, side: str) -> float:
+    if mid <= 0:
+        return 0.0
+    total = 0.0
+    if side == "ask":
+        limit_price = mid * (1 + bps / 10000.0)
+        for price, qty in levels:
+            if price <= limit_price:
+                total += price * qty
+    else:
+        limit_price = mid * (1 - bps / 10000.0)
+        for price, qty in levels:
+            if price >= limit_price:
+                total += price * qty
+    return total
+
+
+def compact_order_book_metrics(depth: Optional[dict], *, bid: float, ask: float, mid: float) -> dict:
+    """Order book'u state'i şişirmeden execution kalitesi için özetler."""
+    if not isinstance(depth, dict) or mid <= 0:
+        return {"available": False, "reason": "Depth verisi yok."}
+    bids = _parse_depth_levels(depth.get("bids"), max_levels=EXECUTION_QUALITY_DEPTH_LIMIT)
+    asks = _parse_depth_levels(depth.get("asks"), max_levels=EXECUTION_QUALITY_DEPTH_LIMIT)
+    if not bids or not asks:
+        return {"available": False, "reason": "Depth tarafları boş."}
+    return {
+        "available": True,
+        "mid": mid,
+        "bid": bid,
+        "ask": ask,
+        "levels": min(len(bids), len(asks)),
+        "bids": bids,
+        "asks": asks,
+        "bid_depth_fast_usd": _depth_side_usd(bids, mid=mid, bps=EXEC_Q_FAST_DEPTH_BPS, side="bid"),
+        "ask_depth_fast_usd": _depth_side_usd(asks, mid=mid, bps=EXEC_Q_FAST_DEPTH_BPS, side="ask"),
+        "bid_depth_wide_usd": _depth_side_usd(bids, mid=mid, bps=EXEC_Q_WIDE_DEPTH_BPS, side="bid"),
+        "ask_depth_wide_usd": _depth_side_usd(asks, mid=mid, bps=EXEC_Q_WIDE_DEPTH_BPS, side="ask"),
+    }
+
+
+def estimate_market_impact_bps(order_book: dict, *, direction: str, notional_usd: float) -> dict:
+    """Verilen notional için order book üzerinde yürüyerek tahmini impact hesaplar."""
+    if not order_book or not order_book.get("available"):
+        return {"available": False, "impact_bps": None, "filled_ratio": 0.0, "avg_price": None}
+    mid = float(order_book.get("mid", 0) or 0)
+    if mid <= 0 or notional_usd <= 0:
+        return {"available": False, "impact_bps": None, "filled_ratio": 0.0, "avg_price": None}
+
+    side_levels = order_book.get("asks") if direction == "LONG" else order_book.get("bids")
+    levels = side_levels if isinstance(side_levels, list) else []
+    remaining = float(notional_usd)
+    filled_quote = 0.0
+    filled_qty = 0.0
+    for price, qty in levels:
+        level_quote = price * qty
+        take_quote = min(remaining, level_quote)
+        if take_quote <= 0:
+            continue
+        take_qty = take_quote / price
+        filled_quote += take_quote
+        filled_qty += take_qty
+        remaining -= take_quote
+        if remaining <= 1e-9:
+            break
+
+    if filled_quote <= 0 or filled_qty <= 0:
+        return {"available": True, "impact_bps": None, "filled_ratio": 0.0, "avg_price": None}
+    avg_price = filled_quote / filled_qty
+    if direction == "LONG":
+        impact = max(0.0, (avg_price - mid) / mid * 10000.0)
+    else:
+        impact = max(0.0, (mid - avg_price) / mid * 10000.0)
+    return {
+        "available": True,
+        "impact_bps": round(impact, 3),
+        "filled_ratio": round(filled_quote / float(notional_usd), 5),
+        "avg_price": avg_price,
+        "unfilled_usd": max(0.0, remaining),
+    }
+
+
+def _execution_quality_notional_cap(order_book: dict, *, direction: str) -> float:
+    if not order_book or not order_book.get("available"):
+        return 0.0
+    if direction == "LONG":
+        fast_depth = float(order_book.get("ask_depth_fast_usd", 0) or 0)
+        wide_depth = float(order_book.get("ask_depth_wide_usd", 0) or 0)
+    else:
+        fast_depth = float(order_book.get("bid_depth_fast_usd", 0) or 0)
+        wide_depth = float(order_book.get("bid_depth_wide_usd", 0) or 0)
+    return max(0.0, min(
+        fast_depth * EXEC_Q_MAX_NOTIONAL_FAST_DEPTH_RATIO,
+        wide_depth * EXEC_Q_MAX_NOTIONAL_WIDE_DEPTH_RATIO,
+    ))
+
+
+def _execution_funding_cost_r(result: dict, *, stop_pct: float) -> float:
+    if stop_pct <= 0:
+        return 0.0
+    f = result.get("features") or {}
+    funding_rate = f.get("funding_rate")
+    if funding_rate is None:
+        return 0.0
+    try:
+        funding_pct = float(funding_rate) / 100.0
+    except (TypeError, ValueError):
+        return 0.0
+    direction = result.get("signal")
+    signed_cost_pct = funding_pct if direction == "LONG" else -funding_pct
+    carry_cost_pct = max(0.0, signed_cost_pct) * (EXEC_Q_FUNDING_HOLD_HOURS / 8.0)
+    return carry_cost_pct / stop_pct
+
+
+def evaluate_execution_quality(
+    result: dict,
+    *,
+    planned_notional_usd: Optional[float] = None,
+    stop_pct: Optional[float] = None,
+) -> dict:
+    """Execution Quality Layer v1: spread + depth + impact + funding filtresi."""
+    if not EXECUTION_QUALITY_ENABLED:
+        return {"enabled": False, "status": "PASS", "allowed": True, "risk_multiplier": 1.0, "reason": "Execution Quality kapalı.", "reasons": ["Execution Quality kapalı."]}
+
+    signal = result.get("signal")
+    if signal not in {"LONG", "SHORT"}:
+        return {"enabled": True, "status": "PASS", "allowed": True, "risk_multiplier": 1.0, "reason": "Sinyal yok.", "reasons": ["Sinyal yok."]}
+
+    f = result.get("features") or {}
+    group = result.get("group", "CORE")
+    spread_bps = float(f.get("spread_bps", 999.0) or 999.0)
+    slippage_bps = _exec_slippage_bps(group)
+    estimated_entry_cost_bps = spread_bps / 2.0 + slippage_bps + PAPER_FEE_BPS
+    max_cost = _exec_group_value(group, EXEC_Q_MAX_ENTRY_COST_BPS_CORE, EXEC_Q_MAX_ENTRY_COST_BPS_HIGH_BETA)
+    max_impact = _exec_group_value(group, EXEC_Q_MAX_MARKET_IMPACT_BPS_CORE, EXEC_Q_MAX_MARKET_IMPACT_BPS_HIGH_BETA)
+    min_fast = _exec_group_value(group, EXEC_Q_MIN_FAST_DEPTH_USD_CORE, EXEC_Q_MIN_FAST_DEPTH_USD_HIGH_BETA)
+    min_wide = _exec_group_value(group, EXEC_Q_MIN_WIDE_DEPTH_USD_CORE, EXEC_Q_MIN_WIDE_DEPTH_USD_HIGH_BETA)
+    max_funding_r = _exec_group_value(group, EXEC_Q_MAX_FUNDING_COST_R_CORE, EXEC_Q_MAX_FUNDING_COST_R_HIGH_BETA)
+
+    reasons: list[str] = []
+    status = "PASS"
+    risk_mult = 1.0
+    allowed = True
+    order_book = f.get("order_book") or {}
+
+    if estimated_entry_cost_bps > max_cost:
+        status, allowed, risk_mult = "BLOCKED", False, 0.0
+        reasons.append(f"Entry maliyeti yüksek: {estimated_entry_cost_bps:.1f} bps > {max_cost:.1f} bps.")
+    else:
+        reasons.append(f"Entry maliyeti uygun: {estimated_entry_cost_bps:.1f} bps.")
+
+    if not order_book.get("available"):
+        msg = f"Depth verisi yok: {order_book.get('reason', 'bilinmiyor')}"
+        if EXEC_Q_DEPTH_FAILURE_MODE == "BLOCK":
+            status, allowed, risk_mult = "BLOCKED", False, 0.0
+        elif EXEC_Q_DEPTH_FAILURE_MODE == "WARN" and status != "BLOCKED":
+            status, risk_mult = "WARN", min(risk_mult, 0.70)
+        reasons.append(msg)
+        return {
+            "enabled": True,
+            "status": status,
+            "allowed": allowed,
+            "risk_multiplier": round(float(risk_mult), 3),
+            "estimated_entry_cost_bps": round(estimated_entry_cost_bps, 3),
+            "market_impact_bps": None,
+            "depth_fast_usd": None,
+            "depth_wide_usd": None,
+            "suggested_notional_cap_usd": None,
+            "funding_cost_r": None,
+            "reason": reasons[0] if reasons else status,
+            "reasons": reasons[:8],
+        }
+
+    if signal == "LONG":
+        depth_fast = float(order_book.get("ask_depth_fast_usd", 0) or 0)
+        depth_wide = float(order_book.get("ask_depth_wide_usd", 0) or 0)
+    else:
+        depth_fast = float(order_book.get("bid_depth_fast_usd", 0) or 0)
+        depth_wide = float(order_book.get("bid_depth_wide_usd", 0) or 0)
+
+    if depth_fast < min_fast or depth_wide < min_wide:
+        if status != "BLOCKED":
+            status, risk_mult = "WARN", min(risk_mult, 0.65)
+        reasons.append(f"Depth ince: fast {depth_fast:,.0f}$ / wide {depth_wide:,.0f}$.")
+    else:
+        reasons.append(f"Depth yeterli: fast {depth_fast:,.0f}$ / wide {depth_wide:,.0f}$.")
+
+    notional_cap = _execution_quality_notional_cap(order_book, direction=signal)
+    impact = {"impact_bps": None, "filled_ratio": None, "avg_price": None}
+    if planned_notional_usd is not None and planned_notional_usd > 0:
+        impact = estimate_market_impact_bps(order_book, direction=signal, notional_usd=float(planned_notional_usd))
+        impact_bps = impact.get("impact_bps")
+        filled_ratio = float(impact.get("filled_ratio") or 0.0)
+        if filled_ratio < 0.999:
+            status, allowed, risk_mult = "BLOCKED", False, 0.0
+            reasons.append(f"Order book bu notional'ı dolduramıyor; fill ratio {filled_ratio:.3f}.")
+        elif impact_bps is not None and float(impact_bps) > max_impact:
+            if notional_cap >= EXEC_Q_MIN_NOTIONAL_CAP_USD:
+                if status != "BLOCKED":
+                    status, risk_mult = "WARN", min(risk_mult, 0.55)
+                reasons.append(f"Market impact yüksek: {float(impact_bps):.1f} bps; notional cap önerildi.")
+            else:
+                status, allowed, risk_mult = "BLOCKED", False, 0.0
+                reasons.append(f"Market impact yüksek ve cap yetersiz: {float(impact_bps):.1f} bps.")
+        else:
+            reasons.append(f"Tahmini market impact uygun: {float(impact_bps or 0):.1f} bps.")
+
+    effective_stop_pct = float(stop_pct or TRADE_PLAN_CONFIG.get(group, {}).get("stop_pct", 0.02) or 0.02)
+    funding_cost_r = _execution_funding_cost_r(result, stop_pct=effective_stop_pct)
+    if funding_cost_r > max_funding_r:
+        if status != "BLOCKED":
+            status, risk_mult = "WARN", min(risk_mult, 0.70)
+        reasons.append(f"Funding carry maliyeti yüksek: {funding_cost_r:.2f}R.")
+    elif funding_cost_r > 0:
+        reasons.append(f"Funding carry maliyeti kabul edilebilir: {funding_cost_r:.2f}R.")
+
+    if notional_cap and notional_cap < EXEC_Q_MIN_NOTIONAL_CAP_USD:
+        status, allowed, risk_mult = "BLOCKED", False, 0.0
+        reasons.append(f"Likiditeye göre notional cap çok düşük: {notional_cap:,.2f}$.")
+
+    return {
+        "enabled": True,
+        "status": status,
+        "allowed": bool(allowed),
+        "risk_multiplier": round(float(risk_mult), 3),
+        "estimated_entry_cost_bps": round(estimated_entry_cost_bps, 3),
+        "market_impact_bps": impact.get("impact_bps"),
+        "impact_avg_price": impact.get("avg_price"),
+        "impact_filled_ratio": impact.get("filled_ratio"),
+        "depth_fast_usd": round(depth_fast, 4),
+        "depth_wide_usd": round(depth_wide, 4),
+        "suggested_notional_cap_usd": round(notional_cap, 4) if notional_cap else None,
+        "funding_cost_r": round(funding_cost_r, 4),
+        "reason": reasons[0] if reasons else status,
+        "reasons": reasons[:8],
+    }
+
+
+def format_execution_quality_brief(results: Optional[list[dict]] = None) -> str:
+    if not EXECUTION_QUALITY_ENABLED:
+        return "ExecQ: kapalı"
+    if not results:
+        return "ExecQ: veri yok"
+    checks = [r.get("execution_quality") or {} for r in results if r.get("execution_quality")]
+    if not checks:
+        return "ExecQ: aktif kontrol yok"
+    blocked = sum(1 for c in checks if c.get("status") == "BLOCKED")
+    warn = sum(1 for c in checks if c.get("status") == "WARN")
+    avg_costs = [float(c.get("estimated_entry_cost_bps")) for c in checks if c.get("estimated_entry_cost_bps") is not None]
+    avg_cost = sum(avg_costs) / len(avg_costs) if avg_costs else 0.0
+    return f"ExecQ: PASS {len(checks)-blocked-warn} / WARN {warn} / BLOCK {blocked} | avg cost {avg_cost:.1f} bps"
 
 
 # ============================================================
@@ -2842,6 +3297,49 @@ def build_trade_plan(result: dict) -> Optional[dict]:
     risk_pct = float(position_sizing["risk_pct"])
     risk_amount = float(position_sizing["risk_amount"])
     position_notional = float(position_sizing["position_notional"])
+
+    # Execution Quality final check: planlanan notional order book'a göre pahalıysa
+    # pozisyonu küçültür; execution kalitesi tamamen bozuksa plan üretmez.
+    execution_quality = evaluate_execution_quality(
+        result,
+        planned_notional_usd=position_notional,
+        stop_pct=stop_pct,
+    )
+    if not execution_quality.get("allowed", True):
+        log.info(
+            "%s trade plan iptal: Execution Quality %s — %s",
+            result.get("symbol"),
+            execution_quality.get("status"),
+            execution_quality.get("reason"),
+        )
+        return None
+
+    notional_cap = execution_quality.get("suggested_notional_cap_usd")
+    if notional_cap is not None:
+        try:
+            notional_cap_f = float(notional_cap)
+        except (TypeError, ValueError):
+            notional_cap_f = 0.0
+        if notional_cap_f >= EXEC_Q_MIN_NOTIONAL_CAP_USD and position_notional > notional_cap_f:
+            original_notional = position_notional
+            position_notional = notional_cap_f
+            risk_amount = position_notional * stop_pct
+            equity_used = float(position_sizing.get("equity_used_usd", ACCOUNT_SIZE_USD) or ACCOUNT_SIZE_USD)
+            risk_pct = risk_amount / equity_used if equity_used > 0 else 0.0
+            position_sizing["execution_quality_adjusted"] = True
+            position_sizing["original_position_notional"] = original_notional
+            position_sizing["position_notional"] = position_notional
+            position_sizing["risk_amount"] = risk_amount
+            position_sizing["risk_pct"] = risk_pct
+            position_sizing.setdefault("reasons", []).append(
+                f"Execution Quality notional cap: {original_notional:,.2f}$ → {position_notional:,.2f}$"
+            )
+            execution_quality = evaluate_execution_quality(
+                result,
+                planned_notional_usd=position_notional,
+                stop_pct=stop_pct,
+            )
+
     quantity = position_notional / reference_entry if reference_entry > 0 else 0
 
     # R:R sanity check — trader'a görünür olsun
@@ -2853,6 +3351,7 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         "risk_pct": risk_pct,
         "risk_amount": risk_amount,
         "position_sizing": position_sizing,
+        "execution_quality": copy.deepcopy(execution_quality),
         "entry_engine": copy.deepcopy(result.get("entry_engine", {})),
         "regime_commander": copy.deepcopy(result.get("regime_commander", {})),
         "reference_entry": reference_entry,
@@ -2886,6 +3385,7 @@ def format_trade_plan_block(plan: Optional[dict]) -> list[str]:
         f"Hesap: {format_money(plan['account_size'])}",
         f"İşlem Riski: %{plan['risk_pct'] * 100:.2f} = {format_money(plan['risk_amount'])}",
         format_position_sizing_brief(plan.get("position_sizing")),
+        f"Execution Quality: {(plan.get('execution_quality') or {}).get('status', '-')} | Cost {(plan.get('execution_quality') or {}).get('estimated_entry_cost_bps', '-')} bps | Impact {(plan.get('execution_quality') or {}).get('market_impact_bps', '-')}",
         f"Önerilen Notional: {format_money(plan['position_notional'])}",
         f"Yaklaşık Miktar: {plan['quantity']:.6f}",
         "Not: Sinyal geldi diye anlık piyasa emri şart değildir; entry bölgesine pullback beklemek daha sağlıklıdır.",
@@ -3436,7 +3936,7 @@ def persist_paper_execution_report(state_mgr: StateManager = _STATE_MGR) -> dict
 def format_paper_execution_brief(state_mgr: StateManager = _STATE_MGR) -> str:
     return paper_execution_report(state_mgr).get("summary", "PaperExec: rapor yok")
 
-def detect_market_regime(btc: dict, eth: dict, news_context: dict) -> dict:
+def detect_market_regime(btc: dict, eth: dict, news_context: dict, macro_context: Optional[dict] = None) -> dict:
     """Market Regime Engine v2.
 
     Üst akıl: aynı sinyal, her rejimde aynı anlama gelmez. Bu fonksiyon
@@ -3446,6 +3946,9 @@ def detect_market_regime(btc: dict, eth: dict, news_context: dict) -> dict:
     news_risk = float(news_context.get("news_risk_score", 0) or 0)
     category = news_context.get("category") or "NONE"
     match_count = int(news_context.get("match_count", 0) or 0)
+    macro_context = macro_context or default_macro_risk_context("macro_context_missing")
+    macro_score = float(macro_context.get("risk_score", 0.0) or 0.0)
+    macro_regime = macro_context.get("regime", "MACRO_NEUTRAL")
 
     btc_mtf = score_mtf(btc)
     eth_mtf = score_mtf(eth)
@@ -3457,6 +3960,8 @@ def detect_market_regime(btc: dict, eth: dict, news_context: dict) -> dict:
     btc_funding = float(btc_funding) if btc_funding is not None else 0.0
 
     notes: list[str] = []
+    if macro_regime not in ("MACRO_NEUTRAL", "MACRO_UNKNOWN"):
+        notes.append(f"MacroRisk={macro_regime}, score={macro_score:.2f}.")
 
     if abs(news_risk) >= REGIME_CONFIG["news_chaos_abs"] or (
         category in ("WAR", "CRYPTO_RISK")
@@ -3481,6 +3986,7 @@ def detect_market_regime(btc: dict, eth: dict, news_context: dict) -> dict:
         notes.append("Pozitif funding + aşağı kırılım: long liquidation ihtimali.")
     elif (
         news_risk <= REGIME_CONFIG["risk_off_news"]
+        or macro_score <= MACRO_RISK_STRONG_OFF_THRESHOLD
         or (btc_mtf < -1.4 and eth_mtf < -0.6 and btc_4h < -REGIME_CONFIG["trend_ret_4h"])
         or (btc_24h < -REGIME_CONFIG["trend_ret_24h"] and eth_24h < -REGIME_CONFIG["trend_ret_24h"])
     ):
@@ -3491,6 +3997,7 @@ def detect_market_regime(btc: dict, eth: dict, news_context: dict) -> dict:
         and eth_24h - btc_24h >= REGIME_CONFIG["altseason_eth_outperf"]
         and eth_mtf > 0.8
         and news_risk >= -0.5
+        and macro_score > MACRO_RISK_OFF_THRESHOLD
     ):
         regime_name = "RISK_ON_ALTSEASON"
         notes.append("ETH BTC'ye göre güçlü; altcoin risk iştahı proxy'si pozitif.")
@@ -3500,6 +4007,7 @@ def detect_market_regime(btc: dict, eth: dict, news_context: dict) -> dict:
         and btc_4h > REGIME_CONFIG["trend_ret_4h"]
         and btc_24h > 0
         and news_risk > -1.0
+        and macro_score > MACRO_RISK_OFF_THRESHOLD
     ):
         regime_name = "RISK_ON_TREND_UP"
         notes.append("BTC/ETH üst zaman dilimlerinde yukarı trend teyitli.")
@@ -3526,7 +4034,7 @@ def detect_market_regime(btc: dict, eth: dict, news_context: dict) -> dict:
         "regime": regime_name,
         "score": score_map.get(regime_name, 0),
         "direction_bias": strategy["direction_bias"],
-        "risk_multiplier": strategy["risk_multiplier"],
+        "risk_multiplier": round(float(strategy["risk_multiplier"]) * float(macro_context.get("risk_multiplier", 1.0) or 1.0), 4),
         "min_quality": strategy["min_quality"],
         "high_beta_allowed": strategy["high_beta_allowed"],
         "allow_long": strategy["allow_long"],
@@ -3541,8 +4049,11 @@ def detect_market_regime(btc: dict, eth: dict, news_context: dict) -> dict:
             "btc_24h": round(btc_24h, 2),
             "eth_24h": round(eth_24h, 2),
             "news_risk": news_risk,
+            "macro_risk_score": round(macro_score, 3),
+            "macro_regime": macro_regime,
             "btc_funding": round(btc_funding, 4),
         },
+        "macro_context": macro_context,
     }
 
 
@@ -3788,6 +4299,7 @@ def apply_trade_filters(result: dict) -> dict:
     pc = result.get("portfolio_check") or {}
     rc = result.get("regime_commander") or {}
     ee = result.get("entry_engine") or {}
+    eq = result.get("execution_quality") or {}
     rg = result.get("risk_governor") or {}
     corr = result.get("portfolio_correlation") or {}
     reg_edge = result.get("regime_edge_guard") or {}
@@ -3805,6 +4317,8 @@ def apply_trade_filters(result: dict) -> dict:
         veto_reason = f"Trade quality filtresi: {tq.get('grade', '-')}"
     elif ee and ee.get("status") == "BLOCKED":
         veto_reason = f"Entry engine: {ee.get('reason', '-')}"
+    elif eq and eq.get("status") == "BLOCKED":
+        veto_reason = f"Execution quality: {eq.get('reason', '-')}"
     elif ENTRY_ENGINE_REQUIRE_READY and ee and ee.get("status") == "WAIT_PULLBACK":
         veto_reason = f"Entry bekleniyor: {ee.get('reason', '-')}"
     elif pc and not pc.get("allowed", True):
@@ -4423,6 +4937,8 @@ def risk_governor_snapshot(state_mgr: StateManager = _STATE_MGR, regime: Optiona
     avg_slip = _rg_avg_paper_slippage_bps()
     failures = int(state_mgr.get_meta("consecutive_failures", 0) or 0)
     paused_until = int(state_mgr.get_meta("risk_pause_until", 0) or 0)
+    now_for_pause = now_ts()
+    pause_active = bool(paused_until and now_for_pause < paused_until)
     rg_name = (regime or state_mgr.get_meta("last_global_regime", {}) or {}).get("regime")
 
     mode = "NORMAL"
@@ -4439,9 +4955,9 @@ def risk_governor_snapshot(state_mgr: StateManager = _STATE_MGR, regime: Optiona
             mode, risk_mult = "DEFENSIVE", min(risk_mult, cg_mult)
             reasons.append(f"Capital Guard: {capital_guard.get('reason', '-')}")
 
-    if paused_until and now_ts() < paused_until:
+    if pause_active:
         mode, allow, risk_mult = "STOP", False, 0.0
-        reasons.append(f"Manuel/otomatik pause aktif: {max(0, (paused_until-now_ts())//60)} dk kaldı.")
+        reasons.append(f"Manuel/otomatik pause aktif: {max(0, (paused_until-now_for_pause)//60)} dk kaldı.")
     if daily_pct <= -RISK_MAX_DAILY_LOSS_PCT:
         mode, allow, risk_mult = "STOP", False, 0.0
         reasons.append(f"Günlük zarar limiti aşıldı: %{daily_pct*100:.2f}.")
@@ -4456,7 +4972,12 @@ def risk_governor_snapshot(state_mgr: StateManager = _STATE_MGR, regime: Optiona
         reasons.append(f"Drawdown defensive eşiği: %{dd*100:.2f}.")
     if loss_streak >= RISK_LOSS_STREAK_PAUSE:
         mode, allow, risk_mult = "STOP", False, 0.0
-        state_mgr.set_meta("risk_pause_until", now_ts() + RISK_PAUSE_SECONDS)
+        if not pause_active:
+            state_mgr.set_meta("risk_pause_until", now_for_pause + RISK_PAUSE_SECONDS)
+            try:
+                state_mgr.save()
+            except Exception as e:
+                log.warning("Risk pause state kaydedilemedi: %s", e)
         reasons.append(f"Loss streak pause: {loss_streak}.")
     elif loss_streak >= RISK_LOSS_STREAK_DEFENSIVE and mode != "STOP":
         mode, risk_mult = "DEFENSIVE", min(risk_mult, 0.60)
@@ -4608,7 +5129,7 @@ def regime_edge_guard(result: dict, state_mgr: StateManager = _STATE_MGR) -> dic
         # Grup eşleşmesini önceliklendir; aynı rejim+yön+grup ana örneklem.
         if group and t.get("group") != group:
             continue
-        pnl_pct = float(t.get("pm_realized_pnl_pct", t.get("pnl_pct", 0)) or 0)
+        pnl_pct = trade_realized_pnl_pct(t)
         pnl_usd = _rg_trade_realized_usd(t)
         rows.append({
             "symbol": t.get("symbol"),
@@ -4689,6 +5210,313 @@ def format_regime_edge_brief(state_mgr: StateManager = _STATE_MGR) -> str:
         f"worst {worst_key[0]}/{worst_key[1]}/{worst_key[2]} {format_money(worst_avg)} avg"
     )
 
+
+
+
+# ============================================================
+# REGIME PERFORMANCE DASHBOARD v1
+# ============================================================
+
+def _dashboard_regime_name(t: dict) -> str:
+    reg = t.get("regime")
+    if isinstance(reg, dict):
+        return str(reg.get("regime") or reg.get("name") or "UNKNOWN")
+    if reg:
+        return str(reg)
+    return "UNKNOWN"
+
+
+def _dashboard_quality_grade(t: dict) -> str:
+    tq = t.get("trade_quality")
+    if isinstance(tq, dict):
+        return str(tq.get("grade") or t.get("quality_grade") or "UNKNOWN")
+    return str(t.get("quality_grade") or "UNKNOWN")
+
+
+def _dashboard_trade_ts(t: dict) -> int:
+    raw = t.get("closed_at") or t.get("exit_ts") or t.get("opened_at") or t.get("entry_ts") or 0
+    try:
+        ts = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    # Historical replay timestamps are in milliseconds.
+    if ts > 10_000_000_000:
+        ts //= 1000
+    return ts
+
+
+def _dashboard_trade_values(t: dict) -> dict:
+    """Normalize live/paper tracked trades and historical replay trades.
+
+    Live tracked trades use PM/Paper-aware realized PnL helpers. Replay trades
+    carry pnl_r and equity_return_pct, so we convert them to the same schema.
+    """
+    if "pnl_r" in t:
+        try:
+            pnl_r = float(t.get("pnl_r") or 0.0)
+        except (TypeError, ValueError):
+            pnl_r = 0.0
+        try:
+            pnl_pct = float(t.get("equity_return_pct"))
+        except (TypeError, ValueError):
+            pnl_pct = pnl_r * float(HISTORICAL_REPLAY_RISK_PCT)
+        try:
+            pnl_usd = float(t.get("pnl_usd"))
+        except (TypeError, ValueError):
+            pnl_usd = float(ACCOUNT_SIZE_USD) * pnl_pct
+        return {"pnl_pct": pnl_pct, "pnl_usd": pnl_usd, "r_multiple": pnl_r, "win": pnl_r > 0}
+
+    pnl_pct = trade_realized_pnl_pct(t)
+    pnl_usd = _rg_trade_realized_usd(t)
+    stop_pct = None
+    try:
+        group = t.get("group") or COINS.get(t.get("symbol", ""), "CORE")
+        stop_pct = float((t.get("trade_plan") or {}).get("stop_pct") or TRADE_PLAN_CONFIG.get(group, {}).get("stop_pct") or 0.0)
+    except Exception:
+        stop_pct = None
+    r_multiple = None
+    if stop_pct and stop_pct > 0:
+        r_multiple = pnl_pct / stop_pct
+    return {"pnl_pct": pnl_pct, "pnl_usd": pnl_usd, "r_multiple": r_multiple, "win": pnl_usd > 0 or pnl_pct > 0}
+
+
+def _dashboard_rows(trades: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        # Live trades require result; replay trades are already closed records.
+        if "pnl_r" not in t and t.get("result") is None:
+            continue
+        vals = _dashboard_trade_values(t)
+        rows.append({
+            "symbol": str(t.get("symbol") or "UNKNOWN"),
+            "group": str(t.get("group") or COINS.get(str(t.get("symbol") or ""), "UNKNOWN")),
+            "direction": str(t.get("direction") or "UNKNOWN"),
+            "regime": _dashboard_regime_name(t),
+            "quality_grade": _dashboard_quality_grade(t),
+            "pnl_pct": float(vals.get("pnl_pct") or 0.0),
+            "pnl_usd": float(vals.get("pnl_usd") or 0.0),
+            "r_multiple": vals.get("r_multiple"),
+            "win": bool(vals.get("win")),
+            "ts": _dashboard_trade_ts(t),
+            "reason": str(t.get("reason") or t.get("exit_reason") or t.get("result") or ""),
+        })
+    rows.sort(key=lambda r: r.get("ts", 0))
+    if REGIME_DASHBOARD_LOOKBACK_TRADES > 0:
+        rows = rows[-REGIME_DASHBOARD_LOOKBACK_TRADES:]
+    return rows
+
+
+def _dashboard_metrics(rows: list[dict]) -> dict:
+    if not rows:
+        return {
+            "sample": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": None,
+            "profit_factor": None,
+            "expectancy_pct": None,
+            "avg_pnl_pct": None,
+            "total_pnl_usd": 0.0,
+            "max_trade_drawdown_pct": 0.0,
+            "avg_r": None,
+            "label": "NO_DATA",
+            "action": "WAIT_FOR_DATA",
+        }
+    pnls = [float(r["pnl_pct"]) for r in rows]
+    usd = [float(r["pnl_usd"]) for r in rows]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
+    win_count = len(wins)
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    profit_factor = gross_win / gross_loss if gross_loss > 0 else (None if gross_win <= 0 else float("inf"))
+    expectancy = sum(pnls) / len(pnls)
+    avg_win = sum(wins) / len(wins) if wins else None
+    avg_loss = sum(losses) / len(losses) if losses else None
+    payoff = abs(avg_win / avg_loss) if avg_win is not None and avg_loss not in (None, 0) else None
+
+    equity = peak = 1.0
+    max_dd = 0.0
+    for p in pnls:
+        equity *= max(0.0001, 1.0 + p)
+        peak = max(peak, equity)
+        max_dd = max(max_dd, (peak - equity) / peak if peak else 0.0)
+
+    r_vals = [float(r["r_multiple"]) for r in rows if r.get("r_multiple") is not None]
+    sample = len(rows)
+    win_rate = win_count / sample if sample else None
+    label = "INSUFFICIENT"
+    action = "WAIT_FOR_MORE_TRADES"
+    if sample >= REGIME_DASHBOARD_MIN_BUCKET_TRADES:
+        pf_bad = profit_factor is not None and profit_factor < 1.0
+        pf_ok = profit_factor is None or profit_factor >= REGIME_DASHBOARD_MIN_PROFIT_FACTOR
+        if expectancy <= REGIME_DASHBOARD_BAD_EXPECTANCY_PCT and pf_bad:
+            label, action = "BAD", "BLOCK_CANDIDATE"
+        elif expectancy < REGIME_DASHBOARD_MIN_EXPECTANCY_PCT or (win_rate is not None and win_rate < REGIME_DASHBOARD_MIN_WIN_RATE):
+            label, action = "WEAK", "REDUCE_RISK"
+        elif pf_ok and expectancy > 0:
+            label, action = "GOOD", "ALLOW_OR_SCALE_SELECTIVELY"
+        else:
+            label, action = "NEUTRAL", "ALLOW_SMALL_SIZE"
+
+    return {
+        "sample": sample,
+        "wins": win_count,
+        "losses": len(losses),
+        "win_rate": round(win_rate, 4) if win_rate is not None else None,
+        "profit_factor": round(profit_factor, 4) if isinstance(profit_factor, (int, float)) and profit_factor != float("inf") else ("inf" if profit_factor == float("inf") else None),
+        "expectancy_pct": round(expectancy, 6),
+        "avg_pnl_pct": round(expectancy, 6),
+        "avg_win_pct": round(avg_win, 6) if avg_win is not None else None,
+        "avg_loss_pct": round(avg_loss, 6) if avg_loss is not None else None,
+        "payoff_ratio": round(payoff, 4) if payoff is not None else None,
+        "total_pnl_usd": round(sum(usd), 4),
+        "max_trade_drawdown_pct": round(max_dd, 5),
+        "avg_r": round(sum(r_vals) / len(r_vals), 5) if r_vals else None,
+        "label": label,
+        "action": action,
+    }
+
+
+def _dashboard_bucket(rows: list[dict], key_fn) -> dict:
+    buckets: dict[str, list[dict]] = {}
+    for r in rows:
+        try:
+            key = str(key_fn(r))
+        except Exception:
+            key = "UNKNOWN"
+        buckets.setdefault(key, []).append(r)
+    out = {}
+    for key, bucket_rows in sorted(buckets.items()):
+        out[key] = _dashboard_metrics(bucket_rows)
+    return out
+
+
+def _dashboard_ranked(bucket: dict, *, reverse: bool, top_n: int) -> list[dict]:
+    rows = []
+    for key, metrics in bucket.items():
+        if int(metrics.get("sample", 0) or 0) < REGIME_DASHBOARD_MIN_BUCKET_TRADES:
+            continue
+        rows.append({"key": key, **metrics})
+    rows.sort(
+        key=lambda x: (
+            float(x.get("expectancy_pct") or 0.0),
+            float(x.get("total_pnl_usd") or 0.0),
+            float(x.get("win_rate") or 0.0),
+        ),
+        reverse=reverse,
+    )
+    return rows[:top_n]
+
+
+def regime_performance_dashboard_from_trades(trades: list[dict], *, source: str = "state") -> dict:
+    rows = _dashboard_rows(trades)
+    overall = _dashboard_metrics(rows)
+    by_regime = _dashboard_bucket(rows, lambda r: r["regime"])
+    by_direction = _dashboard_bucket(rows, lambda r: r["direction"])
+    by_group = _dashboard_bucket(rows, lambda r: r["group"])
+    by_symbol = _dashboard_bucket(rows, lambda r: r["symbol"])
+    by_quality = _dashboard_bucket(rows, lambda r: r["quality_grade"])
+    by_regime_direction = _dashboard_bucket(rows, lambda r: f"{r['regime']}|{r['direction']}")
+    by_regime_direction_group = _dashboard_bucket(rows, lambda r: f"{r['regime']}|{r['direction']}|{r['group']}")
+
+    ready_buckets = [m for m in by_regime_direction_group.values() if int(m.get("sample", 0) or 0) >= REGIME_DASHBOARD_MIN_BUCKET_TRADES]
+    pass_buckets = [m for m in ready_buckets if m.get("label") in {"GOOD", "NEUTRAL"}]
+    weak_buckets = [m for m in ready_buckets if m.get("label") == "WEAK"]
+    bad_buckets = [m for m in ready_buckets if m.get("label") == "BAD"]
+    pass_rate = len(pass_buckets) / len(ready_buckets) if ready_buckets else 0.0
+    dashboard_ready = int(overall.get("sample", 0) or 0) >= REGIME_DASHBOARD_MIN_BUCKET_TRADES
+    dashboard_passed = bool(
+        dashboard_ready
+        and overall.get("label") not in {"BAD"}
+        and pass_rate >= REGIME_DASHBOARD_MIN_LIVE_BUCKET_PASS_RATE
+    )
+
+    report = {
+        "enabled": REGIME_DASHBOARD_ENABLED,
+        "source": source,
+        "version": __version__,
+        "ready": dashboard_ready,
+        "passed": dashboard_passed,
+        "lookback_trades": REGIME_DASHBOARD_LOOKBACK_TRADES,
+        "min_bucket_trades": REGIME_DASHBOARD_MIN_BUCKET_TRADES,
+        "overall": overall,
+        "bucket_health": {
+            "ready_buckets": len(ready_buckets),
+            "pass_buckets": len(pass_buckets),
+            "weak_buckets": len(weak_buckets),
+            "bad_buckets": len(bad_buckets),
+            "pass_rate": round(pass_rate, 4),
+        },
+        "best_combinations": _dashboard_ranked(by_regime_direction_group, reverse=True, top_n=REGIME_DASHBOARD_TOP_N),
+        "worst_combinations": _dashboard_ranked(by_regime_direction_group, reverse=False, top_n=REGIME_DASHBOARD_TOP_N),
+        "by_regime": by_regime,
+        "by_direction": by_direction,
+        "by_group": by_group,
+        "by_symbol": by_symbol,
+        "by_quality": by_quality,
+        "by_regime_direction": by_regime_direction,
+        "by_regime_direction_group": by_regime_direction_group,
+        "notes": [
+            "PnL metrics use paper/PM-aware realized PnL when available.",
+            "BAD buckets are candidates for explicit blocking or severe risk reduction after sample size is sufficient.",
+            "INSUFFICIENT buckets should not be over-interpreted; collect more trades or use historical replay.",
+        ],
+        "updated_at": now_ts(),
+        "updated_at_tr": tr_now_text(),
+    }
+    report["summary"] = (
+        f"RegimeDash: {'PASS' if dashboard_passed else 'TRAINING'} | "
+        f"sample {overall.get('sample', 0)} | "
+        f"PF {overall.get('profit_factor')} | "
+        f"Exp %{float(overall.get('expectancy_pct') or 0.0) * 100:.2f} | "
+        f"bad {len(bad_buckets)}"
+    )
+    return report
+
+
+def regime_performance_dashboard(state_mgr: StateManager = _STATE_MGR) -> dict:
+    if not REGIME_DASHBOARD_ENABLED:
+        return {
+            "enabled": False,
+            "ready": True,
+            "passed": True,
+            "summary": "RegimeDash: kapalı.",
+            "updated_at": now_ts(),
+            "updated_at_tr": tr_now_text(),
+        }
+    report = regime_performance_dashboard_from_trades(_rg_closed_trades(state_mgr), source="state")
+    _safe_write_json(REGIME_DASHBOARD_REPORT_FILE, report)
+    return report
+
+
+def regime_dashboard_allows_live(state_mgr: StateManager = _STATE_MGR) -> bool:
+    if not REGIME_DASHBOARD_ENABLED or not REGIME_DASHBOARD_REQUIRE_LIVE_PASS:
+        return True
+    return bool(regime_performance_dashboard(state_mgr).get("passed"))
+
+
+def format_regime_dashboard_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    try:
+        dash = regime_performance_dashboard(state_mgr)
+    except Exception as e:
+        return f"RegimeDash: hata ({type(e).__name__})"
+    if not dash.get("enabled", True):
+        return dash.get("summary", "RegimeDash: kapalı")
+    overall = dash.get("overall") or {}
+    health = dash.get("bucket_health") or {}
+    best = (dash.get("best_combinations") or [{}])[0]
+    worst = (dash.get("worst_combinations") or [{}])[0]
+    best_txt = best.get("key", "-")
+    worst_txt = worst.get("key", "-")
+    return (
+        f"RegimeDash: {'PASS' if dash.get('passed') else 'TRAIN'} | "
+        f"n {overall.get('sample', 0)} | PF {overall.get('profit_factor')} | "
+        f"Exp %{float(overall.get('expectancy_pct') or 0.0) * 100:.2f} | "
+        f"bad {health.get('bad_buckets', 0)} | best {best_txt} | worst {worst_txt}"
+    )
 
 
 # ============================================================
@@ -4848,14 +5676,14 @@ def _ml_trade_rows(state_mgr: StateManager = _STATE_MGR) -> list[dict]:
     for t in state_mgr.get_trades().values():
         if not isinstance(t, dict) or t.get("result") is None:
             continue
-        pnl = float(t.get("pnl_pct", 0) or 0)
+        pnl = trade_realized_pnl_pct(t)
         rows.append({
             "source": "tracking",
             "symbol": t.get("symbol"),
             "group": t.get("group"),
             "direction": t.get("direction"),
             "pnl_pct": pnl,
-            "correct": pnl > 0 or t.get("result") == "WIN",
+            "correct": pnl > 0,
             "regime": (t.get("regime") or {}).get("regime"),
             "raw": t.get("raw") or {},
         })
@@ -4970,6 +5798,7 @@ def ml_validation_learning_cycle(results_by_symbol: dict, state_mgr: StateManage
 def live_readiness_report(state_mgr: StateManager = _STATE_MGR) -> dict:
     edge = edge_analysis(state_mgr)
     rg = risk_governor_snapshot(state_mgr)
+    regime_dashboard = regime_performance_dashboard(state_mgr) if 'regime_performance_dashboard' in globals() else {"ready": False, "passed": False}
     paper = paper_execution_report(state_mgr) if 'paper_execution_report' in globals() else {"ready": False}
     capital_guard = rg.get("capital_milestone_guard") or {}
     closed = int(edge.get("closed_trades", 0) or 0)
@@ -4986,6 +5815,7 @@ def live_readiness_report(state_mgr: StateManager = _STATE_MGR) -> dict:
         "drawdown_ok": dd_ok,
         "paper_ok": paper_ok,
         "ml_validation_ok": bool(mlv.get("passed")),
+        "regime_dashboard_ok": (not REGIME_DASHBOARD_REQUIRE_LIVE_PASS) or bool(regime_dashboard.get("passed")),
         "risk_mode_ok": rg.get("mode") not in {"STOP"},
         "capital_guard_ok": capital_guard.get("mode") not in {"STOP"},
         "live_keys_present": bool(MEXC_API_KEY and MEXC_API_SECRET),
@@ -5000,6 +5830,7 @@ def live_readiness_report(state_mgr: StateManager = _STATE_MGR) -> dict:
         "profit_factor": pf,
         "drawdown_pct": rg.get("drawdown_pct"),
         "paper": paper,
+        "regime_performance_dashboard": regime_dashboard,
         "capital_milestone_guard": capital_guard,
         "ml_validation": mlv,
         "summary": "LIVE_READY" if ready else "LIVE_NOT_READY_SAFE_GUARD",
@@ -5166,6 +5997,7 @@ def format_trade_open_msg(t: dict) -> str:
         f"Regime: {regime.get('regime', '-')}\n"
         f"Bias: {regime.get('direction_bias', '-')}, Risk x{regime.get('risk_multiplier', '-')}\n"
         f"Entry: {(t.get('entry_engine') or {}).get('status', '-')} — {(t.get('entry_engine') or {}).get('reason', '-')}\n"
+        f"ExecQ: {(t.get('execution_quality') or {}).get('status', '-')} | Cost {(t.get('execution_quality') or {}).get('estimated_entry_cost_bps', '-')} bps | Impact {(t.get('execution_quality') or {}).get('market_impact_bps', '-')} bps\n"
         f"Risk: {format_money(t.get('risk_amount'))} (%{float(t.get('risk_pct', 0))*100:.2f}) | Notional: {format_money(t.get('position_notional'))}\n"
         f"{format_position_sizing_brief(t.get('position_sizing'))}\n"
         f"{format_position_management_brief(t)}\n"
@@ -5186,7 +6018,7 @@ def format_trade_close_msg(t: dict) -> str:
         f"Result: {t['result']}\n"
         f"Close Reason: {t.get('close_reason', '-')}\n"
         f"Exit Price: {format_price(t.get('exit_price'))}\n\n"
-        f"Classic PnL: %{t.get('pnl_pct', 0) * 100:.2f}\n"
+        f"Classic PnL: %{float(t.get('classic_pnl_pct', t.get('pnl_pct', 0)) or 0) * 100:.2f}\n"
         f"PM Realized: {format_money(pm.get('final_realized_pnl_usd', t.get('pm_realized_pnl_usd')))} (%{float(pm.get('final_realized_pnl_pct', t.get('pm_realized_pnl_pct', 0)))*100:.2f})\n"
         f"Paper Net PnL: {format_money((t.get('paper_execution') or {}).get('net_pnl_usd'))} (%{float((t.get('paper_execution') or {}).get('net_pnl_pct', 0))*100:.2f})\n"
         f"Paper Fees: {format_money((t.get('paper_execution') or {}).get('total_fee_usd'))}\n"
@@ -5248,6 +6080,7 @@ def open_trade(result: dict, plan: dict, state_mgr: StateManager = _STATE_MGR) -
         "position_notional": float(plan.get("position_notional", 0)),
         "quantity": float(plan.get("quantity", 0)),
         "position_sizing": copy.deepcopy(plan.get("position_sizing", {})),
+        "execution_quality": copy.deepcopy(plan.get("execution_quality", {})),
         "entry_engine": copy.deepcopy(plan.get("entry_engine", {})),
         "regime_commander": copy.deepcopy(plan.get("regime_commander", {})),
         "opened_at": now_ts(),
@@ -5302,8 +6135,18 @@ def close_trade(trades: dict, tid: str, t: dict, price: float, result: str, reas
     t["close_reason"] = reason
     t["closed_at"] = now_ts()
     t["exit_price"] = float(price)
-    t["pnl_pct"] = _trade_pnl(t["direction"], float(t["entry"]), float(price))
+    classic_pnl_pct = _trade_pnl(t["direction"], float(t["entry"]), float(price))
+    t["classic_pnl_pct"] = classic_pnl_pct
+    t["pnl_pct"] = classic_pnl_pct
     paper_close_trade(t, float(price), reason)
+    realized_pnl_pct = trade_realized_pnl_pct(t)
+    t["realized_pnl_pct"] = realized_pnl_pct
+    t["pnl_pct"] = realized_pnl_pct
+    # Keep result semantics aligned with the PM/paper-aware realized outcome.
+    if realized_pnl_pct > 0 and result in {"EXIT", "LOSS"}:
+        t["result"] = "WIN"
+    elif realized_pnl_pct < 0 and result in {"EXIT", "WIN"}:
+        t["result"] = "LOSS"
     t["open_alert_pending"] = False
     _send_trade_notification(t, "close")
     trades[tid] = t
@@ -5344,7 +6187,7 @@ def update_trades(results_by_symbol: dict, state_mgr: StateManager = _STATE_MGR)
             continue
 
         trades[tid] = t
-        changed = True or pm_changed
+        changed = changed or bool(pm_changed)
 
     if changed:
         save_trades(trades, state_mgr)
@@ -5405,13 +6248,14 @@ def edge_analysis(state_mgr: StateManager = _STATE_MGR) -> dict:
     if not closed:
         return {"ready": False, "summary": "Henüz kapanmış trade yok."}
 
-    wins = [t for t in closed if t.get("result") == "WIN"]
-    losses = [t for t in closed if t.get("result") == "LOSS"]
+    pnl_by_trade = {id(t): trade_realized_pnl_pct(t) for t in closed}
+    wins = [t for t in closed if pnl_by_trade.get(id(t), 0.0) > 0]
+    losses = [t for t in closed if pnl_by_trade.get(id(t), 0.0) < 0]
     winrate = len(wins) / len(closed) * 100 if closed else 0.0
-    pnl_values = [float(t.get("pnl_pct", 0)) for t in closed]
+    pnl_values = [pnl_by_trade[id(t)] for t in closed]
     avg_pnl = sum(pnl_values) / len(pnl_values) * 100
-    win_pnls = [float(t.get("pnl_pct", 0)) for t in wins]
-    loss_pnls = [float(t.get("pnl_pct", 0)) for t in losses]
+    win_pnls = [pnl_by_trade[id(t)] for t in wins]
+    loss_pnls = [pnl_by_trade[id(t)] for t in losses]
     avg_win = sum(win_pnls) / len(win_pnls) * 100 if win_pnls else 0.0
     avg_loss = sum(loss_pnls) / len(loss_pnls) * 100 if loss_pnls else 0.0
     gross_win = sum(max(p, 0) for p in pnl_values)
@@ -5427,7 +6271,7 @@ def edge_analysis(state_mgr: StateManager = _STATE_MGR) -> dict:
         item = bucket.setdefault(key, {"total": 0, "wins": 0, "pnl_sum": 0.0})
         item["total"] += 1
         item["wins"] += 1 if trade.get("result") == "WIN" else 0
-        item["pnl_sum"] += float(trade.get("pnl_pct", 0)) * 100
+        item["pnl_sum"] += trade_realized_pnl_pct(trade) * 100
 
     for t in closed:
         bucket_update(by_symbol, t.get("symbol", "?"), t)
@@ -5471,12 +6315,7 @@ def _fi_trade_outcome(t: dict) -> Optional[int]:
     """1 = profitable/winning, 0 = losing. EXIT trades use pnl sign."""
     if t.get("result") is None:
         return None
-    result = t.get("result")
-    pnl = float(t.get("pnl_pct", 0) or 0)
-    if result == "WIN":
-        return 1
-    if result == "LOSS":
-        return 0
+    pnl = trade_realized_pnl_pct(t)
     return 1 if pnl > 0 else 0
 
 
@@ -5506,7 +6345,7 @@ def _fi_bucket_stats(trades: list[dict], components: tuple[str, ...]) -> dict:
             aligned = _fi_aligned_raw_value(t, comp)
             if outcome is None or aligned is None:
                 continue
-            pnl = float(t.get("pnl_pct", 0) or 0) * 100
+            pnl = trade_realized_pnl_pct(t) * 100
             rows.append({"aligned": aligned, "win": outcome, "pnl": pnl})
         if not rows:
             continue
@@ -5905,6 +6744,238 @@ def _safe_write_json(path: str, data) -> None:
     except OSError as e:
         log.warning("%s yazılamadı: %s", path, e)
 
+# ============================================================
+# MACRO RISK LAYER v1
+# ============================================================
+
+def default_macro_risk_context(reason: str = "neutral_fallback") -> dict:
+    return {
+        "enabled": bool(MACRO_RISK_ENABLED),
+        "provider": "NONE",
+        "regime": "MACRO_NEUTRAL" if MACRO_RISK_ENABLED else "MACRO_DISABLED",
+        "risk_score": 0.0,
+        "risk_multiplier": 1.0,
+        "direction_bias": "BALANCED",
+        "components": {},
+        "notes": [reason],
+        "updated_at": now_ts(),
+        "updated_at_tr": tr_now_text(),
+    }
+
+
+def _macro_yahoo_chart(symbol: str, *, period1: Optional[int] = None, period2: Optional[int] = None, range_: Optional[str] = None, interval: str = "1d") -> list[dict]:
+    """Fetch close series from Yahoo Finance chart endpoint without extra deps."""
+    params = {"interval": interval, "includePrePost": "false"}
+    if period1 is not None and period2 is not None:
+        params.update({"period1": int(period1), "period2": int(period2)})
+    else:
+        params["range"] = range_ or f"{MACRO_RISK_HISTORY_DAYS}d"
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol, safe='')}"
+    data = request_json(url, params=params, retries=2, timeout=12)
+    result = (((data or {}).get("chart") or {}).get("result") or [None])[0]
+    if not isinstance(result, dict):
+        return []
+    timestamps = result.get("timestamp") or []
+    quote_rows = (((result.get("indicators") or {}).get("quote") or [None])[0]) or {}
+    closes = quote_rows.get("close") or []
+    out: list[dict] = []
+    for ts, close in zip(timestamps, closes):
+        if close is None:
+            continue
+        try:
+            out.append({"ts": int(ts) * 1000, "close": float(close)})
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _macro_series_stats(rows: list[dict]) -> dict:
+    closes = [float(r["close"]) for r in rows if r.get("close") is not None]
+    if not closes:
+        return {"available": False}
+    last = closes[-1]
+    prev = closes[-2] if len(closes) >= 2 else last
+    prev5 = closes[-6] if len(closes) >= 6 else closes[0]
+    return {
+        "available": True,
+        "last": round(last, 6),
+        "ret_1d_pct": round(pct(last, prev), 4) if prev else 0.0,
+        "ret_5d_pct": round(pct(last, prev5), 4) if prev5 else 0.0,
+        "diff_1d": round(last - prev, 6),
+        "bars": len(closes),
+    }
+
+
+def _macro_component_scores(stats: dict[str, dict]) -> tuple[dict, list[str]]:
+    """Component scores: positive = risk-on, negative = risk-off."""
+    comp: dict[str, dict] = {}
+    notes: list[str] = []
+
+    def add(name: str, score: float, detail: str, st: dict):
+        comp[name] = {"score": round(clamp(score, -1.5, 1.5), 3), "detail": detail, "stats": st}
+        notes.append(f"{name}:{comp[name]['score']} ({detail})")
+
+    vix = stats.get("vix", {})
+    if vix.get("available"):
+        score = 0.0
+        if vix.get("ret_1d_pct", 0) >= 3 or vix.get("ret_5d_pct", 0) >= 8:
+            score -= 1.2
+        elif vix.get("ret_1d_pct", 0) <= -3 or vix.get("ret_5d_pct", 0) <= -8:
+            score += 1.0
+        add("vix", score, f"1d {vix.get('ret_1d_pct')}%, 5d {vix.get('ret_5d_pct')}%", vix)
+
+    dxy = stats.get("dxy", {})
+    if dxy.get("available"):
+        score = 0.0
+        if dxy.get("ret_1d_pct", 0) >= 0.35 or dxy.get("ret_5d_pct", 0) >= 0.8:
+            score -= 0.9
+        elif dxy.get("ret_1d_pct", 0) <= -0.35 or dxy.get("ret_5d_pct", 0) <= -0.8:
+            score += 0.8
+        add("dxy", score, f"1d {dxy.get('ret_1d_pct')}%, 5d {dxy.get('ret_5d_pct')}%", dxy)
+
+    us10y = stats.get("us10y", {})
+    if us10y.get("available"):
+        bp_1d = float(us10y.get("diff_1d", 0) or 0) * 10.0
+        score = 0.0
+        if bp_1d >= 7:
+            score -= 0.8
+        elif bp_1d <= -7:
+            score += 0.7
+        st = dict(us10y)
+        st["bp_1d_est"] = round(bp_1d, 2)
+        add("us10y", score, f"1d approx {bp_1d:.1f}bp", st)
+
+    nasdaq = stats.get("nasdaq", {})
+    if nasdaq.get("available"):
+        score = 0.0
+        if nasdaq.get("ret_1d_pct", 0) >= 0.7 or nasdaq.get("ret_5d_pct", 0) >= 2.0:
+            score += 1.0
+        elif nasdaq.get("ret_1d_pct", 0) <= -0.7 or nasdaq.get("ret_5d_pct", 0) <= -2.0:
+            score -= 1.0
+        add("nasdaq", score, f"1d {nasdaq.get('ret_1d_pct')}%, 5d {nasdaq.get('ret_5d_pct')}%", nasdaq)
+
+    sp500 = stats.get("sp500", {})
+    if sp500.get("available"):
+        score = 0.0
+        if sp500.get("ret_1d_pct", 0) >= 0.5 or sp500.get("ret_5d_pct", 0) >= 1.5:
+            score += 0.7
+        elif sp500.get("ret_1d_pct", 0) <= -0.5 or sp500.get("ret_5d_pct", 0) <= -1.5:
+            score -= 0.7
+        add("sp500", score, f"1d {sp500.get('ret_1d_pct')}%, 5d {sp500.get('ret_5d_pct')}%", sp500)
+
+    return comp, notes
+
+
+def macro_risk_context_from_series(series: dict[str, list[dict]], *, asof_ts: Optional[int] = None, provider: str = "YAHOO") -> dict:
+    if not MACRO_RISK_ENABLED:
+        return default_macro_risk_context("macro_disabled")
+    stats = {k: _macro_series_stats(v) for k, v in series.items()}
+    components, notes = _macro_component_scores(stats)
+    if not components:
+        return default_macro_risk_context("macro_data_unavailable")
+    score = sum(float(v.get("score", 0) or 0) for v in components.values())
+    score = score * (5.0 / max(3.0, float(len(components))))
+    score = clamp(score, -3.0, 3.0)
+    if score <= MACRO_RISK_STRONG_OFF_THRESHOLD:
+        regime, mult, bias = "MACRO_STRONG_RISK_OFF", MACRO_RISK_STRONG_OFF_RISK_MULTIPLIER, "SHORT_OR_CASH"
+    elif score <= MACRO_RISK_OFF_THRESHOLD:
+        regime, mult, bias = "MACRO_RISK_OFF", MACRO_RISK_OFF_RISK_MULTIPLIER, "DEFENSIVE"
+    elif score >= MACRO_RISK_STRONG_ON_THRESHOLD:
+        regime, mult, bias = "MACRO_STRONG_RISK_ON", MACRO_RISK_ON_RISK_MULTIPLIER, "LONG_BIAS"
+    elif score >= MACRO_RISK_ON_THRESHOLD:
+        regime, mult, bias = "MACRO_RISK_ON", MACRO_RISK_ON_RISK_MULTIPLIER, "RISK_ON"
+    else:
+        regime, mult, bias = "MACRO_NEUTRAL", 1.0, "BALANCED"
+    return {
+        "enabled": True,
+        "provider": provider,
+        "regime": regime,
+        "risk_score": round(score, 4),
+        "risk_multiplier": round(float(mult), 4),
+        "direction_bias": bias,
+        "components": components,
+        "notes": notes[:8],
+        "asof_ts": asof_ts,
+        "updated_at": now_ts(),
+        "updated_at_tr": tr_now_text(),
+    }
+
+
+def fetch_macro_risk_context() -> dict:
+    """Current macro context with cache; neutral fallback on any failure."""
+    if not MACRO_RISK_ENABLED:
+        return default_macro_risk_context("macro_disabled")
+    cached = _safe_read_json(MACRO_RISK_CACHE_FILE, {})
+    if isinstance(cached, dict) and cached.get("context") and now_ts() - int(cached.get("updated_at", 0) or 0) < MACRO_RISK_CACHE_TTL_SECONDS:
+        return cached["context"]
+    if MACRO_RISK_PROVIDER != "YAHOO":
+        return default_macro_risk_context(f"unsupported_provider_{MACRO_RISK_PROVIDER}")
+    try:
+        series = {k: _macro_yahoo_chart(sym, range_=f"{MACRO_RISK_HISTORY_DAYS}d", interval="1d") for k, sym in MACRO_YAHOO_SYMBOLS.items()}
+        ctx = macro_risk_context_from_series(series, provider="YAHOO")
+        _safe_write_json(MACRO_RISK_CACHE_FILE, {"updated_at": now_ts(), "context": ctx})
+        return ctx
+    except Exception as e:
+        log.warning("Macro Risk Layer veri alınamadı: %s", e)
+        return default_macro_risk_context(f"macro_fetch_failed:{type(e).__name__}")
+
+
+def format_macro_risk_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    ctx = state_mgr.get_meta("last_macro_risk", None) if state_mgr else None
+    if not isinstance(ctx, dict):
+        ctx = fetch_macro_risk_context()
+    score = float(ctx.get("risk_score", 0.0) or 0.0)
+    return f"MacroRisk: {ctx.get('regime', '-')} | score {score:.2f} | risk x{ctx.get('risk_multiplier', 1.0)}"
+
+
+def historical_replay_window_assessment(days: int) -> dict:
+    d = int(days or 0)
+    if d < 60:
+        tier = "SMOKE_TEST_ONLY"
+        verdict = "30 gün civarı pencere hızlı hata avı için yararlı, fakat strateji validasyonu için yetersiz."
+    elif d < 90:
+        tier = "EXPLORATORY"
+        verdict = "Kısa/orta pencere; tek rejime denk gelme riski yüksek."
+    elif d < 180:
+        tier = "MINIMUM_VALIDATION"
+        verdict = "İlk ciddi okuma için kullanılabilir; yine de rejim çeşitliliği sınırlı olabilir."
+    elif d < 365:
+        tier = "RECOMMENDED"
+        verdict = "Varsayılan profesyonel doğrulama penceresi; 30 güne göre overfit riski daha düşük."
+    else:
+        tier = "ROBUST_STRESS"
+        verdict = "Daha kapsamlı rejim/stres testi; veri kalitesi ve API limitleri ayrıca kontrol edilmeli."
+    return {"days": d, "tier": tier, "verdict": verdict, "recommended_min_days": 180, "stress_days": 365}
+
+
+def load_historical_macro_data(days: int) -> dict[str, list[dict]]:
+    if not (MACRO_RISK_ENABLED and MACRO_REPLAY_ENABLED):
+        return {}
+    if MACRO_RISK_PROVIDER != "YAHOO":
+        return {}
+    end_sec = int(time.time())
+    start_sec = end_sec - int(days + 30) * 24 * 60 * 60
+    out: dict[str, list[dict]] = {}
+    for key, sym in MACRO_YAHOO_SYMBOLS.items():
+        try:
+            out[key] = _macro_yahoo_chart(sym, period1=start_sec, period2=end_sec, interval=MACRO_REPLAY_INTERVAL)
+            log.info("Macro replay veri: %s/%s %d bar", key, sym, len(out[key]))
+        except Exception as e:
+            log.warning("Macro replay veri alınamadı (%s/%s): %s", key, sym, e)
+            out[key] = []
+    return out
+
+
+def historical_macro_context_at(macro_data: dict[str, list[dict]], ts_ms: int) -> dict:
+    if not macro_data:
+        return default_macro_risk_context("macro_replay_data_unavailable")
+    sliced: dict[str, list[dict]] = {}
+    for key, rows in macro_data.items():
+        eligible = [r for r in rows if int(r.get("ts", 0) or 0) <= ts_ms]
+        if eligible:
+            sliced[key] = eligible
+    return macro_risk_context_from_series(sliced, asof_ts=ts_ms, provider="YAHOO_REPLAY")
+
 
 def _append_jsonl(path: str, record: dict) -> None:
     try:
@@ -6011,16 +7082,11 @@ def _bv_weighted_support(aligned_raw: dict[str, float], weights: dict[str, float
 def _bv_outcome_value(t: dict) -> Optional[float]:
     if t.get("result") is None:
         return None
-    result = t.get("result")
-    pnl = float(t.get("pnl_pct", 0) or 0)
-    if result == "WIN":
-        return 1.0
-    if result == "LOSS":
-        return -1.0
+    pnl = trade_realized_pnl_pct(t)
     if pnl > 0:
-        return 0.5
+        return 1.0
     if pnl < 0:
-        return -0.5
+        return -1.0
     return 0.0
 
 
@@ -6191,10 +7257,10 @@ def strategy_simulation_analysis(state_mgr: StateManager = _STATE_MGR) -> dict:
         weighted = sum(float(raw.get(k, 0) or 0) * float(weights.get(k, 0) or 0) for k in weights)
         direction_factor = 1 if direction == "LONG" else -1
         aligned_score = weighted * direction_factor
-        outcome = 1 if t.get("result") == "WIN" else 0
 
         regime = (t.get("regime") or {}).get("regime", "UNKNOWN")
-        pnl_pct = float(t.get("pnl_pct", 0) or 0)
+        pnl_pct = trade_realized_pnl_pct(t)
+        outcome = 1 if pnl_pct > 0 else 0
 
         rows.append({"aligned_score": aligned_score, "outcome": outcome, "regime": regime, "group": group, "direction": direction, "pnl_pct": pnl_pct})
 
@@ -6603,19 +7669,21 @@ def _process_symbol(
     news_ctx: dict,
     state_mgr: StateManager,
     global_regime: Optional[dict] = None,
+    macro_context: Optional[dict] = None,
 ) -> Optional[dict]:
     """Tek coin için sinyal üretip gerekirse alert gönderir."""
     try:
         # Regime-first architecture: global regime is computed once per scan from BTC/ETH
         # before individual symbols are processed. The regime then modifies signal/score
         # before quality, entry and portfolio filters run.
-        regime = global_regime or detect_market_regime(btc, eth, news_ctx)
-        result = weighted_signal(symbol, features, btc, eth, session_ctx, news_ctx)
+        regime = global_regime or detect_market_regime(btc, eth, news_ctx, macro_context)
+        result = weighted_signal(symbol, features, btc, eth, session_ctx, news_ctx, macro_context)
         result["regime"] = regime
         result = apply_regime_first_scoring(result, regime)
         result["ai_optimization"] = ai_signal_optimization(result, state_mgr)
         result["trade_quality"] = compute_trade_quality(result, regime)
         result["entry_engine"] = evaluate_entry_engine(result)
+        result["execution_quality"] = evaluate_execution_quality(result)
         result["regime_commander"] = regime_commander_decision(result, regime)
         result["portfolio_check"] = portfolio_risk_check(result, state_mgr)
         result["portfolio_correlation"] = portfolio_correlation_check(result, state_mgr)
@@ -6650,6 +7718,8 @@ def _process_symbol(
             "blocked_signal": result.get("blocked_signal"),
             "quality_grade": result.get("trade_quality", {}).get("grade"),
             "entry_status": result.get("entry_engine", {}).get("status"),
+            "execution_quality_status": result.get("execution_quality", {}).get("status"),
+            "execution_quality_cost_bps": result.get("execution_quality", {}).get("estimated_entry_cost_bps"),
             "regime": result.get("regime", {}).get("regime"),
             "direction_bias": result.get("regime", {}).get("direction_bias"),
             "regime_allowed": result.get("regime_commander", {}).get("allowed"),
@@ -6718,6 +7788,8 @@ def _send_periodic_messages(
             f"{format_feature_importance_brief(state_mgr)}\n"
             f"{format_weight_learning_brief(state_mgr)}\n"
             f"{format_regime_strategy_brief(results)}\n"
+            f"{format_macro_risk_brief(state_mgr)}\n"
+            f"{format_execution_quality_brief(results)}\n"
             f"{format_strategy_simulation_brief(state_mgr)}\n"
             f"{format_paper_execution_brief(state_mgr)}\n"
             f"{format_position_management_heartbeat(state_mgr)}\n"
@@ -6725,6 +7797,7 @@ def _send_periodic_messages(
             f"{format_capital_milestone_brief(state_mgr)}\n"
             f"{format_portfolio_correlation_brief(state_mgr)}\n"
             f"{format_regime_edge_brief(state_mgr)}\n"
+            f"{format_regime_dashboard_brief(state_mgr)}\n"
             f"{format_live_readiness_brief(state_mgr)}\n"
             f"{format_ai_optimization_brief(state_mgr)}\n"
             f"{format_ml_validation_brief(state_mgr)}\n"
@@ -6739,7 +7812,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
     """Ana bot döngüsü."""
     log.info("BOT BAŞLADI v%s", __version__)
     send_message(
-        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + PaperExec + PM + RiskGov/CapitalGuard/RegimeEdge/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON"
+        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + MacroRisk + ExecQ + RegimeDash + PaperExec + PM + RiskGov/CapitalGuard/RegimeEdge/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON"
     )
 
     state_mgr = _STATE_MGR
@@ -6760,6 +7833,8 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
             session_ctx = get_session_context()
             process_telegram_commands(state_mgr)
             news_context = _process_news_cycle(state_mgr, news_context)
+            macro_context = fetch_macro_risk_context()
+            state_mgr.set_meta("last_macro_risk", macro_context)
             state_mgr.save()
 
             # BTC ve ETH features (referans, başarısızsa tur atla)
@@ -6802,7 +7877,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
 
             # Regime-first: piyasa rejimi tüm sembollerden önce bir kez belirlenir.
             # Böylece her coin aynı piyasa oyununa göre değerlendirilir.
-            global_regime = detect_market_regime(btc, eth, news_context)
+            global_regime = detect_market_regime(btc, eth, news_context, macro_context)
             state_mgr.set_meta("last_global_regime", global_regime)
             state_mgr.set_meta("last_risk_governor", risk_governor_snapshot(state_mgr, global_regime))
 
@@ -6813,7 +7888,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
                     continue
 
                 result = _process_symbol(
-                    symbol, features, btc, eth, session_ctx, news_context, state_mgr, global_regime
+                    symbol, features, btc, eth, session_ctx, news_context, state_mgr, global_regime, macro_context
                 )
                 if result:
                     results.append(result)
@@ -6827,6 +7902,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
             retry_pending_trade_alerts(state_mgr)
             # Persist oversight reports each scan for dashboards / live-readiness review.
             risk_governor_snapshot(state_mgr, global_regime)
+            regime_performance_dashboard(state_mgr)
             live_readiness_report(state_mgr)
 
             _send_periodic_messages(state_mgr, results, session_ctx, news_context)
@@ -6854,6 +7930,426 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
                 break
 
     log.info("Bot loop durdu.")
+
+
+
+# ============================================================
+# HISTORICAL REPLAY BACKTEST ENGINE v1
+# ============================================================
+
+_INTERVAL_MS = {"5m": 300000, "15m": 900000, "60m": 3600000, "4h": 14400000}
+
+
+def _hr_ts(k: list) -> int:
+    return int(float(k[0]))
+
+
+def _hr_h(k: list) -> float:
+    return float(k[2])
+
+
+def _hr_l(k: list) -> float:
+    return float(k[3])
+
+
+def _hr_c(k: list) -> float:
+    return float(k[4])
+
+
+def _hr_v(k: list) -> float:
+    return float(k[5])
+
+
+def fetch_historical_klines(symbol: str, interval: str, start_ms: int, end_ms: int, limit: int = 1000) -> list[list]:
+    """MEXC spot tarihsel mum indirici. Normal bot döngüsünden bağımsızdır."""
+    rows, seen, cursor = [], set(), int(start_ms)
+    step = _INTERVAL_MS[interval]
+    while cursor < end_ms and not _STOP_EVENT.is_set():
+        data = request_json(
+            f"{MEXC_SPOT_BASE}/api/v3/klines",
+            {"symbol": symbol, "interval": interval, "startTime": cursor, "endTime": int(end_ms), "limit": int(limit)},
+            retries=3,
+            timeout=20,
+        )
+        if not isinstance(data, list) or not data:
+            break
+        for r in data:
+            if isinstance(r, list) and len(r) >= 6:
+                ts = _hr_ts(r)
+                if ts not in seen and start_ms <= ts <= end_ms:
+                    rows.append(r)
+                    seen.add(ts)
+        nxt = _hr_ts(data[-1]) + step
+        if nxt <= cursor or len(data) < limit:
+            break
+        cursor = nxt
+    return sorted(rows, key=_hr_ts)
+
+
+def _hr_cache_key(symbols: list[str], days: int) -> str:
+    payload = {"symbols": sorted(symbols), "days": int(days), "intervals": ["5m", "15m", "60m", "4h"], "v": 1}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def load_historical_replay_data(symbols: list[str], days: int) -> dict:
+    symbols = sorted(set(symbols) | {"BTCUSDT", "ETHUSDT"})
+    cache_key = _hr_cache_key(symbols, days)
+    if HISTORICAL_REPLAY_USE_CACHE and not HISTORICAL_REPLAY_REFRESH_CACHE:
+        cached = _safe_read_json(HISTORICAL_REPLAY_CACHE_FILE, {})
+        if cached.get("cache_key") == cache_key and isinstance(cached.get("data"), dict):
+            log.info("Historical replay cache kullanılıyor: %s", HISTORICAL_REPLAY_CACHE_FILE)
+            return cached["data"]
+
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - int(days) * 24 * 60 * 60 * 1000
+    out: dict[str, dict[str, list]] = {}
+
+    for sym in symbols:
+        out[sym] = {}
+        for interval in ("5m", "15m", "60m", "4h"):
+            log.info("Replay veri indiriliyor: %s %s", sym, interval)
+            out[sym][interval] = fetch_historical_klines(sym, interval, start_ms, end_ms)
+            log.info("Replay veri: %s %s %d bar", sym, interval, len(out[sym][interval]))
+
+    _safe_write_json(HISTORICAL_REPLAY_CACHE_FILE, {"cache_key": cache_key, "created_at": now_ts(), "data": out})
+    return out
+
+
+def _hr_idx_at(times: list[int], ts: int) -> int:
+    return bisect.bisect_right(times, ts) - 1
+
+
+def _hr_ret(closes: list[float], bars: int) -> float:
+    return pct(closes[-1], closes[-(bars + 1)]) if len(closes) >= bars + 1 else 0.0
+
+
+def _hr_session_at(ts_ms: int) -> SessionContext:
+    dt = datetime.fromtimestamp(ts_ms / 1000, timezone.utc).astimezone(ZoneInfo("America/New_York"))
+    year, day, weekday = dt.year, dt.strftime("%Y-%m-%d"), dt.weekday()
+    minutes = dt.hour * 60 + dt.minute
+    if weekday >= 5:
+        return _SESSION_PROFILES["WEEKEND"]
+    if day in US_MARKET_HOLIDAYS.get(year, set()):
+        return _SESSION_PROFILES["US_HOLIDAY"]
+    close_time = 13 * 60 if day in US_EARLY_CLOSE.get(year, set()) else 16 * 60
+    if 9 * 60 + 30 <= minutes < close_time:
+        return _SESSION_PROFILES["US_OPEN"]
+    if 4 * 60 <= minutes < 9 * 60 + 30 or close_time <= minutes < 20 * 60:
+        return _SESSION_PROFILES["US_EXTENDED"]
+    return _SESSION_PROFILES["US_CLOSED"]
+
+
+def replay_features(symbol: str, windows: dict[str, list[list]]) -> Optional[dict]:
+    """Historical replay için get_features eşdeğeri.
+
+    V1'de tarihsel basis/funding/order book replay edilmez; bunlar None ve
+    konservatif varsayılan spread ile temsil edilir.
+    """
+    k5, k15 = windows.get("5m", []), windows.get("15m", [])
+    k1h, k4h = windows.get("60m", []), windows.get("4h", [])
+    if len(k5) < max(EMA_SLOW + 2, RET_1H_BARS + 1) or len(k15) < max(EMA_SLOW + 2, RET_4H_BARS + 1):
+        return None
+    if len(k1h) < MIN_KLINES_1H or len(k4h) < MIN_KLINES_4H:
+        return None
+
+    c5, c15 = [_hr_c(x) for x in k5], [_hr_c(x) for x in k15]
+    c1h, c4h = [_hr_c(x) for x in k1h], [_hr_c(x) for x in k4h]
+    v5 = [_hr_v(x) for x in k5]
+    recent = v5[-(VOLUME_WINDOW + 1):-1]
+    median_vol = statistics.median(recent) if recent else 0.0
+    group = COINS.get(symbol, "CORE")
+    spread = PAPER_SLIPPAGE_BPS_HIGH_BETA if group == "HIGH_BETA" else PAPER_SLIPPAGE_BPS_CORE
+
+    return {
+        "last": c5[-1],
+        "spot_price": c5[-1],
+        "futures_price": None,
+        "basis_pct": None,
+        "funding_rate": None,
+        "ema9": ema(c5, EMA_FAST), "ema21": ema(c5, EMA_MID), "ema50": ema(c5, EMA_SLOW),
+        "ema9_15": ema(c15, EMA_FAST), "ema21_15": ema(c15, EMA_MID), "ema50_15": ema(c15, EMA_SLOW),
+        "ema9_1h": ema(c1h, EMA_FAST), "ema21_1h": ema(c1h, EMA_MID), "ema50_1h": ema(c1h, EMA_SLOW),
+        "ema9_4h": ema(c4h, EMA_FAST), "ema21_4h": ema(c4h, EMA_MID), "ema50_4h": ema(c4h, EMA_SLOW),
+        "ret_1h_tf": _hr_ret(c1h, 1), "ret_4h_tf": _hr_ret(c4h, 1), "ret_24h_tf": _hr_ret(c4h, 6),
+        "ret_5m": _hr_ret(c5, RET_5M_BARS), "ret_15m": _hr_ret(c5, RET_15M_BARS),
+        "ret_1h": _hr_ret(c5, RET_1H_BARS), "ret_4h": _hr_ret(c15, RET_4H_BARS),
+        "vol_ratio": v5[-1] / median_vol if median_vol > 0 else 1.0,
+        "spread_bps": spread,
+        "order_book": {"available": False, "reason": "Historical replay depth unavailable."},
+        "change_24h": _hr_ret(c5, 288),
+    }
+
+
+def replay_result(symbol: str, feat: dict, btc: dict, eth: dict, session: SessionContext, news: dict, regime: dict, macro_context: Optional[dict] = None) -> dict:
+    result = weighted_signal(symbol, feat, btc, eth, session, news, macro_context)
+    result["regime"] = regime
+    result = apply_regime_first_scoring(result, regime)
+    result["trade_quality"] = compute_trade_quality(result, regime)
+    result["entry_engine"] = evaluate_entry_engine(result)
+    result["execution_quality"] = evaluate_execution_quality(result)
+    result["regime_commander"] = regime_commander_decision(result, regime)
+    result["raw_signal"] = result.get("signal")
+    result["actionable"] = result.get("signal") in ("LONG", "SHORT")
+
+    if result.get("signal") in ("LONG", "SHORT"):
+        tq, ee, rc = result.get("trade_quality") or {}, result.get("entry_engine") or {}, result.get("regime_commander") or {}
+        eq = result.get("execution_quality") or {}
+        blocked = None
+        if not rc.get("allowed", True):
+            blocked = rc.get("reason", "Regime Commander blokladı")
+        elif not tq.get("tradable", True) or not quality_meets_min(tq.get("grade"), HISTORICAL_REPLAY_MIN_GRADE):
+            blocked = f"Kalite filtresi: {tq.get('grade')}"
+        elif ee.get("status") == "BLOCKED" or (ENTRY_ENGINE_REQUIRE_READY and ee.get("status") != "READY"):
+            blocked = f"Entry: {ee.get('reason')}"
+        elif eq.get("status") == "BLOCKED":
+            blocked = f"Execution Quality: {eq.get('reason')}"
+        if blocked:
+            result["blocked_signal"] = result["signal"]
+            result["signal"] = "NO_TRADE"
+            result["level"] = "WEAK"
+            result["confidence"] = 0.0
+            result["actionable"] = False
+            result["veto"] = result.get("veto") or blocked
+    return result
+
+
+def _open_replay_pos(symbol: str, result: dict, bar: list, ts: int) -> dict:
+    direction, group = result["signal"], result["group"]
+    entry = _hr_c(bar)
+    stop_pct = float(TRADE_PLAN_CONFIG[group]["stop_pct"])
+    stop = entry * (1 - stop_pct) if direction == "LONG" else entry * (1 + stop_pct)
+    risk = abs(entry - stop)
+    sign = 1 if direction == "LONG" else -1
+    return {
+        "symbol": symbol, "group": group, "direction": direction,
+        "entry": entry, "entry_ts": ts, "stop_pct": stop_pct,
+        "stop": stop, "risk": risk,
+        "tp1": entry + sign * risk * 1.0,
+        "tp2": entry + sign * risk * 2.0,
+        "tp3": entry + sign * risk * float(PM_CONFIG[group]["tp3_r"]),
+        "remaining": 1.0, "realized_r": 0.0,
+        "bars": 0, "tp1_hit": False, "tp2_hit": False,
+        "regime": (result.get("regime") or {}).get("regime"),
+        "quality_grade": (result.get("trade_quality") or {}).get("grade"),
+    }
+
+
+def _replay_r_at(pos: dict, price: float) -> float:
+    if pos["direction"] == "LONG":
+        return (price - pos["entry"]) / max(pos["risk"], 1e-12)
+    return (pos["entry"] - price) / max(pos["risk"], 1e-12)
+
+
+def _close_replay_pos(pos: dict, price: float, ts: int, reason: str) -> dict:
+    gross_r = pos["realized_r"] + pos["remaining"] * _replay_r_at(pos, price)
+    cost_pct = ((PAPER_FEE_BPS * 2) + (_paper_slippage_bps(pos["group"]) * 2)) / 10000.0
+    net_r = gross_r - cost_pct / max(pos["stop_pct"], 1e-9)
+    return {
+        "symbol": pos["symbol"], "group": pos["group"], "direction": pos["direction"],
+        "regime": pos.get("regime"), "quality_grade": pos.get("quality_grade"),
+        "entry_ts": pos["entry_ts"], "exit_ts": ts,
+        "entry": round(pos["entry"], 10), "exit": round(price, 10),
+        "reason": reason, "pnl_r_gross": round(gross_r, 5), "pnl_r": round(net_r, 5),
+        "equity_return_pct": round(net_r * HISTORICAL_REPLAY_RISK_PCT, 6),
+        "bars_held": pos["bars"],
+        "hit_tp1": pos.get("tp1_hit"), "hit_tp2": pos.get("tp2_hit"),
+    }
+
+
+def _update_replay_pos(pos: dict, bar: list, ts: int, latest_signal: Optional[str]) -> tuple[Optional[dict], dict]:
+    pos = copy.deepcopy(pos)
+    pos["bars"] += 1
+    high, low, close = _hr_h(bar), _hr_l(bar), _hr_c(bar)
+    direction, group = pos["direction"], pos["group"]
+
+    stop_hit = low <= pos["stop"] if direction == "LONG" else high >= pos["stop"]
+    if stop_hit:
+        return _close_replay_pos(pos, pos["stop"], ts, "STOP"), pos
+
+    def target_hit(target: float) -> bool:
+        return high >= target if direction == "LONG" else low <= target
+
+    if not pos.get("tp1_hit") and target_hit(pos["tp1"]):
+        ratio = clamp(PM_TP1_CLOSE_RATIO, 0.0, 1.0)
+        pos["realized_r"] += ratio * _replay_r_at(pos, pos["tp1"])
+        pos["remaining"] -= ratio
+        pos["tp1_hit"] = True
+        pos["stop"] = pos["entry"]
+
+    if pos["remaining"] > 0 and not pos.get("tp2_hit") and target_hit(pos["tp2"]):
+        ratio = min(pos["remaining"], clamp(PM_TP2_CLOSE_RATIO, 0.0, 1.0))
+        pos["realized_r"] += ratio * _replay_r_at(pos, pos["tp2"])
+        pos["remaining"] -= ratio
+        pos["tp2_hit"] = True
+
+    if pos["remaining"] > 0 and target_hit(pos["tp3"]):
+        return _close_replay_pos(pos, pos["tp3"], ts, "TP3"), pos
+
+    if HISTORICAL_REPLAY_EXIT_ON_SIGNAL_CHANGE and latest_signal in ("LONG", "SHORT") and latest_signal != direction:
+        return _close_replay_pos(pos, close, ts, "SIGNAL_CHANGE"), pos
+
+    max_bars = max(1, int(_pm_cfg(group).get("max_hold_min", 120)) // 5)
+    if pos["bars"] >= max_bars:
+        return _close_replay_pos(pos, close, ts, "TIME_EXIT"), pos
+
+    return None, pos
+
+
+def _replay_metrics(trades: list[dict]) -> dict:
+    if not trades:
+        return {"trades": 0, "wins": 0, "losses": 0, "win_rate": None, "profit_factor": None, "expectancy_r": None, "max_drawdown_pct": 0.0, "final_equity": ACCOUNT_SIZE_USD}
+    pnls = [float(t["pnl_r"]) for t in trades]
+    wins, losses = [x for x in pnls if x > 0], [x for x in pnls if x < 0]
+    equity = peak = float(ACCOUNT_SIZE_USD)
+    max_dd = 0.0
+    for t in trades:
+        equity *= 1 + float(t["equity_return_pct"])
+        peak = max(peak, equity)
+        max_dd = max(max_dd, (peak - equity) / peak if peak else 0.0)
+    return {
+        "trades": len(trades), "wins": len(wins), "losses": len(losses),
+        "win_rate": round(len(wins) / len(trades), 4),
+        "profit_factor": round(sum(wins) / abs(sum(losses)), 4) if losses else None,
+        "expectancy_r": round(sum(pnls) / len(pnls), 5),
+        "avg_win_r": round(sum(wins) / len(wins), 5) if wins else None,
+        "avg_loss_r": round(sum(losses) / len(losses), 5) if losses else None,
+        "max_drawdown_pct": round(max_dd, 5), "final_equity": round(equity, 2),
+    }
+
+
+def _replay_by(trades: list[dict], key: str) -> dict:
+    buckets: dict[str, list[dict]] = {}
+    for t in trades:
+        buckets.setdefault(str(t.get(key) or "UNKNOWN"), []).append(t)
+    return {k: _replay_metrics(v) for k, v in sorted(buckets.items())}
+
+
+def run_historical_replay_backtest(symbols: Optional[list[str]] = None, days: Optional[int] = None) -> dict:
+    symbols = [s for s in sorted(set(symbols or HISTORICAL_REPLAY_SYMBOLS)) if s in COINS]
+    if not symbols:
+        raise ValueError("Replay için geçerli sembol yok.")
+    days = int(days or HISTORICAL_REPLAY_DAYS)
+    data = load_historical_replay_data(symbols, days)
+    macro_data = load_historical_macro_data(days)
+    index = {s: {i: [_hr_ts(r) for r in rows] for i, rows in by_i.items()} for s, by_i in data.items()}
+    times = index.get("BTCUSDT", {}).get("5m", [])
+    if HISTORICAL_REPLAY_MAX_BARS > 0:
+        times = times[-HISTORICAL_REPLAY_MAX_BARS:]
+
+    positions: dict[str, dict] = {}
+    trades: list[dict] = []
+    raw_seen = blocked_seen = 0
+    news = default_news_context()
+
+    for ts in times:
+        features: dict[str, dict] = {}
+        for sym in sorted(set(symbols) | {"BTCUSDT", "ETHUSDT"}):
+            windows, ok = {}, True
+            for interval in ("5m", "15m", "60m", "4h"):
+                rows = data.get(sym, {}).get(interval, [])
+                idx = _hr_idx_at(index.get(sym, {}).get(interval, []), ts)
+                if idx < 0:
+                    ok = False
+                    break
+                windows[interval] = rows[: idx + 1]
+            if ok:
+                feat = replay_features(sym, windows)
+                if feat:
+                    features[sym] = feat
+
+        if "BTCUSDT" not in features or "ETHUSDT" not in features:
+            continue
+
+        session = _hr_session_at(ts)
+        macro_context = historical_macro_context_at(macro_data, ts)
+        regime = detect_market_regime(features["BTCUSDT"], features["ETHUSDT"], news, macro_context)
+        results: dict[str, dict] = {}
+        for sym in symbols:
+            if sym not in features:
+                continue
+            result = replay_result(sym, features[sym], features["BTCUSDT"], features["ETHUSDT"], session, news, regime, macro_context)
+            results[sym] = result
+            raw_seen += int(result.get("raw_signal") in ("LONG", "SHORT"))
+            blocked_seen += int(result.get("blocked_signal") in ("LONG", "SHORT"))
+
+        for sym, pos in list(positions.items()):
+            rows = data.get(sym, {}).get("5m", [])
+            idx = _hr_idx_at(index.get(sym, {}).get("5m", []), ts)
+            if idx < 0:
+                continue
+            closed, updated = _update_replay_pos(pos, rows[idx], ts, (results.get(sym) or {}).get("raw_signal"))
+            if closed:
+                trades.append(closed)
+                positions.pop(sym, None)
+            else:
+                positions[sym] = updated
+
+        for sym, result in results.items():
+            if sym in positions:
+                continue
+            if result.get("signal") in ("LONG", "SHORT") and result.get("actionable"):
+                rows = data.get(sym, {}).get("5m", [])
+                idx = _hr_idx_at(index.get(sym, {}).get("5m", []), ts)
+                if idx >= 0:
+                    positions[sym] = _open_replay_pos(sym, result, rows[idx], ts)
+
+    last_ts = times[-1] if times else int(time.time() * 1000)
+    for sym, pos in list(positions.items()):
+        rows = data.get(sym, {}).get("5m", [])
+        idx = _hr_idx_at(index.get(sym, {}).get("5m", []), last_ts)
+        if idx >= 0:
+            trades.append(_close_replay_pos(pos, _hr_c(rows[idx]), last_ts, "END_OF_REPLAY"))
+
+    report = {
+        "version": __version__,
+        "created_at": tr_now_text(),
+        "mode": "historical_replay_v1",
+        "symbols": symbols,
+        "days": days,
+        "assumptions": {
+            "news": "neutral_default_news_context",
+            "macro": "daily_yahoo_macro_context_if_available_otherwise_neutral",
+            "basis_funding_orderbook": "not_replayed_v1",
+            "intrabar": "conservative_stop_first",
+            "entry": "bar_close_after_signal",
+            "risk_pct": HISTORICAL_REPLAY_RISK_PCT,
+            "min_grade": HISTORICAL_REPLAY_MIN_GRADE,
+        },
+        "validation_window": historical_replay_window_assessment(days),
+        "coverage": {
+            "first_ts": datetime.fromtimestamp(times[0] / 1000, timezone.utc).isoformat() if times else None,
+            "last_ts": datetime.fromtimestamp(times[-1] / 1000, timezone.utc).isoformat() if times else None,
+            "bars_evaluated": len(times),
+            "raw_signals_seen": raw_seen,
+            "blocked_signals_seen": blocked_seen,
+            "closed_trades": len(trades),
+        },
+        "summary": _replay_metrics(trades),
+        "by_symbol": _replay_by(trades, "symbol"),
+        "by_group": _replay_by(trades, "group"),
+        "by_direction": _replay_by(trades, "direction"),
+        "by_regime": _replay_by(trades, "regime"),
+        "regime_performance_dashboard": regime_performance_dashboard_from_trades(trades, source="historical_replay"),
+        "sample_trades_tail": trades[-25:],
+    }
+    return report
+
+
+def run_historical_replay_cli() -> dict:
+    report = run_historical_replay_backtest()
+    _safe_write_json(HISTORICAL_REPLAY_REPORT_FILE, report)
+    s = report["summary"]
+    wr, pf, dd = s.get("win_rate"), s.get("profit_factor"), s.get("max_drawdown_pct") or 0.0
+    wr_txt = f"%{wr * 100:.1f}" if isinstance(wr, (int, float)) else "N/A"
+    pf_txt = f"{pf:.2f}" if isinstance(pf, (int, float)) else "N/A"
+    brief = f"Replay: {s.get('trades')} trade | WR {wr_txt} | PF {pf_txt} | ExpR {s.get('expectancy_r')} | DD %{float(dd) * 100:.2f} | Eq {format_money(s.get('final_equity'))}"
+    dash_summary = (report.get("regime_performance_dashboard") or {}).get("summary")
+    print(brief)
+    if dash_summary:
+        print(dash_summary)
+    print(f"Report: {HISTORICAL_REPLAY_REPORT_FILE}")
+    log.info(brief)
+    return report
 
 
 # ============================================================
@@ -6892,6 +8388,11 @@ def _signal_handler(*_args) -> None:
 def main() -> None:
     import atexit
     import signal as _signal
+
+    if RUN_HISTORICAL_REPLAY:
+        load_and_apply_adaptive_config()
+        run_historical_replay_cli()
+        return
 
     validate_env()
     load_and_apply_adaptive_config()
