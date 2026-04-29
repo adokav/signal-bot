@@ -438,6 +438,7 @@ MOVEMENT_ALERT_THRESHOLDS: dict[str, dict[str, float]] = {
 # ============================================================
 
 ACCOUNT_SIZE_USD = env_float("ACCOUNT_SIZE_USD", 800.0, min_value=1.0)
+CAPITAL_LADDER_STEPS = (100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0)
 
 TRADE_PLAN_CONFIG: dict[str, dict[str, float]] = {
     "CORE": {
@@ -2393,6 +2394,39 @@ def _ps_loss_streak_multiplier(streak: int) -> float:
     return 1.0
 
 
+def _capital_ladder_snapshot(state_mgr: StateManager = _STATE_MGR) -> dict:
+    """Account progression stage for milestone-aware risk scaling."""
+    closed = _ps_closed_trades(state_mgr)
+    equity = float(ACCOUNT_SIZE_USD)
+    for t in closed:
+        equity += _rg_trade_realized_usd(t)
+
+    stage_idx = 0
+    for i, step in enumerate(CAPITAL_LADDER_STEPS):
+        if equity >= step:
+            stage_idx = i
+        else:
+            break
+
+    stage_floor = CAPITAL_LADDER_STEPS[stage_idx]
+    stage_ceiling = CAPITAL_LADDER_STEPS[min(stage_idx + 1, len(CAPITAL_LADDER_STEPS) - 1)]
+    progress = 1.0 if stage_ceiling <= stage_floor else clamp(
+        (equity - stage_floor) / (stage_ceiling - stage_floor), 0.0, 1.0
+    )
+
+    # Daha büyük sermayede risk yüzdesini kademeli azaltarak sürdürülebilirlik hedeflenir.
+    base_mult = max(0.45, 1.0 - stage_idx * 0.10)
+    ramp = 0.95 + progress * 0.10
+    return {
+        "equity": round(equity, 4),
+        "stage_index": stage_idx,
+        "stage_floor": stage_floor,
+        "stage_target": stage_ceiling,
+        "progress_to_target": round(progress, 4),
+        "risk_multiplier": round(clamp(base_mult * ramp, 0.40, 1.05), 4),
+    }
+
+
 def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManager = _STATE_MGR) -> dict:
     """Dynamic risk sizing for trade plan.
 
@@ -2448,10 +2482,12 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
     ls_mult = _ps_loss_streak_multiplier(loss_streak)
     rg_snapshot = risk_governor_snapshot(state_mgr, regime) if 'risk_governor_snapshot' in globals() else {"risk_multiplier": 1.0, "mode": "NORMAL"}
     rg_mult = float(rg_snapshot.get("risk_multiplier", 1.0) or 0.0)
+    ladder = _capital_ladder_snapshot(state_mgr)
+    ladder_mult = float(ladder.get("risk_multiplier", 1.0) or 1.0)
     pcorr = result.get("portfolio_correlation") or {}
     corr_mult = float(pcorr.get("risk_multiplier", 1.0) or 1.0)
 
-    raw_multiplier = q_mult * c_mult * r_mult * edge_multiplier * ls_mult * rg_mult * corr_mult
+    raw_multiplier = q_mult * c_mult * r_mult * edge_multiplier * ls_mult * rg_mult * ladder_mult * corr_mult
 
     # Risk-off / chaos rejimlerinde pozisyon büyütmeyi kapat.
     # Not: Rejim isimleri detect_market_regime() ile birebir eşleşmeli.
@@ -2478,6 +2514,11 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         f"Confidence %{confidence:.1f} çarpanı x{c_mult:.2f}",
         f"Regime {regime_name} çarpanı x{r_mult:.2f}",
         f"Risk Governor {rg_snapshot.get('mode', '-')} çarpanı x{rg_mult:.2f}",
+        (
+            f"Capital ladder ${ladder.get('stage_floor', 0):,.0f}"
+            f"→${ladder.get('stage_target', 0):,.0f} "
+            f"(%{float(ladder.get('progress_to_target', 0))*100:.1f}) çarpanı x{ladder_mult:.2f}"
+        ),
         f"Portfolio correlation çarpanı x{corr_mult:.2f}",
         f"Loss streak {loss_streak} çarpanı x{ls_mult:.2f}",
         *edge_notes,
@@ -2498,8 +2539,10 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         "edge_multiplier": round(edge_multiplier, 3),
         "loss_streak_multiplier": ls_mult,
         "risk_governor_multiplier": rg_mult,
+        "capital_ladder_multiplier": ladder_mult,
         "portfolio_correlation_multiplier": corr_mult,
         "risk_governor": rg_snapshot,
+        "capital_ladder": ladder,
         "symbol_edge": symbol_edge,
         "group_edge": group_edge,
         "reasons": reasons,
