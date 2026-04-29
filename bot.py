@@ -439,6 +439,26 @@ MOVEMENT_ALERT_THRESHOLDS: dict[str, dict[str, float]] = {
 
 ACCOUNT_SIZE_USD = env_float("ACCOUNT_SIZE_USD", 800.0, min_value=1.0)
 
+CAPITAL_LADDER_PROFILES = [
+    {"min_equity": 0.0, "max_equity": 1_000.0, "label": "BUILD_100_TO_1K", "risk_cap_multiplier": 0.95},
+    {"min_equity": 1_000.0, "max_equity": 10_000.0, "label": "GROW_1K_TO_10K", "risk_cap_multiplier": 1.00},
+    {"min_equity": 10_000.0, "max_equity": 100_000.0, "label": "SCALE_10K_TO_100K", "risk_cap_multiplier": 0.90},
+    {"min_equity": 100_000.0, "max_equity": float("inf"), "label": "PRESERVE_100K_TO_1M", "risk_cap_multiplier": 0.75},
+]
+
+
+def capital_ladder_profile(equity_usd: float) -> dict:
+    """Select risk profile by current equity band.
+
+    Amaç: sermaye büyürken agresifliği sınırlayıp, özellikle 100k+ bölgede
+    varlık korumayı önceliklendirmek.
+    """
+    e = max(0.0, float(equity_usd or 0.0))
+    for profile in CAPITAL_LADDER_PROFILES:
+        if profile["min_equity"] <= e < profile["max_equity"]:
+            return profile
+    return CAPITAL_LADDER_PROFILES[-1]
+
 TRADE_PLAN_CONFIG: dict[str, dict[str, float]] = {
     "CORE": {
         "stop_pct": 0.020,
@@ -2402,9 +2422,13 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
     - no data means neutral multiplier, not aggressive sizing
     """
     base_risk = float(POSITION_SIZING_BASE_RISK_PCT)
+    equity_now = float((risk_governor_snapshot(state_mgr).get("equity", ACCOUNT_SIZE_USD)) if 'risk_governor_snapshot' in globals() else ACCOUNT_SIZE_USD)
+    ladder = capital_ladder_profile(equity_now)
+    stage_cap = POSITION_SIZING_MAX_RISK_PCT * float(ladder.get("risk_cap_multiplier", 1.0) or 1.0)
+    max_risk_cap = clamp(stage_cap, POSITION_SIZING_MIN_RISK_PCT, POSITION_SIZING_MAX_RISK_PCT)
     if not POSITION_SIZING_ENABLED:
-        risk_pct = clamp(base_risk, POSITION_SIZING_MIN_RISK_PCT, POSITION_SIZING_MAX_RISK_PCT)
-        risk_amount = ACCOUNT_SIZE_USD * risk_pct
+        risk_pct = clamp(base_risk, POSITION_SIZING_MIN_RISK_PCT, max_risk_cap)
+        risk_amount = equity_now * risk_pct
         return {
             "enabled": False,
             "risk_pct": risk_pct,
@@ -2461,9 +2485,9 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
     risk_pct = clamp(
         base_risk * raw_multiplier,
         POSITION_SIZING_MIN_RISK_PCT,
-        POSITION_SIZING_MAX_RISK_PCT,
+        max_risk_cap,
     )
-    risk_amount = ACCOUNT_SIZE_USD * risk_pct
+    risk_amount = equity_now * risk_pct
     position_notional = risk_amount / stop_pct if stop_pct > 0 else 0.0
 
     if risk_pct >= base_risk * 1.35:
@@ -2480,6 +2504,7 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         f"Risk Governor {rg_snapshot.get('mode', '-')} çarpanı x{rg_mult:.2f}",
         f"Portfolio correlation çarpanı x{corr_mult:.2f}",
         f"Loss streak {loss_streak} çarpanı x{ls_mult:.2f}",
+        f"Capital ladder {ladder.get('label', '-')} üst risk limiti %{max_risk_cap*100:.2f}",
         *edge_notes,
     ]
 
@@ -2487,6 +2512,9 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         "enabled": True,
         "mode": mode,
         "base_risk_pct": base_risk,
+        "equity_used_usd": equity_now,
+        "capital_ladder": copy.deepcopy(ladder),
+        "max_risk_cap_pct": max_risk_cap,
         "risk_pct": risk_pct,
         "risk_amount": risk_amount,
         "position_notional": position_notional,
