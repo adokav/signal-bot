@@ -36,7 +36,7 @@ from flask import Flask
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-__version__ = "2.5.0-ml-validation-gate-v1"
+__version__ = "2.6.0-capital-regime-guard-v1"
 
 # ============================================================
 # LOGGING
@@ -77,6 +77,35 @@ def env_float(name: str, default: float, *, min_value: Optional[float] = None) -
         log.warning("%s=%s minimumun altinda, varsayilan kullaniliyor: %s", name, value, default)
         return default
     return value
+
+
+def env_float_list(name: str, default: list[float], *, min_value: Optional[float] = None) -> list[float]:
+    """Comma-separated float env parser.
+
+    Örnek:
+        CAPITAL_MILESTONE_LEVELS=100,1000,10000,100000,1000000
+    """
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return list(default)
+    values: list[float] = []
+    for part in str(raw).split(","):
+        item = part.strip()
+        if not item:
+            continue
+        try:
+            value = float(item)
+        except ValueError:
+            log.warning("%s içinde geçersiz değer %r atlandı.", name, item)
+            continue
+        if min_value is not None and value < min_value:
+            log.warning("%s içinde minimum altı değer %s atlandı.", name, value)
+            continue
+        values.append(value)
+    if not values:
+        log.warning("%s geçerli liste üretemedi; varsayılan kullanılıyor: %s", name, default)
+        return list(default)
+    return values
 
 
 # Early helper: some configuration blocks use clamp before the Math Helpers
@@ -353,6 +382,16 @@ PORTFOLIO_MAX_BTC_BETA_LONGS = env_int("PORTFOLIO_MAX_BTC_BETA_LONGS", 2, min_va
 PORTFOLIO_MAX_HIGH_BETA_CLUSTER = env_int("PORTFOLIO_MAX_HIGH_BETA_CLUSTER", 1, min_value=0)
 PORTFOLIO_CORRELATION_RISK_MULTIPLIER = env_float("PORTFOLIO_CORRELATION_RISK_MULTIPLIER", 0.70, min_value=0.0)
 
+# Regime Edge Guard v1
+# Aynı rejim + yön + coin grubu kombinasyonu geçmişte kötü sonuç verdiyse
+# sistem aynı hatayı tekrar etmek yerine riski azaltır veya trade'i kapatır.
+REGIME_EDGE_GUARD_ENABLED = os.getenv("REGIME_EDGE_GUARD_ENABLED", "1") == "1"
+REGIME_EDGE_MIN_TRADES = env_int("REGIME_EDGE_MIN_TRADES", 6, min_value=2)
+REGIME_EDGE_MIN_WIN_RATE = env_float("REGIME_EDGE_MIN_WIN_RATE", 0.45, min_value=0.0)
+REGIME_EDGE_MIN_AVG_PNL_PCT = env_float("REGIME_EDGE_MIN_AVG_PNL_PCT", 0.0)
+REGIME_EDGE_BAD_MULTIPLIER = env_float("REGIME_EDGE_BAD_MULTIPLIER", 0.50, min_value=0.0)
+REGIME_EDGE_BLOCK_BAD = os.getenv("REGIME_EDGE_BLOCK_BAD", "0") == "1"
+
 AI_SIGNAL_OPTIMIZATION_ENABLED = os.getenv("AI_SIGNAL_OPTIMIZATION_ENABLED", "1") == "1"
 AI_OPTIMIZATION_REPORT_FILE = os.getenv("AI_OPTIMIZATION_REPORT_FILE", "ai_signal_optimization_report.json")
 AI_MIN_CONFIDENCE_FOR_BOOST = env_float("AI_MIN_CONFIDENCE_FOR_BOOST", 0.55, min_value=0.0)
@@ -439,6 +478,23 @@ MOVEMENT_ALERT_THRESHOLDS: dict[str, dict[str, float]] = {
 
 ACCOUNT_SIZE_USD = env_float("ACCOUNT_SIZE_USD", 800.0, min_value=1.0)
 
+# Capital Milestone Guard v1
+# Hedef yolculuk: 100 → 1K → 10K → 100K → 1M. Bu guard, ulaşılan
+# basamağı state içinde izler; sermaye basamak altına sarkarsa yeni
+# trade açmayı yavaşlatır veya durdurur.
+CAPITAL_MILESTONE_GUARD_ENABLED = os.getenv("CAPITAL_MILESTONE_GUARD_ENABLED", "1") == "1"
+CAPITAL_MILESTONE_LEVELS = sorted(set(env_float_list(
+    "CAPITAL_MILESTONE_LEVELS",
+    [100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0],
+    min_value=1.0,
+)))
+CAPITAL_MILESTONE_RETAIN_PCT = env_float("CAPITAL_MILESTONE_RETAIN_PCT", 0.90, min_value=0.50)
+CAPITAL_MILESTONE_DEFENSIVE_DD_PCT = env_float("CAPITAL_MILESTONE_DEFENSIVE_DD_PCT", 0.08, min_value=0.01)
+CAPITAL_MILESTONE_STOP_DD_PCT = env_float("CAPITAL_MILESTONE_STOP_DD_PCT", 0.15, min_value=0.02)
+CAPITAL_MILESTONE_NEAR_NEXT_PCT = env_float("CAPITAL_MILESTONE_NEAR_NEXT_PCT", 0.90, min_value=0.50)
+CAPITAL_MILESTONE_DEFENSIVE_MULTIPLIER = env_float("CAPITAL_MILESTONE_DEFENSIVE_MULTIPLIER", 0.55, min_value=0.0)
+CAPITAL_MILESTONE_NEAR_NEXT_MULTIPLIER = env_float("CAPITAL_MILESTONE_NEAR_NEXT_MULTIPLIER", 0.80, min_value=0.0)
+
 CAPITAL_LADDER_PROFILES = [
     {"min_equity": 0.0, "max_equity": 1_000.0, "label": "BUILD_100_TO_1K", "risk_cap_multiplier": 0.95},
     {"min_equity": 1_000.0, "max_equity": 10_000.0, "label": "GROW_1K_TO_10K", "risk_cap_multiplier": 1.00},
@@ -458,6 +514,129 @@ def capital_ladder_profile(equity_usd: float) -> dict:
         if profile["min_equity"] <= e < profile["max_equity"]:
             return profile
     return CAPITAL_LADDER_PROFILES[-1]
+
+
+def _capital_milestone_for(value: float) -> float:
+    """Return the highest configured milestone reached by value."""
+    reached = [m for m in CAPITAL_MILESTONE_LEVELS if value >= m]
+    return max(reached) if reached else 0.0
+
+
+def _capital_next_milestone(value: float) -> Optional[float]:
+    """Return the next configured capital milestone above value."""
+    for milestone in CAPITAL_MILESTONE_LEVELS:
+        if value < milestone:
+            return milestone
+    return None
+
+
+def capital_milestone_guard(
+    equity_usd: float,
+    peak_equity_usd: float,
+    state_mgr: Optional["StateManager"] = None,
+) -> dict:
+    """Capital protection layer for the 100 → 1M ladder.
+
+    Bu katman bir sinyal üretmez; sadece risk modunu etkiler.
+    - Yeni bir sermaye basamağı görüldüğünde state'e kaydeder.
+    - Ulaşılan basamaktan anlamlı geri düşüşte DEFENSIVE/STOP üretir.
+    - Bir sonraki basamağa çok yaklaşılmışsa kârı korumak için riski azaltır.
+    """
+    if not CAPITAL_MILESTONE_GUARD_ENABLED:
+        return {
+            "enabled": False,
+            "mode": "OFF",
+            "allow_new_trades": True,
+            "risk_multiplier": 1.0,
+            "reason": "Capital Milestone Guard kapalı.",
+        }
+
+    equity = max(0.0, float(equity_usd or 0.0))
+    peak = max(equity, float(peak_equity_usd or equity or ACCOUNT_SIZE_USD))
+    reached_by_peak = _capital_milestone_for(peak)
+
+    stored = 0.0
+    if state_mgr is not None:
+        try:
+            stored = float(state_mgr.get_meta("highest_capital_milestone_reached", 0.0) or 0.0)
+        except Exception:
+            stored = 0.0
+
+    highest = max(stored, reached_by_peak)
+    if state_mgr is not None and highest > stored:
+        state_mgr.set_meta("highest_capital_milestone_reached", highest)
+        state_mgr.set_meta("highest_capital_milestone_reached_at", now_ts())
+        log.info("Yeni capital milestone görüldü: %.2f USD", highest)
+
+    next_milestone = _capital_next_milestone(equity)
+    mode = "NORMAL"
+    allow = True
+    risk_mult = 1.0
+    reasons: list[str] = []
+
+    if highest > 0:
+        milestone_dd = max(0.0, (highest - equity) / highest)
+        retention_floor = highest * clamp(CAPITAL_MILESTONE_RETAIN_PCT, 0.50, 0.999)
+        if milestone_dd >= CAPITAL_MILESTONE_STOP_DD_PCT:
+            mode, allow, risk_mult = "STOP", False, 0.0
+            reasons.append(
+                f"Ulaşılan {highest:,.0f}$ basamağından geri düşüş %{milestone_dd*100:.2f}; yeni trade kapalı."
+            )
+        elif milestone_dd >= CAPITAL_MILESTONE_DEFENSIVE_DD_PCT or equity < retention_floor:
+            mode, risk_mult = "DEFENSIVE", min(risk_mult, CAPITAL_MILESTONE_DEFENSIVE_MULTIPLIER)
+            reasons.append(
+                f"Ulaşılan {highest:,.0f}$ basamağı korunuyor; equity {equity:,.2f}$, risk azaltıldı."
+            )
+    else:
+        milestone_dd = 0.0
+        retention_floor = 0.0
+
+    if allow and next_milestone:
+        near_next = equity / next_milestone if next_milestone > 0 else 0.0
+        if near_next >= CAPITAL_MILESTONE_NEAR_NEXT_PCT and mode != "STOP":
+            mode = "DEFENSIVE" if mode == "NORMAL" else mode
+            risk_mult = min(risk_mult, CAPITAL_MILESTONE_NEAR_NEXT_MULTIPLIER)
+            reasons.append(
+                f"{next_milestone:,.0f}$ basamağına %{near_next*100:.1f} yaklaşıldı; kâr koruma modu."
+            )
+    else:
+        near_next = 1.0 if next_milestone is None else 0.0
+
+    if not reasons:
+        reasons.append("Sermaye basamağı riski normal.")
+
+    return {
+        "enabled": True,
+        "mode": mode,
+        "allow_new_trades": allow,
+        "risk_multiplier": round(float(risk_mult), 3),
+        "equity": round(equity, 4),
+        "peak_equity": round(peak, 4),
+        "highest_milestone_reached": highest,
+        "next_milestone": next_milestone,
+        "near_next_milestone_pct": round(near_next, 4) if next_milestone else None,
+        "milestone_drawdown_pct": round(milestone_dd, 5),
+        "retention_floor": round(retention_floor, 4),
+        "reason": " ".join(reasons),
+    }
+
+
+def format_capital_milestone_brief(state_mgr: "StateManager" = None) -> str:
+    try:
+        rg = risk_governor_snapshot(state_mgr or _STATE_MGR)
+        cmg = rg.get("capital_milestone_guard") or {}
+        if not cmg:
+            return "CapitalGuard: yok"
+        next_m = cmg.get("next_milestone")
+        next_txt = f"{float(next_m):,.0f}$" if next_m else "tamam"
+        return (
+            f"CapitalGuard: {cmg.get('mode', '-')} | "
+            f"Eq {format_money(cmg.get('equity'))} | "
+            f"Milestone {float(cmg.get('highest_milestone_reached', 0) or 0):,.0f}$ | "
+            f"Next {next_txt}"
+        )
+    except Exception:
+        return "CapitalGuard: okunamadı"
 
 TRADE_PLAN_CONFIG: dict[str, dict[str, float]] = {
     "CORE": {
@@ -2474,8 +2653,10 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
     rg_mult = float(rg_snapshot.get("risk_multiplier", 1.0) or 0.0)
     pcorr = result.get("portfolio_correlation") or {}
     corr_mult = float(pcorr.get("risk_multiplier", 1.0) or 1.0)
+    regime_edge = result.get("regime_edge_guard") or {}
+    regime_edge_mult = float(regime_edge.get("risk_multiplier", 1.0) or 1.0)
 
-    raw_multiplier = q_mult * c_mult * r_mult * edge_multiplier * ls_mult * rg_mult * corr_mult
+    raw_multiplier = q_mult * c_mult * r_mult * edge_multiplier * ls_mult * rg_mult * corr_mult * regime_edge_mult
 
     # Risk-off / chaos rejimlerinde pozisyon büyütmeyi kapat.
     # Not: Rejim isimleri detect_market_regime() ile birebir eşleşmeli.
@@ -2503,6 +2684,7 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         f"Regime {regime_name} çarpanı x{r_mult:.2f}",
         f"Risk Governor {rg_snapshot.get('mode', '-')} çarpanı x{rg_mult:.2f}",
         f"Portfolio correlation çarpanı x{corr_mult:.2f}",
+        f"Regime edge çarpanı x{regime_edge_mult:.2f}",
         f"Loss streak {loss_streak} çarpanı x{ls_mult:.2f}",
         f"Capital ladder {ladder.get('label', '-')} üst risk limiti %{max_risk_cap*100:.2f}",
         *edge_notes,
@@ -2527,6 +2709,8 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         "loss_streak_multiplier": ls_mult,
         "risk_governor_multiplier": rg_mult,
         "portfolio_correlation_multiplier": corr_mult,
+        "regime_edge_multiplier": regime_edge_mult,
+        "regime_edge_guard": regime_edge,
         "risk_governor": rg_snapshot,
         "symbol_edge": symbol_edge,
         "group_edge": group_edge,
@@ -3171,6 +3355,17 @@ def paper_close_trade(t: dict, price: float, reason: str) -> None:
     open_fee = float(paper.get("open_fee_usd", 0) or 0)
     exit_price = _paper_cost_adjusted_price(float(price), direction=direction, action="close", spread_bps=spread_bps, group=group)
     gross_pnl_usd = (exit_price - fill_price) * qty if direction == "LONG" else (fill_price - exit_price) * qty
+    pm_override_used = False
+    if t.get("pm_realized_pnl_usd") is not None:
+        # Position Management may have partially closed at TP1/TP2 and/or scaled in.
+        # On final close, use the PM realized path as gross PnL; then subtract
+        # paper fees so Risk Governor and ML validation evaluate the strategy
+        # actually being simulated, not a single full-size exit approximation.
+        try:
+            gross_pnl_usd = float(t.get("pm_realized_pnl_usd") or 0.0)
+            pm_override_used = True
+        except (TypeError, ValueError):
+            pm_override_used = False
     close_fee = _paper_fee(abs(qty * exit_price))
     net_pnl_usd = gross_pnl_usd - open_fee - close_fee
     basis_notional = abs(qty * fill_price) if qty else float(t.get("position_notional", 0) or 0)
@@ -3179,6 +3374,7 @@ def paper_close_trade(t: dict, price: float, reason: str) -> None:
                   "close_reason": reason, "exit_reference_price": float(price), "exit_fill_price": exit_price,
                   "close_fee_usd": close_fee, "gross_pnl_usd": gross_pnl_usd, "net_pnl_usd": net_pnl_usd,
                   "net_pnl_pct": net_pnl_pct, "total_fee_usd": open_fee + close_fee,
+                  "pm_override_used": pm_override_used,
                   "roundtrip_cost_pct": (open_fee + close_fee) / basis_notional if basis_notional > 0 else 0.0})
     t["paper_execution"] = paper
     append_jsonl(PAPER_ORDERS_FILE, {"event": "POSITION_CLOSED", **paper})
@@ -3594,12 +3790,15 @@ def apply_trade_filters(result: dict) -> dict:
     ee = result.get("entry_engine") or {}
     rg = result.get("risk_governor") or {}
     corr = result.get("portfolio_correlation") or {}
+    reg_edge = result.get("regime_edge_guard") or {}
 
     veto_reason = None
     if rg and not rg.get("allowed", True):
         veto_reason = f"Risk Governor: {rg.get('reason', '-') }"
     elif corr and not corr.get("allowed", True):
         veto_reason = f"Portfolio correlation: {corr.get('reason', '-')}"
+    elif reg_edge and not reg_edge.get("allowed", True):
+        veto_reason = f"Regime edge guard: {reg_edge.get('reason', '-')}"
     elif rc and not rc.get("allowed", True):
         veto_reason = rc.get("reason", "Regime Commander blokladı.")
     elif tq and not tq.get("tradable", True):
@@ -4121,13 +4320,25 @@ def _rg_trade_realized_usd(t: dict) -> float:
         qty = float(t.get("quantity", 0) or 0)
         entry = float(t.get("entry", 0) or 0)
         notional = abs(qty * entry)
+
     # Prefer paper net PnL if available because it includes fee/slippage.
+    # If position-management partial TP / scale-in produced a PM-aware paper
+    # override, that is the most faithful realized result for this strategy.
     paper = t.get("paper_execution") or {}
     if paper.get("status") == "CLOSED" and paper.get("net_pnl_usd") is not None:
         try:
             return float(paper.get("net_pnl_usd") or 0.0)
         except (TypeError, ValueError):
             pass
+
+    # Fallback: PM realized PnL captures partial TP and scale-in better than
+    # a simple final-entry/final-exit percentage.
+    if t.get("pm_realized_pnl_usd") is not None:
+        try:
+            return float(t.get("pm_realized_pnl_usd") or 0.0)
+        except (TypeError, ValueError):
+            pass
+
     return pnl_pct * notional
 
 
@@ -4205,6 +4416,9 @@ def risk_governor_snapshot(state_mgr: StateManager = _STATE_MGR, regime: Optiona
     weekly_pct = weekly_pnl / ACCOUNT_SIZE_USD if ACCOUNT_SIZE_USD > 0 else 0.0
     loss_streak = _rg_loss_streak(closed)
     equity = _rg_equity_metrics(closed)
+    equity_now = float(equity.get("equity", ACCOUNT_SIZE_USD) or ACCOUNT_SIZE_USD)
+    peak_equity = float(equity.get("peak_equity", ACCOUNT_SIZE_USD) or ACCOUNT_SIZE_USD)
+    capital_guard = capital_milestone_guard(equity_now, peak_equity, state_mgr)
     dd = float(equity.get("drawdown_pct", 0.0) or 0.0)
     avg_slip = _rg_avg_paper_slippage_bps()
     failures = int(state_mgr.get_meta("consecutive_failures", 0) or 0)
@@ -4215,6 +4429,15 @@ def risk_governor_snapshot(state_mgr: StateManager = _STATE_MGR, regime: Optiona
     allow = True
     risk_mult = 1.0
     reasons: list[str] = []
+
+    if capital_guard.get("enabled"):
+        cg_mult = float(capital_guard.get("risk_multiplier", 1.0) or 0.0)
+        if not capital_guard.get("allow_new_trades", True):
+            mode, allow, risk_mult = "STOP", False, 0.0
+            reasons.append(f"Capital Guard: {capital_guard.get('reason', '-')}")
+        elif capital_guard.get("mode") == "DEFENSIVE":
+            mode, risk_mult = "DEFENSIVE", min(risk_mult, cg_mult)
+            reasons.append(f"Capital Guard: {capital_guard.get('reason', '-')}")
 
     if paused_until and now_ts() < paused_until:
         mode, allow, risk_mult = "STOP", False, 0.0
@@ -4278,6 +4501,7 @@ def risk_governor_snapshot(state_mgr: StateManager = _STATE_MGR, regime: Optiona
         "peak_equity": round(float(equity.get("peak_equity", ACCOUNT_SIZE_USD)), 4),
         "drawdown_pct": round(dd, 5),
         "avg_paper_slippage_bps": round(avg_slip, 2) if avg_slip is not None else None,
+        "capital_milestone_guard": capital_guard,
         "consecutive_failures": failures,
         "regime": rg_name,
         "reasons": reasons[:8],
@@ -4349,6 +4573,121 @@ def format_portfolio_correlation_brief(state_mgr: StateManager = _STATE_MGR) -> 
     shorts = sum(1 for t in active if t.get("direction") == "SHORT")
     hb = sum(1 for t in active if t.get("group") == "HIGH_BETA")
     return f"PortfolioCorr: active {len(active)} | L/S {longs}/{shorts} | HB {hb}"
+
+
+def regime_edge_guard(result: dict, state_mgr: StateManager = _STATE_MGR) -> dict:
+    """Adaptive regime-combination guard.
+
+    Statik rejim matrisi iyi bir başlangıçtır; bu katman ise geçmiş kapalı
+    trade'lerden öğrenerek "bu rejim + bu yön + bu grup" kombinasyonunun
+    pratikte çalışıp çalışmadığını kontrol eder.
+    """
+    if not REGIME_EDGE_GUARD_ENABLED or result.get("signal") not in {"LONG", "SHORT"}:
+        return {
+            "enabled": REGIME_EDGE_GUARD_ENABLED,
+            "ready": False,
+            "allowed": True,
+            "risk_multiplier": 1.0,
+            "reason": "Regime edge guard kapalı veya işlem sinyali yok.",
+        }
+
+    regime_name = (result.get("regime") or {}).get("regime")
+    direction = result.get("signal")
+    group = result.get("group")
+    symbol = result.get("symbol")
+
+    rows = []
+    for t in _rg_closed_trades(state_mgr):
+        if not isinstance(t, dict):
+            continue
+        t_regime = (t.get("regime") or {}).get("regime")
+        if t_regime != regime_name:
+            continue
+        if t.get("direction") != direction:
+            continue
+        # Grup eşleşmesini önceliklendir; aynı rejim+yön+grup ana örneklem.
+        if group and t.get("group") != group:
+            continue
+        pnl_pct = float(t.get("pm_realized_pnl_pct", t.get("pnl_pct", 0)) or 0)
+        pnl_usd = _rg_trade_realized_usd(t)
+        rows.append({
+            "symbol": t.get("symbol"),
+            "pnl_pct": pnl_pct,
+            "pnl_usd": pnl_usd,
+            "win": pnl_usd > 0,
+        })
+
+    sample = len(rows)
+    if sample < REGIME_EDGE_MIN_TRADES:
+        return {
+            "enabled": True,
+            "ready": False,
+            "allowed": True,
+            "risk_multiplier": 1.0,
+            "sample": sample,
+            "min_required": REGIME_EDGE_MIN_TRADES,
+            "regime": regime_name,
+            "direction": direction,
+            "group": group,
+            "symbol": symbol,
+            "reason": f"Rejim edge verisi yetersiz ({sample}/{REGIME_EDGE_MIN_TRADES}).",
+        }
+
+    wins = sum(1 for r in rows if r["win"])
+    win_rate = wins / sample if sample else 0.0
+    avg_pnl_pct = sum(float(r["pnl_pct"]) for r in rows) / sample if sample else 0.0
+    total_pnl_usd = sum(float(r["pnl_usd"]) for r in rows)
+    bad_combo = win_rate < REGIME_EDGE_MIN_WIN_RATE and avg_pnl_pct <= REGIME_EDGE_MIN_AVG_PNL_PCT
+
+    allowed = True
+    risk_mult = 1.0
+    if bad_combo:
+        risk_mult = REGIME_EDGE_BAD_MULTIPLIER
+        allowed = not REGIME_EDGE_BLOCK_BAD
+
+    return {
+        "enabled": True,
+        "ready": True,
+        "allowed": allowed,
+        "risk_multiplier": round(float(risk_mult), 3),
+        "regime": regime_name,
+        "direction": direction,
+        "group": group,
+        "symbol": symbol,
+        "sample": sample,
+        "wins": wins,
+        "win_rate": round(win_rate, 4),
+        "avg_pnl_pct": round(avg_pnl_pct, 5),
+        "total_pnl_usd": round(total_pnl_usd, 4),
+        "bad_combo": bad_combo,
+        "reason": (
+            f"RegimeEdge {regime_name}/{direction}/{group}: "
+            f"win %{win_rate*100:.1f}, avg pnl %{avg_pnl_pct*100:.2f}, "
+            f"sample {sample}; {'risk azaltıldı' if bad_combo else 'uygun'}."
+        ),
+    }
+
+
+def format_regime_edge_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    closed = _rg_closed_trades(state_mgr)
+    if not closed:
+        return "RegimeEdge: veri yok"
+    buckets: dict[tuple[str, str, str], list[float]] = {}
+    for t in closed:
+        regime_name = (t.get("regime") or {}).get("regime", "UNKNOWN")
+        key = (regime_name, t.get("direction", "-"), t.get("group", "-"))
+        buckets.setdefault(key, []).append(_rg_trade_realized_usd(t))
+    ready = {k: v for k, v in buckets.items() if len(v) >= REGIME_EDGE_MIN_TRADES}
+    if not ready:
+        return f"RegimeEdge: örneklem birikiyor ({len(closed)} closed)"
+    best_key, best_vals = max(ready.items(), key=lambda kv: sum(kv[1]) / max(1, len(kv[1])))
+    worst_key, worst_vals = min(ready.items(), key=lambda kv: sum(kv[1]) / max(1, len(kv[1])))
+    best_avg = sum(best_vals) / len(best_vals)
+    worst_avg = sum(worst_vals) / len(worst_vals)
+    return (
+        f"RegimeEdge: best {best_key[0]}/{best_key[1]}/{best_key[2]} {format_money(best_avg)} avg | "
+        f"worst {worst_key[0]}/{worst_key[1]}/{worst_key[2]} {format_money(worst_avg)} avg"
+    )
 
 
 
@@ -4632,6 +4971,7 @@ def live_readiness_report(state_mgr: StateManager = _STATE_MGR) -> dict:
     edge = edge_analysis(state_mgr)
     rg = risk_governor_snapshot(state_mgr)
     paper = paper_execution_report(state_mgr) if 'paper_execution_report' in globals() else {"ready": False}
+    capital_guard = rg.get("capital_milestone_guard") or {}
     closed = int(edge.get("closed_trades", 0) or 0)
     pf = edge.get("profit_factor")
     pf_ok = pf is not None and float(pf) >= LIVE_READY_MIN_PROFIT_FACTOR
@@ -4647,6 +4987,7 @@ def live_readiness_report(state_mgr: StateManager = _STATE_MGR) -> dict:
         "paper_ok": paper_ok,
         "ml_validation_ok": bool(mlv.get("passed")),
         "risk_mode_ok": rg.get("mode") not in {"STOP"},
+        "capital_guard_ok": capital_guard.get("mode") not in {"STOP"},
         "live_keys_present": bool(MEXC_API_KEY and MEXC_API_SECRET),
         "explicit_live_flag": ENABLE_LIVE_TRADING,
     }
@@ -4659,6 +5000,7 @@ def live_readiness_report(state_mgr: StateManager = _STATE_MGR) -> dict:
         "profit_factor": pf,
         "drawdown_pct": rg.get("drawdown_pct"),
         "paper": paper,
+        "capital_milestone_guard": capital_guard,
         "ml_validation": mlv,
         "summary": "LIVE_READY" if ready else "LIVE_NOT_READY_SAFE_GUARD",
         "updated_at": now_ts(),
@@ -6277,6 +6619,7 @@ def _process_symbol(
         result["regime_commander"] = regime_commander_decision(result, regime)
         result["portfolio_check"] = portfolio_risk_check(result, state_mgr)
         result["portfolio_correlation"] = portfolio_correlation_check(result, state_mgr)
+        result["regime_edge_guard"] = regime_edge_guard(result, state_mgr)
         result["risk_governor"] = risk_governor_allows_trade(result, state_mgr)
         result = apply_trade_filters(result)
 
@@ -6313,6 +6656,8 @@ def _process_symbol(
             "risk_mode": (result.get("risk_governor", {}).get("snapshot") or {}).get("mode"),
             "risk_allowed": result.get("risk_governor", {}).get("allowed"),
             "portfolio_corr_allowed": result.get("portfolio_correlation", {}).get("allowed"),
+            "regime_edge_allowed": result.get("regime_edge_guard", {}).get("allowed"),
+            "regime_edge_ready": result.get("regime_edge_guard", {}).get("ready"),
             "ai_adjustment": result.get("ai_optimization", {}).get("score_adjustment"),
             "last_alert_ts": last_alert_ts,
             "pending_alert_type": pending,
@@ -6377,7 +6722,9 @@ def _send_periodic_messages(
             f"{format_paper_execution_brief(state_mgr)}\n"
             f"{format_position_management_heartbeat(state_mgr)}\n"
             f"{format_risk_governor_brief(state_mgr)}\n"
+            f"{format_capital_milestone_brief(state_mgr)}\n"
             f"{format_portfolio_correlation_brief(state_mgr)}\n"
+            f"{format_regime_edge_brief(state_mgr)}\n"
             f"{format_live_readiness_brief(state_mgr)}\n"
             f"{format_ai_optimization_brief(state_mgr)}\n"
             f"{format_ml_validation_brief(state_mgr)}\n"
@@ -6392,7 +6739,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
     """Ana bot döngüsü."""
     log.info("BOT BAŞLADI v%s", __version__)
     send_message(
-        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + PaperExec + PM + RiskGov/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON"
+        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + PaperExec + PM + RiskGov/CapitalGuard/RegimeEdge/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON"
     )
 
     state_mgr = _STATE_MGR
