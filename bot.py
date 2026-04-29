@@ -36,7 +36,7 @@ from flask import Flask
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-__version__ = "2.3.0-position-management-v1"
+__version__ = "2.4.0-risk-governor-portfolio-ai-v1"
 
 # ============================================================
 # LOGGING
@@ -79,6 +79,8 @@ def env_float(name: str, default: float, *, min_value: Optional[float] = None) -
     return value
 
 
+# Early helper: some configuration blocks use clamp before the Math Helpers
+# section is reached. The same implementation is repeated later intentionally.
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
@@ -326,6 +328,42 @@ PM_CONFIG: dict[str, dict[str, Any]] = {
     },
 }
 
+
+
+# Risk Governor + Portfolio Correlation + AI Signal Optimization v1
+RISK_GOVERNOR_ENABLED = os.getenv("RISK_GOVERNOR_ENABLED", "1") == "1"
+RISK_GOVERNOR_LOG_FILE = os.getenv("RISK_GOVERNOR_LOG_FILE", "risk_governor_log.jsonl")
+RISK_GOVERNOR_REPORT_FILE = os.getenv("RISK_GOVERNOR_REPORT_FILE", "risk_governor_report.json")
+RISK_MAX_DAILY_LOSS_PCT = env_float("RISK_MAX_DAILY_LOSS_PCT", 0.05, min_value=0.001)
+RISK_MAX_WEEKLY_LOSS_PCT = env_float("RISK_MAX_WEEKLY_LOSS_PCT", 0.12, min_value=0.001)
+RISK_MAX_DRAWDOWN_DEFENSIVE_PCT = env_float("RISK_MAX_DRAWDOWN_DEFENSIVE_PCT", 0.10, min_value=0.001)
+RISK_MAX_DRAWDOWN_STOP_PCT = env_float("RISK_MAX_DRAWDOWN_STOP_PCT", 0.15, min_value=0.001)
+RISK_LOSS_STREAK_DEFENSIVE = env_int("RISK_LOSS_STREAK_DEFENSIVE", 2, min_value=1)
+RISK_LOSS_STREAK_PAUSE = env_int("RISK_LOSS_STREAK_PAUSE", 4, min_value=2)
+RISK_PAUSE_SECONDS = env_int("RISK_PAUSE_SECONDS", 6 * 60 * 60, min_value=60)
+RISK_API_FAILURE_DEFENSIVE = env_int("RISK_API_FAILURE_DEFENSIVE", 5, min_value=1)
+RISK_API_FAILURE_STOP = env_int("RISK_API_FAILURE_STOP", 10, min_value=2)
+RISK_PAPER_SLIPPAGE_WARN_BPS = env_float("RISK_PAPER_SLIPPAGE_WARN_BPS", 12.0, min_value=0.0)
+RISK_PAPER_SLIPPAGE_STOP_BPS = env_float("RISK_PAPER_SLIPPAGE_STOP_BPS", 25.0, min_value=0.0)
+RISK_NEWS_CHAOS_REDUCE = os.getenv("RISK_NEWS_CHAOS_REDUCE", "1") == "1"
+
+PORTFOLIO_CORRELATION_ENABLED = os.getenv("PORTFOLIO_CORRELATION_ENABLED", "1") == "1"
+PORTFOLIO_MAX_CORRELATED_ACTIVE = env_int("PORTFOLIO_MAX_CORRELATED_ACTIVE", 2, min_value=1)
+PORTFOLIO_MAX_BTC_BETA_LONGS = env_int("PORTFOLIO_MAX_BTC_BETA_LONGS", 2, min_value=1)
+PORTFOLIO_MAX_HIGH_BETA_CLUSTER = env_int("PORTFOLIO_MAX_HIGH_BETA_CLUSTER", 1, min_value=0)
+PORTFOLIO_CORRELATION_RISK_MULTIPLIER = env_float("PORTFOLIO_CORRELATION_RISK_MULTIPLIER", 0.70, min_value=0.0)
+
+AI_SIGNAL_OPTIMIZATION_ENABLED = os.getenv("AI_SIGNAL_OPTIMIZATION_ENABLED", "1") == "1"
+AI_OPTIMIZATION_REPORT_FILE = os.getenv("AI_OPTIMIZATION_REPORT_FILE", "ai_signal_optimization_report.json")
+AI_MIN_CONFIDENCE_FOR_BOOST = env_float("AI_MIN_CONFIDENCE_FOR_BOOST", 0.55, min_value=0.0)
+AI_MAX_SCORE_ADJUSTMENT = env_float("AI_MAX_SCORE_ADJUSTMENT", 0.20, min_value=0.0)
+AI_MIN_TRADES_FOR_COMPONENT_ADJUST = env_int("AI_MIN_TRADES_FOR_COMPONENT_ADJUST", 12, min_value=3)
+
+LIVE_READINESS_REPORT_FILE = os.getenv("LIVE_READINESS_REPORT_FILE", "live_readiness_report.json")
+LIVE_READY_MIN_CLOSED_TRADES = env_int("LIVE_READY_MIN_CLOSED_TRADES", 30, min_value=1)
+LIVE_READY_MIN_PROFIT_FACTOR = env_float("LIVE_READY_MIN_PROFIT_FACTOR", 1.10, min_value=0.0)
+LIVE_READY_MAX_DRAWDOWN_PCT = env_float("LIVE_READY_MAX_DRAWDOWN_PCT", 0.12, min_value=0.0)
+LIVE_READY_REQUIRE_PAPER = os.getenv("LIVE_READY_REQUIRE_PAPER", "1") == "1"
 
 if PAPER_ORDER_TYPE not in {"MARKET", "LIMIT_AT_ENTRY"}:
     log.warning("PAPER_ORDER_TYPE=%r gecersiz; MARKET kullanılıyor.", PAPER_ORDER_TYPE)
@@ -1177,6 +1215,10 @@ def closed_bar_return(closes: list[float], bars: int, *, series_name: str) -> fl
     latest_closed = closes[-2]
     reference = closes[-(bars + 2)]
     return pct(latest_closed, reference)
+
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
 
 
 def ema(values: list[float], period: int) -> float:
@@ -2388,8 +2430,12 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
     c_mult = _ps_confidence_multiplier(confidence)
     r_mult = _ps_regime_multiplier(signal, regime_name)
     ls_mult = _ps_loss_streak_multiplier(loss_streak)
+    rg_snapshot = risk_governor_snapshot(state_mgr, regime) if 'risk_governor_snapshot' in globals() else {"risk_multiplier": 1.0, "mode": "NORMAL"}
+    rg_mult = float(rg_snapshot.get("risk_multiplier", 1.0) or 0.0)
+    pcorr = result.get("portfolio_correlation") or {}
+    corr_mult = float(pcorr.get("risk_multiplier", 1.0) or 1.0)
 
-    raw_multiplier = q_mult * c_mult * r_mult * edge_multiplier * ls_mult
+    raw_multiplier = q_mult * c_mult * r_mult * edge_multiplier * ls_mult * rg_mult * corr_mult
 
     # Risk-off / chaos rejimlerinde pozisyon büyütmeyi kapat.
     # Not: Rejim isimleri detect_market_regime() ile birebir eşleşmeli.
@@ -2415,6 +2461,8 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         f"Quality {grade or '-'} çarpanı x{q_mult:.2f}",
         f"Confidence %{confidence:.1f} çarpanı x{c_mult:.2f}",
         f"Regime {regime_name} çarpanı x{r_mult:.2f}",
+        f"Risk Governor {rg_snapshot.get('mode', '-')} çarpanı x{rg_mult:.2f}",
+        f"Portfolio correlation çarpanı x{corr_mult:.2f}",
         f"Loss streak {loss_streak} çarpanı x{ls_mult:.2f}",
         *edge_notes,
     ]
@@ -2433,6 +2481,9 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         "regime_multiplier": r_mult,
         "edge_multiplier": round(edge_multiplier, 3),
         "loss_streak_multiplier": ls_mult,
+        "risk_governor_multiplier": rg_mult,
+        "portfolio_correlation_multiplier": corr_mult,
+        "risk_governor": rg_snapshot,
         "symbol_edge": symbol_edge,
         "group_edge": group_edge,
         "reasons": reasons,
@@ -3495,9 +3546,15 @@ def apply_trade_filters(result: dict) -> dict:
     pc = result.get("portfolio_check") or {}
     rc = result.get("regime_commander") or {}
     ee = result.get("entry_engine") or {}
+    rg = result.get("risk_governor") or {}
+    corr = result.get("portfolio_correlation") or {}
 
     veto_reason = None
-    if rc and not rc.get("allowed", True):
+    if rg and not rg.get("allowed", True):
+        veto_reason = f"Risk Governor: {rg.get('reason', '-') }"
+    elif corr and not corr.get("allowed", True):
+        veto_reason = f"Portfolio correlation: {corr.get('reason', '-')}"
+    elif rc and not rc.get("allowed", True):
         veto_reason = rc.get("reason", "Regime Commander blokladı.")
     elif tq and not tq.get("tradable", True):
         veto_reason = f"Trade quality filtresi: {tq.get('grade', '-')}"
@@ -3998,6 +4055,381 @@ def position_management_report(state_mgr: StateManager = _STATE_MGR) -> dict:
 def format_position_management_heartbeat(state_mgr: StateManager = _STATE_MGR) -> str:
     return position_management_report(state_mgr).get("summary", "PM: rapor yok")
 
+
+# ============================================================
+# RISK GOVERNOR + PORTFOLIO CORRELATION + LIVE READINESS + AI OPTIMIZER v1
+# ============================================================
+
+def _rg_period_key(ts: Optional[int] = None, *, period: str = "day") -> str:
+    dt = datetime.fromtimestamp(ts or now_ts(), tz=timezone.utc).astimezone(ZoneInfo("Europe/Istanbul"))
+    if period == "week":
+        iso = dt.isocalendar()
+        return f"{iso.year}-W{iso.week:02d}"
+    return dt.strftime("%Y-%m-%d")
+
+
+def _rg_trade_realized_usd(t: dict) -> float:
+    pnl_pct = float(t.get("pnl_pct", 0) or 0)
+    notional = float(t.get("position_notional", 0) or 0)
+    if notional <= 0:
+        qty = float(t.get("quantity", 0) or 0)
+        entry = float(t.get("entry", 0) or 0)
+        notional = abs(qty * entry)
+    # Prefer paper net PnL if available because it includes fee/slippage.
+    paper = t.get("paper_execution") or {}
+    if paper.get("status") == "CLOSED" and paper.get("net_pnl_usd") is not None:
+        try:
+            return float(paper.get("net_pnl_usd") or 0.0)
+        except (TypeError, ValueError):
+            pass
+    return pnl_pct * notional
+
+
+def _rg_closed_trades(state_mgr: StateManager = _STATE_MGR) -> list[dict]:
+    rows = [
+        t for t in state_mgr.get_trades().values()
+        if isinstance(t, dict) and t.get("result") is not None
+    ]
+    rows.sort(key=lambda t: int(t.get("closed_at") or t.get("opened_at") or 0))
+    return rows
+
+
+def _rg_loss_streak(closed: list[dict]) -> int:
+    streak = 0
+    for t in reversed(closed):
+        pnl = _rg_trade_realized_usd(t)
+        if pnl < 0:
+            streak += 1
+        elif pnl > 0:
+            break
+    return streak
+
+
+def _rg_period_pnl(closed: list[dict], *, period: str) -> float:
+    current_key = _rg_period_key(period=period)
+    pnl = 0.0
+    for t in closed:
+        closed_at = int(t.get("closed_at") or 0)
+        if not closed_at:
+            continue
+        if _rg_period_key(closed_at, period=period) == current_key:
+            pnl += _rg_trade_realized_usd(t)
+    return pnl
+
+
+def _rg_equity_metrics(closed: list[dict]) -> dict:
+    equity = float(ACCOUNT_SIZE_USD)
+    peak = equity
+    max_dd = 0.0
+    for t in closed:
+        equity += _rg_trade_realized_usd(t)
+        peak = max(peak, equity)
+        dd = (peak - equity) / peak if peak > 0 else 0.0
+        max_dd = max(max_dd, dd)
+    return {"equity": equity, "peak_equity": peak, "drawdown_pct": max_dd}
+
+
+def _rg_avg_paper_slippage_bps(limit: int = 10) -> Optional[float]:
+    payload = _paper_json_read(PAPER_POSITIONS_FILE, {"positions": {}})
+    positions = payload.get("positions", {}) if isinstance(payload, dict) else {}
+    vals = []
+    for p in positions.values():
+        if not isinstance(p, dict):
+            continue
+        slip = p.get("entry_slippage_pct")
+        if slip is None:
+            continue
+        try:
+            vals.append(abs(float(slip)) * 10000.0)
+        except (TypeError, ValueError):
+            continue
+    if not vals:
+        return None
+    return sum(vals[-limit:]) / len(vals[-limit:])
+
+
+def risk_governor_snapshot(state_mgr: StateManager = _STATE_MGR, regime: Optional[dict] = None) -> dict:
+    if not RISK_GOVERNOR_ENABLED:
+        return {"enabled": False, "mode": "NORMAL", "allow_new_trades": True, "risk_multiplier": 1.0, "reasons": ["Risk Governor kapalı."]}
+
+    closed = _rg_closed_trades(state_mgr)
+    daily_pnl = _rg_period_pnl(closed, period="day")
+    weekly_pnl = _rg_period_pnl(closed, period="week")
+    daily_pct = daily_pnl / ACCOUNT_SIZE_USD if ACCOUNT_SIZE_USD > 0 else 0.0
+    weekly_pct = weekly_pnl / ACCOUNT_SIZE_USD if ACCOUNT_SIZE_USD > 0 else 0.0
+    loss_streak = _rg_loss_streak(closed)
+    equity = _rg_equity_metrics(closed)
+    dd = float(equity.get("drawdown_pct", 0.0) or 0.0)
+    avg_slip = _rg_avg_paper_slippage_bps()
+    failures = int(state_mgr.get_meta("consecutive_failures", 0) or 0)
+    paused_until = int(state_mgr.get_meta("risk_pause_until", 0) or 0)
+    rg_name = (regime or state_mgr.get_meta("last_global_regime", {}) or {}).get("regime")
+
+    mode = "NORMAL"
+    allow = True
+    risk_mult = 1.0
+    reasons: list[str] = []
+
+    if paused_until and now_ts() < paused_until:
+        mode, allow, risk_mult = "STOP", False, 0.0
+        reasons.append(f"Manuel/otomatik pause aktif: {max(0, (paused_until-now_ts())//60)} dk kaldı.")
+    if daily_pct <= -RISK_MAX_DAILY_LOSS_PCT:
+        mode, allow, risk_mult = "STOP", False, 0.0
+        reasons.append(f"Günlük zarar limiti aşıldı: %{daily_pct*100:.2f}.")
+    if weekly_pct <= -RISK_MAX_WEEKLY_LOSS_PCT:
+        mode, allow, risk_mult = "STOP", False, 0.0
+        reasons.append(f"Haftalık zarar limiti aşıldı: %{weekly_pct*100:.2f}.")
+    if dd >= RISK_MAX_DRAWDOWN_STOP_PCT:
+        mode, allow, risk_mult = "STOP", False, 0.0
+        reasons.append(f"Max drawdown stop eşiği: %{dd*100:.2f}.")
+    elif dd >= RISK_MAX_DRAWDOWN_DEFENSIVE_PCT and mode != "STOP":
+        mode, risk_mult = "DEFENSIVE", min(risk_mult, 0.45)
+        reasons.append(f"Drawdown defensive eşiği: %{dd*100:.2f}.")
+    if loss_streak >= RISK_LOSS_STREAK_PAUSE:
+        mode, allow, risk_mult = "STOP", False, 0.0
+        state_mgr.set_meta("risk_pause_until", now_ts() + RISK_PAUSE_SECONDS)
+        reasons.append(f"Loss streak pause: {loss_streak}.")
+    elif loss_streak >= RISK_LOSS_STREAK_DEFENSIVE and mode != "STOP":
+        mode, risk_mult = "DEFENSIVE", min(risk_mult, 0.60)
+        reasons.append(f"Loss streak defensive: {loss_streak}.")
+    if failures >= RISK_API_FAILURE_STOP:
+        mode, allow, risk_mult = "STOP", False, 0.0
+        reasons.append(f"API failure stop: {failures}.")
+    elif failures >= RISK_API_FAILURE_DEFENSIVE and mode != "STOP":
+        mode, risk_mult = "DEFENSIVE", min(risk_mult, 0.50)
+        reasons.append(f"API failure defensive: {failures}.")
+    if avg_slip is not None:
+        if avg_slip >= RISK_PAPER_SLIPPAGE_STOP_BPS:
+            mode, allow, risk_mult = "STOP", False, 0.0
+            reasons.append(f"Paper slippage stop: {avg_slip:.1f} bps.")
+        elif avg_slip >= RISK_PAPER_SLIPPAGE_WARN_BPS and mode != "STOP":
+            mode, risk_mult = "DEFENSIVE", min(risk_mult, 0.55)
+            reasons.append(f"Paper slippage yüksek: {avg_slip:.1f} bps.")
+    if rg_name == "NEWS_CHAOS":
+        mode, allow, risk_mult = "STOP", False, 0.0
+        reasons.append("NEWS_CHAOS: yeni trade kapalı.")
+    elif rg_name in {"RISK_OFF_TREND_DOWN", "CHOP_RANGE"} and mode not in {"STOP"}:
+        mode, risk_mult = "DEFENSIVE", min(risk_mult, 0.60)
+        reasons.append(f"{rg_name}: defensive mod.")
+    if not reasons:
+        if rg_name in {"RISK_ON_ALTSEASON", "RISK_ON_TREND_UP"} and daily_pct >= 0 and loss_streak == 0:
+            mode, risk_mult = "AGGRESSIVE", 1.15
+            reasons.append("Rejim ve performans büyüme moduna izin veriyor.")
+        else:
+            reasons.append("Risk normal.")
+
+    snap = {
+        "enabled": True,
+        "mode": mode,
+        "allow_new_trades": bool(allow),
+        "risk_multiplier": round(float(risk_mult), 3),
+        "daily_pnl_usd": round(daily_pnl, 4),
+        "daily_pnl_pct": round(daily_pct, 5),
+        "weekly_pnl_usd": round(weekly_pnl, 4),
+        "weekly_pnl_pct": round(weekly_pct, 5),
+        "loss_streak": loss_streak,
+        "equity": round(float(equity.get("equity", ACCOUNT_SIZE_USD)), 4),
+        "peak_equity": round(float(equity.get("peak_equity", ACCOUNT_SIZE_USD)), 4),
+        "drawdown_pct": round(dd, 5),
+        "avg_paper_slippage_bps": round(avg_slip, 2) if avg_slip is not None else None,
+        "consecutive_failures": failures,
+        "regime": rg_name,
+        "reasons": reasons[:8],
+        "updated_at": now_ts(),
+        "updated_at_tr": tr_now_text(),
+    }
+    _safe_write_json(RISK_GOVERNOR_REPORT_FILE, snap)
+    return snap
+
+
+def risk_governor_allows_trade(result: dict, state_mgr: StateManager = _STATE_MGR) -> dict:
+    snap = risk_governor_snapshot(state_mgr, result.get("regime"))
+    if not snap.get("allow_new_trades", True):
+        return {"allowed": False, "reason": "; ".join(snap.get("reasons", [])), "snapshot": snap}
+    return {"allowed": True, "reason": snap.get("reasons", ["Risk normal."])[0], "snapshot": snap}
+
+
+def format_risk_governor_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    rg = risk_governor_snapshot(state_mgr)
+    return (
+        f"RiskGov: {rg.get('mode', '-')} | "
+        f"Risk x{rg.get('risk_multiplier', 1)} | "
+        f"D %{float(rg.get('daily_pnl_pct', 0))*100:.2f} | "
+        f"DD %{float(rg.get('drawdown_pct', 0))*100:.2f} | "
+        f"LS {rg.get('loss_streak', 0)}"
+    )
+
+
+def portfolio_correlation_check(result: dict, state_mgr: StateManager = _STATE_MGR) -> dict:
+    if not PORTFOLIO_CORRELATION_ENABLED or result.get("signal") not in {"LONG", "SHORT"}:
+        return {"allowed": True, "risk_multiplier": 1.0, "reason": "Portfolio correlation kapalı veya sinyal yok."}
+    trades = state_mgr.get_trades()
+    active = [t for t in trades.values() if isinstance(t, dict) and t.get("result") is None]
+    direction = result.get("signal")
+    group = result.get("group")
+    symbol = result.get("symbol")
+    same_direction = [t for t in active if t.get("direction") == direction and t.get("symbol") != symbol]
+    high_beta_same = [t for t in same_direction if t.get("group") == "HIGH_BETA"]
+    btc_beta_longs = [t for t in active if t.get("direction") == "LONG" and t.get("group") in {"CORE", "HIGH_BETA"}]
+
+    reasons = []
+    risk_mult = 1.0
+    allowed = True
+    if len(same_direction) >= PORTFOLIO_MAX_CORRELATED_ACTIVE:
+        allowed = False
+        reasons.append(f"Aynı yönde korele aktif trade sayısı: {len(same_direction)}.")
+    if direction == "LONG" and len(btc_beta_longs) >= PORTFOLIO_MAX_BTC_BETA_LONGS:
+        risk_mult *= PORTFOLIO_CORRELATION_RISK_MULTIPLIER
+        reasons.append("BTC beta long yoğunluğu yüksek; risk azaltıldı.")
+    if group == "HIGH_BETA" and len(high_beta_same) >= PORTFOLIO_MAX_HIGH_BETA_CLUSTER:
+        allowed = False if PORTFOLIO_MAX_HIGH_BETA_CLUSTER == 0 else allowed
+        risk_mult *= PORTFOLIO_CORRELATION_RISK_MULTIPLIER
+        reasons.append("HIGH_BETA cluster riski yüksek.")
+    if not reasons:
+        reasons.append("Korelasyon riski uygun.")
+    return {
+        "allowed": allowed,
+        "risk_multiplier": round(risk_mult, 3),
+        "active_trades": len(active),
+        "same_direction": len(same_direction),
+        "high_beta_same": len(high_beta_same),
+        "reason": " ".join(reasons),
+    }
+
+
+def format_portfolio_correlation_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    active = [t for t in state_mgr.get_trades().values() if isinstance(t, dict) and t.get("result") is None]
+    longs = sum(1 for t in active if t.get("direction") == "LONG")
+    shorts = sum(1 for t in active if t.get("direction") == "SHORT")
+    hb = sum(1 for t in active if t.get("group") == "HIGH_BETA")
+    return f"PortfolioCorr: active {len(active)} | L/S {longs}/{shorts} | HB {hb}"
+
+
+def live_readiness_report(state_mgr: StateManager = _STATE_MGR) -> dict:
+    edge = edge_analysis(state_mgr)
+    rg = risk_governor_snapshot(state_mgr)
+    paper = paper_execution_report(state_mgr) if 'paper_execution_report' in globals() else {"ready": False}
+    closed = int(edge.get("closed_trades", 0) or 0)
+    pf = edge.get("profit_factor")
+    pf_ok = pf is not None and float(pf) >= LIVE_READY_MIN_PROFIT_FACTOR
+    dd_ok = float(rg.get("drawdown_pct", 0) or 0) <= LIVE_READY_MAX_DRAWDOWN_PCT
+    paper_ok = True
+    if LIVE_READY_REQUIRE_PAPER:
+        paper_ok = bool(paper.get("ready", False)) and int(paper.get("filled", 0) or 0) >= max(5, LIVE_READY_MIN_CLOSED_TRADES // 3)
+    checks = {
+        "closed_trades_ok": closed >= LIVE_READY_MIN_CLOSED_TRADES,
+        "profit_factor_ok": pf_ok,
+        "drawdown_ok": dd_ok,
+        "paper_ok": paper_ok,
+        "risk_mode_ok": rg.get("mode") not in {"STOP"},
+        "live_keys_present": bool(MEXC_API_KEY and MEXC_API_SECRET),
+        "explicit_live_flag": ENABLE_LIVE_TRADING,
+    }
+    ready = all(checks.values())
+    report = {
+        "ready_for_live": ready,
+        "mode": EXECUTION_MODE,
+        "checks": checks,
+        "closed_trades": closed,
+        "profit_factor": pf,
+        "drawdown_pct": rg.get("drawdown_pct"),
+        "paper": paper,
+        "summary": "LIVE_READY" if ready else "LIVE_NOT_READY_SAFE_GUARD",
+        "updated_at": now_ts(),
+        "updated_at_tr": tr_now_text(),
+    }
+    _safe_write_json(LIVE_READINESS_REPORT_FILE, report)
+    return report
+
+
+def format_live_readiness_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    lr = live_readiness_report(state_mgr)
+    ok = sum(1 for v in (lr.get("checks") or {}).values() if v)
+    total = len(lr.get("checks") or {})
+    return f"LiveReady: {'YES' if lr.get('ready_for_live') else 'NO'} ({ok}/{total})"
+
+
+def ai_signal_optimization(result: dict, state_mgr: StateManager = _STATE_MGR) -> dict:
+    if not AI_SIGNAL_OPTIMIZATION_ENABLED or result.get("signal") not in {"LONG", "SHORT"}:
+        return {"enabled": AI_SIGNAL_OPTIMIZATION_ENABLED, "applied": False, "score_adjustment": 0.0, "reason": "AI optimizer pasif veya sinyal yok."}
+    fi = feature_importance_analysis(state_mgr)
+    if not fi.get("ready"):
+        return {"enabled": True, "applied": False, "score_adjustment": 0.0, "reason": fi.get("summary", "FI hazır değil.")}
+    group = result.get("group")
+    stats = (fi.get("by_group") or {}).get(group) or fi.get("components") or {}
+    direction = 1 if result.get("signal") == "LONG" else -1
+    raw = result.get("raw") or {}
+    adjustment = 0.0
+    used = []
+    for comp, comp_stats in stats.items():
+        sample = int(comp_stats.get("sample", 0) or 0)
+        if sample < AI_MIN_TRADES_FOR_COMPONENT_ADJUST:
+            continue
+        importance = float(comp_stats.get("importance_score", 0) or 0)
+        aligned = float(raw.get(comp, 0) or 0) * direction
+        # Positive importance + aligned support boosts. Negative importance + aligned support penalizes.
+        contribution = clamp(importance * (1 if aligned > 0 else -0.5), -AI_MAX_SCORE_ADJUSTMENT, AI_MAX_SCORE_ADJUSTMENT)
+        if abs(contribution) >= 0.01:
+            adjustment += contribution
+            used.append(f"{comp}:{contribution:+.2f}")
+    adjustment = clamp(adjustment, -AI_MAX_SCORE_ADJUSTMENT, AI_MAX_SCORE_ADJUSTMENT)
+    if abs(adjustment) < 0.01:
+        return {"enabled": True, "applied": False, "score_adjustment": 0.0, "reason": "Yeterli AI adjustment yok."}
+    result["score"] = round(float(result.get("score", 0) or 0) + adjustment, 3)
+    confidence = float(result.get("confidence", 0) or 0)
+    result["confidence"] = round(clamp(confidence + adjustment * 10.0, 0, 100), 1)
+    payload = {
+        "enabled": True,
+        "applied": True,
+        "score_adjustment": round(adjustment, 3),
+        "components": used[:8],
+        "reason": "Feature Importance tabanlı küçük skor kalibrasyonu.",
+    }
+    result["ai_optimization"] = payload
+    _safe_write_json(AI_OPTIMIZATION_REPORT_FILE, {"updated_at": now_ts(), "updated_at_tr": tr_now_text(), "last": payload})
+    return payload
+
+
+def format_ai_optimization_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    payload = _safe_read_json(AI_OPTIMIZATION_REPORT_FILE, {})
+    last = payload.get("last") if isinstance(payload, dict) else None
+    if not last:
+        return "AIOpt: WAIT"
+    return f"AIOpt: adj {last.get('score_adjustment', 0):+} | {'on' if last.get('applied') else 'off'}"
+
+
+def risk_governor_manage_open_trades(results_by_symbol: dict, state_mgr: StateManager = _STATE_MGR) -> None:
+    """Emergency capital protection for already-open tracking trades.
+
+    V1 is intentionally conservative: if Risk Governor enters STOP because of
+    NEWS_CHAOS, drawdown, loss streak, daily/weekly cap, or execution-health
+    failure, open tracking trades are closed at latest observed mark price.
+    This is still paper/tracking unless live execution is explicitly built and
+    enabled in a future version.
+    """
+    rg = risk_governor_snapshot(state_mgr)
+    if rg.get("mode") != "STOP":
+        return
+    trades = get_trades(state_mgr)
+    changed = False
+    reason = "RISK_GOVERNOR_STOP"
+    if rg.get("regime") == "NEWS_CHAOS":
+        reason = "RISK_GOVERNOR_NEWS_CHAOS"
+    for tid, t in list(trades.items()):
+        if not isinstance(t, dict) or t.get("result") is not None:
+            continue
+        sym = t.get("symbol")
+        latest = results_by_symbol.get(sym) or {}
+        features = latest.get("features") or {}
+        price = float(features.get("last") or features.get("spot_price") or t.get("entry") or 0)
+        if price <= 0:
+            continue
+        close_trade(trades, tid, t, price, "EXIT", reason)
+        changed = True
+    if changed:
+        _append_jsonl(RISK_GOVERNOR_LOG_FILE, {"ts": now_ts(), "ts_tr": tr_now_text(), "event": "EMERGENCY_EXIT", "reason": reason, "snapshot": rg})
+        save_trades(trades, state_mgr)
+
 # ============================================================
 # TRADE TRACKING + EDGE ANALYZER
 # ============================================================
@@ -4029,6 +4461,12 @@ def can_open_new_trade(result: dict, state_mgr: StateManager) -> tuple[bool, str
         return False, "LONG/SHORT sinyali yok."
     if not result.get("actionable", True):
         return False, "Sinyal actionable değil."
+    rg = risk_governor_allows_trade(result, state_mgr) if 'risk_governor_allows_trade' in globals() else {"allowed": True}
+    if not rg.get("allowed", True):
+        return False, f"Risk Governor blokladı: {rg.get('reason', '-')}"
+    corr = result.get("portfolio_correlation") or {}
+    if corr and not corr.get("allowed", True):
+        return False, f"Portfolio correlation blokladı: {corr.get('reason', '-')}"
     if active_trade_exists(result["symbol"], state_mgr):
         return False, "Bu sembolde açık trade var."
 
@@ -5507,10 +5945,13 @@ def _process_symbol(
         result = weighted_signal(symbol, features, btc, eth, session_ctx, news_ctx)
         result["regime"] = regime
         result = apply_regime_first_scoring(result, regime)
+        result["ai_optimization"] = ai_signal_optimization(result, state_mgr)
         result["trade_quality"] = compute_trade_quality(result, regime)
         result["entry_engine"] = evaluate_entry_engine(result)
         result["regime_commander"] = regime_commander_decision(result, regime)
         result["portfolio_check"] = portfolio_risk_check(result, state_mgr)
+        result["portfolio_correlation"] = portfolio_correlation_check(result, state_mgr)
+        result["risk_governor"] = risk_governor_allows_trade(result, state_mgr)
         result = apply_trade_filters(result)
 
         # Noise-free mode:
@@ -5543,6 +5984,10 @@ def _process_symbol(
             "regime": result.get("regime", {}).get("regime"),
             "direction_bias": result.get("regime", {}).get("direction_bias"),
             "regime_allowed": result.get("regime_commander", {}).get("allowed"),
+            "risk_mode": (result.get("risk_governor", {}).get("snapshot") or {}).get("mode"),
+            "risk_allowed": result.get("risk_governor", {}).get("allowed"),
+            "portfolio_corr_allowed": result.get("portfolio_correlation", {}).get("allowed"),
+            "ai_adjustment": result.get("ai_optimization", {}).get("score_adjustment"),
             "last_alert_ts": last_alert_ts,
             "pending_alert_type": pending,
             "updated_at": now_ts(),
@@ -5605,6 +6050,10 @@ def _send_periodic_messages(
             f"{format_strategy_simulation_brief(state_mgr)}\n"
             f"{format_paper_execution_brief(state_mgr)}\n"
             f"{format_position_management_heartbeat(state_mgr)}\n"
+            f"{format_risk_governor_brief(state_mgr)}\n"
+            f"{format_portfolio_correlation_brief(state_mgr)}\n"
+            f"{format_live_readiness_brief(state_mgr)}\n"
+            f"{format_ai_optimization_brief(state_mgr)}\n"
             f"PS: base %{POSITION_SIZING_BASE_RISK_PCT*100:.2f} | clamp %{POSITION_SIZING_MIN_RISK_PCT*100:.2f}-%{POSITION_SIZING_MAX_RISK_PCT*100:.2f}\n"
             f"{format_backtest_validation_brief()}\n"
             f"Pending suggestions: {pending_count}"
@@ -5616,7 +6065,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
     """Ana bot döngüsü."""
     log.info("BOT BAŞLADI v%s", __version__)
     send_message(
-        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + Paper Execution Reconciliation + news/session/basis aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}"
+        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + PaperExec + PM + RiskGov/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON"
     )
 
     state_mgr = _STATE_MGR
@@ -5681,6 +6130,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
             # Böylece her coin aynı piyasa oyununa göre değerlendirilir.
             global_regime = detect_market_regime(btc, eth, news_context)
             state_mgr.set_meta("last_global_regime", global_regime)
+            state_mgr.set_meta("last_risk_governor", risk_governor_snapshot(state_mgr, global_regime))
 
             results: list[dict] = []
             for symbol in COINS:
@@ -5698,7 +6148,11 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
             reconcile_paper_execution(results_by_symbol, state_mgr)
             update_trades(results_by_symbol, state_mgr)
             close_trades_on_signal_changes(results_by_symbol, state_mgr)
+            risk_governor_manage_open_trades(results_by_symbol, state_mgr)
             retry_pending_trade_alerts(state_mgr)
+            # Persist oversight reports each scan for dashboards / live-readiness review.
+            risk_governor_snapshot(state_mgr, global_regime)
+            live_readiness_report(state_mgr)
 
             _send_periodic_messages(state_mgr, results, session_ctx, news_context)
 
