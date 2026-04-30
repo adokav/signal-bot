@@ -2855,6 +2855,48 @@ def quality_meets_min(grade: Optional[str], minimum: Optional[str]) -> bool:
     return TRADE_QUALITY_ORDER.get(str(grade or "D").upper(), 0) >= TRADE_QUALITY_ORDER.get(str(minimum).upper(), 0)
 
 
+def _regime_signal_confluence_score(result: dict, regime: dict) -> dict:
+    """Measure directional confluence between regime context and signal internals.
+
+    Returns score in [-100, 100] plus a compact reason list for diagnostics.
+    """
+    signal = result.get("signal")
+    if signal not in ("LONG", "SHORT"):
+        return {"score": 0.0, "label": "NONE", "reasons": ["İşlem yönü yok."]}
+
+    direction = 1 if signal == "LONG" else -1
+    raw = result.get("raw", {})
+    reasons: list[str] = []
+    score = 0.0
+
+    for key, weight in (("mtf", 30), ("trend", 30), ("momentum", 25), ("market", 15)):
+        signed = float(raw.get(key, 0.0) or 0.0) * direction
+        score += clamp(signed, -1.5, 1.5) / 1.5 * float(weight)
+        if signed > 0.3:
+            reasons.append(f"{key}+")
+        elif signed < -0.3:
+            reasons.append(f"{key}-")
+
+    regime_name = str(regime.get("regime", "NEUTRAL"))
+    strategy = get_regime_strategy(regime_name)
+    if (signal == "LONG" and strategy.get("allow_long")) or (signal == "SHORT" and strategy.get("allow_short")):
+        score += 10.0
+    else:
+        score -= 25.0
+        reasons.append("rejim_yon_uyumsuz")
+
+    score = clamp(score, -100.0, 100.0)
+    if score >= 65:
+        label = "STRONG"
+    elif score >= 35:
+        label = "GOOD"
+    elif score >= 10:
+        label = "MIXED"
+    else:
+        label = "WEAK"
+    return {"score": round(score, 2), "label": label, "reasons": reasons[:6]}
+
+
 def _ps_regime_multiplier(signal: str, regime_name: str) -> float:
     """Position sizing regime multiplier delegated to Regime Commander matrix."""
     if not REGIME_COMMANDER_ENABLED:
@@ -4929,6 +4971,18 @@ def compute_trade_quality(result: dict, regime: dict) -> dict:
         score -= 8
         reasons.append("Spread görece geniş")
 
+    confluence = _regime_signal_confluence_score(result, regime)
+    conf_score = float(confluence.get("score", 0.0) or 0.0)
+    if conf_score >= 65:
+        score += 8
+        reasons.append("Rejim-sinyal konfluansı güçlü")
+    elif conf_score >= 35:
+        score += 4
+        reasons.append("Rejim-sinyal konfluansı iyi")
+    elif conf_score < 10:
+        score -= 10
+        reasons.append("Rejim-sinyal konfluansı zayıf")
+
     score = clamp(score, 0, 100)
     grade = grade_from_quality(score)
 
@@ -4941,7 +4995,13 @@ def compute_trade_quality(result: dict, regime: dict) -> dict:
     if not regime_min_ok:
         reasons.append(f"Rejim minimum kalite {strategy.get('min_quality')} altında: {grade}")
 
-    return {"score": round(score, 1), "grade": grade, "tradable": tradable, "reasons": reasons[:10]}
+    return {
+        "score": round(score, 1),
+        "grade": grade,
+        "tradable": tradable,
+        "confluence": confluence,
+        "reasons": reasons[:10],
+    }
 
 
 
@@ -4963,6 +5023,7 @@ def evaluate_entry_engine(result: dict) -> dict:
     group = result["group"]
     regime = result.get("regime") or {}
     checks: list[str] = []
+    confluence = _regime_signal_confluence_score(result, regime)
 
     if regime.get("regime") == "NEWS_CHAOS":
         return {"status": "BLOCKED", "reason": "NEWS_CHAOS rejiminde yeni giriş kapalı.", "checks": checks}
@@ -4997,7 +5058,11 @@ def evaluate_entry_engine(result: dict) -> dict:
         f"MTF {'OK' if mtf_ok else 'zayıf'}",
         f"Trend {'OK' if trend_ok else 'zayıf'}",
         f"Momentum {'OK' if momentum_ok else 'zayıf'}",
+        f"Confluence {confluence.get('label', '-')}/{confluence.get('score', 0)}",
     ])
+
+    if float(confluence.get("score", 0.0) or 0.0) < 10:
+        return {"status": "WAIT_PULLBACK", "reason": "Rejim-sinyal konfluansı zayıf; teyit/pullback bekle.", "checks": checks}
 
     if not mtf_ok:
         return {"status": "WAIT_PULLBACK", "reason": "Üst zaman dilimi sinyali tam desteklemiyor; teyit bekle.", "checks": checks}
