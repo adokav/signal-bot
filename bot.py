@@ -39,7 +39,7 @@ from urllib.parse import quote
 
 from urllib3.util.retry import Retry
 
-__version__ = "3.2.0-leverage-mentality-risk-edge-v1"
+__version__ = "3.3.0-acce-trade-brain-v1"
 
 # ============================================================
 # LOGGING
@@ -172,13 +172,18 @@ GDELT_BASE = "https://api.gdeltproject.org/api/v2"
 COINS: dict[str, str] = {
     "BTCUSDT": "CORE",
     "ETHUSDT": "CORE",
-    "AVAXUSDT": "CORE",
     "SOLUSDT": "CORE",
-    "LINKUSDT": "CORE",
-    "RENDERUSDT": "HIGH_BETA",
-    "ONDOUSDT": "HIGH_BETA",
+
+    "AVAXUSDT": "MAJOR_ALT",
+    "LINKUSDT": "MAJOR_ALT",
+
     "LDOUSDT": "HIGH_BETA",
-    "POPCATUSDT": "HIGH_BETA",
+    "ONDOUSDT": "HIGH_BETA",
+    "RENDERUSDT": "HIGH_BETA",
+    "PYTHUSDT": "HIGH_BETA",
+
+    "PEPEUSDT": "MEME",
+    "POPCATUSDT": "MEME",
 }
 
 # ============================================================
@@ -450,7 +455,7 @@ PM_TP2_CLOSE_RATIO = env_float("PM_TP2_CLOSE_RATIO", 0.25, min_value=0.0)
 PM_CORE_MAX_HOLD_MIN = env_int("PM_CORE_MAX_HOLD_MIN", 180, min_value=5)
 PM_HIGH_BETA_MAX_HOLD_MIN = env_int("PM_HIGH_BETA_MAX_HOLD_MIN", 90, min_value=5)
 
-PM_SCALE_IN_ENABLED = os.getenv("PM_SCALE_IN_ENABLED", "1") == "1"
+PM_SCALE_IN_ENABLED = os.getenv("PM_SCALE_IN_ENABLED", "0") == "1"
 PM_SCALE_IN_MIN_GRADE = os.getenv("PM_SCALE_IN_MIN_GRADE", "A+").upper()
 PM_CORE_SCALE_TRIGGER_R = env_float("PM_CORE_SCALE_TRIGGER_R", 1.0, min_value=0.1)
 PM_HIGH_BETA_SCALE_TRIGGER_R = env_float("PM_HIGH_BETA_SCALE_TRIGGER_R", 1.2, min_value=0.1)
@@ -494,6 +499,47 @@ PM_CONFIG: dict[str, dict[str, Any]] = {
         "trail_steps": PM_TRAIL_STEPS_HIGH_BETA,
     },
 }
+
+
+# ============================================================
+# ACCE TRADE BRAIN v1
+# ============================================================
+# Eski signal botun sinyal/ML/regime/news tarafını korur; trade tarafını
+# stable-collateral, long-only, kâr yastığı, portfolio heat ve scale-in gate
+# mentalitesiyle yeniden yorumlar.
+ACCE_TRADE_BRAIN_ENABLED = os.getenv("ACCE_TRADE_BRAIN_ENABLED", "1") == "1"
+ACCE_LONG_ONLY = os.getenv("ACCE_LONG_ONLY", "1") == "1"
+ACCE_ALLOWED_COLLATERAL = {"USDT", "USDC"}
+ACCE_COLLATERAL_ASSET = os.getenv("ACCE_COLLATERAL_ASSET", "USDT").upper()
+ACCE_INITIAL_NOTIONAL_MAX_COLLATERAL_PCT = env_float(
+    "ACCE_INITIAL_NOTIONAL_MAX_COLLATERAL_PCT", 1.00, min_value=0.05
+)
+ACCE_MAX_PORTFOLIO_HEAT_PCT = env_float("ACCE_MAX_PORTFOLIO_HEAT_PCT", 0.12, min_value=0.001)
+ACCE_NO_SECOND_POSITION_WITHOUT_PROFIT_CUSHION = (
+    os.getenv("ACCE_NO_SECOND_POSITION_WITHOUT_PROFIT_CUSHION", "1") == "1"
+)
+ACCE_PROFIT_CUSHION_TRIGGER_PCT = env_float("ACCE_PROFIT_CUSHION_TRIGGER_PCT", 0.08, min_value=0.001)
+ACCE_BREAK_EVEN_BUFFER_PCT = env_float("ACCE_BREAK_EVEN_BUFFER_PCT", 0.002, min_value=0.0)
+ACCE_PROFIT_LOCK_TRIGGER_PCT = env_float("ACCE_PROFIT_LOCK_TRIGGER_PCT", 0.18, min_value=0.001)
+ACCE_PROFIT_LOCK_FRACTION = env_float("ACCE_PROFIT_LOCK_FRACTION", 0.50, min_value=0.0)
+ACCE_TREND_RIDER_TRIGGER_PCT = env_float("ACCE_TREND_RIDER_TRIGGER_PCT", 0.35, min_value=0.001)
+ACCE_TREND_RIDER_LOCK_FRACTION = env_float("ACCE_TREND_RIDER_LOCK_FRACTION", 0.60, min_value=0.0)
+ACCE_REQUIRE_RISK_ON_FOR_NEW_LONG = os.getenv("ACCE_REQUIRE_RISK_ON_FOR_NEW_LONG", "1") == "1"
+ACCE_MIN_QUALITY_GRADE = os.getenv("ACCE_MIN_QUALITY_GRADE", "A").upper()
+ACCE_MIN_CONFIDENCE = env_float("ACCE_MIN_CONFIDENCE", 55.0, min_value=0.0)
+ACCE_MEME_RISK_MULTIPLIER = env_float("ACCE_MEME_RISK_MULTIPLIER", 0.45, min_value=0.0)
+ACCE_HIGH_BETA_RISK_MULTIPLIER = env_float("ACCE_HIGH_BETA_RISK_MULTIPLIER", 0.75, min_value=0.0)
+ACCE_MAJOR_ALT_RISK_MULTIPLIER = env_float("ACCE_MAJOR_ALT_RISK_MULTIPLIER", 0.90, min_value=0.0)
+ACCE_CORE_RISK_MULTIPLIER = env_float("ACCE_CORE_RISK_MULTIPLIER", 1.00, min_value=0.0)
+ACCE_CLOSE_ON_RISK_OFF = os.getenv("ACCE_CLOSE_ON_RISK_OFF", "0") == "1"
+
+# Extend legacy group config safely.
+MOVEMENT_ALERT_THRESHOLDS.setdefault("MAJOR_ALT", copy.deepcopy(MOVEMENT_ALERT_THRESHOLDS["CORE"]))
+MOVEMENT_ALERT_THRESHOLDS.setdefault("MEME", {"ret_15m": 4.0, "ret_1h": 7.0, "volume_ratio": 2.5})
+PM_CONFIG.setdefault("MAJOR_ALT", copy.deepcopy(PM_CONFIG["CORE"]))
+PM_CONFIG.setdefault("MEME", copy.deepcopy(PM_CONFIG["HIGH_BETA"]))
+PM_CONFIG["MEME"]["sl_pct"] = max(float(PM_CONFIG["MEME"]["sl_pct"]), 0.06)
+PM_CONFIG["MEME"]["max_hold_min"] = min(int(PM_CONFIG["MEME"]["max_hold_min"]), 60)
 
 
 
@@ -813,6 +859,8 @@ TRADE_PLAN_CONFIG: dict[str, dict[str, float]] = {
         "tp3_r": 3.0,
     },
 }
+TRADE_PLAN_CONFIG.setdefault("MAJOR_ALT", {"stop_pct": 0.028, "tp1_r": 1.0, "tp2_r": 2.0, "tp3_r": 3.2})
+TRADE_PLAN_CONFIG.setdefault("MEME", {"stop_pct": 0.060, "tp1_r": 1.0, "tp2_r": 1.8, "tp3_r": 3.0})
 
 if POSITION_SIZING_MIN_RISK_PCT > POSITION_SIZING_MAX_RISK_PCT:
     log.warning(
@@ -861,11 +909,22 @@ WEIGHTS: dict[str, dict[str, float]] = {
     },
 }
 
+THRESHOLDS.setdefault("MAJOR_ALT", {"long": 1.70, "short": -1.70, "strong": 2.40})
+THRESHOLDS.setdefault("MEME", {"long": 2.25, "short": -2.25, "strong": 3.10})
+WEIGHTS.setdefault("MAJOR_ALT", copy.deepcopy(WEIGHTS["CORE"]))
+WEIGHTS.setdefault("MEME", copy.deepcopy(WEIGHTS["HIGH_BETA"]))
+WEIGHTS["MEME"]["macro"] = 0.08
+WEIGHTS["MEME"]["momentum"] = 0.25
+WEIGHTS["MEME"]["volume"] = 0.12
+WEIGHTS["MEME"]["liquidity"] = 0.07
+
 # Spread limits (basis points) — DRY: tek kaynaktan
 SPREAD_LIMITS: dict[str, float] = {
     "CORE": 12,
     "HIGH_BETA": 25,
 }
+SPREAD_LIMITS.setdefault("MAJOR_ALT", 18)
+SPREAD_LIMITS.setdefault("MEME", 35)
 
 SCORE_PARAMS: dict[str, dict[str, float]] = {
     "macro": {
@@ -2492,7 +2551,7 @@ def veto_signal(symbol: str, f: dict, btc: dict, eth: dict) -> Optional[str]:
     if f["spread_bps"] > SPREAD_LIMITS[group]:
         return "Spread yüksek"
 
-    if group == "HIGH_BETA" and f["vol_ratio"] < p["vol_low_high_beta"]:
+    if group in {"HIGH_BETA", "MEME"} and f["vol_ratio"] < p["vol_low_high_beta"]:
         return "Hacim zayıf"
 
     if symbol not in ("BTCUSDT", "ETHUSDT"):
@@ -2966,11 +3025,11 @@ def format_position_sizing_brief(ps: Optional[dict]) -> str:
 # ============================================================
 
 def _exec_slippage_bps(group: str) -> float:
-    return PAPER_SLIPPAGE_BPS_HIGH_BETA if group == "HIGH_BETA" else PAPER_SLIPPAGE_BPS_CORE
+    return PAPER_SLIPPAGE_BPS_HIGH_BETA if group in {"HIGH_BETA", "MEME"} else PAPER_SLIPPAGE_BPS_CORE
 
 
 def _exec_group_value(group: str, core_value: float, high_beta_value: float) -> float:
-    return high_beta_value if group == "HIGH_BETA" else core_value
+    return high_beta_value if group in {"HIGH_BETA", "MEME"} else core_value
 
 
 def _parse_depth_levels(levels: Any, *, max_levels: int = 100) -> list[tuple[float, float]]:
@@ -3268,7 +3327,7 @@ def _lp_target_leverage(stage: str, group: str, grade: str) -> float:
     grade = str(grade or "B").upper()
     is_aplus = grade == "A+"
     is_a = grade in {"A", "A+"}
-    if group == "HIGH_BETA":
+    if group in {"HIGH_BETA", "MEME"}:
         table = {
             "BUILD": (LEVERAGE_POLICY_BUILD_HIGH_BETA_A_PLUS, LEVERAGE_POLICY_BUILD_HIGH_BETA_A),
             "GROW": (LEVERAGE_POLICY_GROW_HIGH_BETA_A_PLUS, LEVERAGE_POLICY_GROW_HIGH_BETA_A),
@@ -3416,16 +3475,16 @@ def _lp_aggressive_gate(result: dict, grade: str, confidence: float, exec_qualit
 def liquidation_distance_pct_for_leverage(leverage: float, group: str) -> float:
     """Approx liquidation distance based on the exchange leverage setting."""
     lev = max(0.0001, float(leverage or 0.0))
-    maint = LEVERAGE_POLICY_MAINT_MARGIN_HIGH_BETA if group == "HIGH_BETA" else LEVERAGE_POLICY_MAINT_MARGIN_CORE
+    maint = LEVERAGE_POLICY_MAINT_MARGIN_HIGH_BETA if group in {"HIGH_BETA", "MEME"} else LEVERAGE_POLICY_MAINT_MARGIN_CORE
     return max(0.0, (1.0 / lev) - maint - LEVERAGE_POLICY_EXTRA_LIQ_BUFFER_PCT)
 
 
 def max_safe_leverage_for_stop(stop_pct: float, group: str, *, min_liq_to_stop: Optional[float] = None) -> float:
     ratio = float(min_liq_to_stop or LEVERAGE_POLICY_MIN_LIQ_TO_STOP)
     required_distance = float(stop_pct or 0.0) * ratio + LEVERAGE_POLICY_EXTRA_LIQ_BUFFER_PCT
-    maint = LEVERAGE_POLICY_MAINT_MARGIN_HIGH_BETA if group == "HIGH_BETA" else LEVERAGE_POLICY_MAINT_MARGIN_CORE
+    maint = LEVERAGE_POLICY_MAINT_MARGIN_HIGH_BETA if group in {"HIGH_BETA", "MEME"} else LEVERAGE_POLICY_MAINT_MARGIN_CORE
     denom = max(0.0001, required_distance + maint)
-    exchange_cap = LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA if group == "HIGH_BETA" else LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE
+    exchange_cap = LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA if group in {"HIGH_BETA", "MEME"} else LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE
     return max(LEVERAGE_POLICY_MIN_ECON_LEV, min(exchange_cap, 1.0 / denom))
 
 
@@ -3463,7 +3522,7 @@ def evaluate_leverage_policy(result: dict, stop_pct: float, position_sizing: dic
     if not aggressive_allowed:
         raw_target_lev = min(raw_target_lev, base_target)
 
-    exchange_cap = LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA if group == "HIGH_BETA" else LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE
+    exchange_cap = LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA if group in {"HIGH_BETA", "MEME"} else LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE
     stage_max_risk = _lp_max_risk_pct(stage)
     min_liq_ratio = LEVERAGE_POLICY_MIN_LIQ_TO_STOP_AGGRESSIVE if aggressive_allowed else LEVERAGE_POLICY_MIN_LIQ_TO_STOP
     safe_exchange_lev = max_safe_leverage_for_stop(stop_pct, group, min_liq_to_stop=min_liq_ratio)
@@ -3596,6 +3655,290 @@ def format_leverage_policy_brief(lp: Optional[dict]) -> str:
 # TRADE PLAN ENGINE (bilgilendirme amaçlı, emir göndermez)
 # ============================================================
 
+
+def _acce_group_risk_multiplier(group: str) -> float:
+    group = str(group or "").upper()
+    if group == "MEME":
+        return ACCE_MEME_RISK_MULTIPLIER
+    if group == "HIGH_BETA":
+        return ACCE_HIGH_BETA_RISK_MULTIPLIER
+    if group == "MAJOR_ALT":
+        return ACCE_MAJOR_ALT_RISK_MULTIPLIER
+    return ACCE_CORE_RISK_MULTIPLIER
+
+
+def _acce_is_risk_on_regime(result: dict) -> bool:
+    regime = (result.get("regime") or {}).get("regime")
+    if not regime:
+        regime = ((result.get("regime_commander") or {}).get("strategy") or {}).get("regime")
+    return str(regime or "").upper() in {"RISK_ON_TREND_UP", "RISK_ON_ALTSEASON", "SQUEEZE_LONG"}
+
+
+def _acce_open_risk_usd(t: dict) -> float:
+    """Current open risk for portfolio heat.
+
+    If stop is at/above entry for LONG, open risk is zero because the trade has
+    break-even/profit protection.
+    """
+    if not isinstance(t, dict) or t.get("result") is not None:
+        return 0.0
+    direction = t.get("direction")
+    entry = float(t.get("entry") or 0.0)
+    stop = float((t.get("position_management") or {}).get("managed_stop", t.get("stop", 0)) or 0.0)
+    qty = float(t.get("quantity") or 0.0)
+    if entry <= 0 or qty <= 0:
+        return 0.0
+    if direction == "LONG":
+        if stop >= entry:
+            return 0.0
+        return max(0.0, (entry - stop) * qty)
+    # Short is not used by ACCE v1; keep defensive math for legacy tracking.
+    if stop <= entry:
+        return 0.0
+    return max(0.0, (stop - entry) * qty)
+
+
+def acce_portfolio_heat(state_mgr: StateManager = _STATE_MGR) -> dict:
+    trades = get_trades(state_mgr)
+    active = [t for t in trades.values() if isinstance(t, dict) and t.get("result") is None]
+    open_risk = sum(_acce_open_risk_usd(t) for t in active)
+    equity = ACCOUNT_SIZE_USD
+    heat = open_risk / equity if equity > 0 else 0.0
+    protected = sum(
+        1 for t in active
+        if (t.get("position_management") or {}).get("acce_state") in {"BREAK_EVEN_PROTECTED", "PROFIT_PROTECTED", "TREND_RIDER"}
+    )
+    return {
+        "active": len(active),
+        "protected": protected,
+        "open_risk_usd": round(open_risk, 4),
+        "heat_pct": round(heat, 6),
+        "limit_pct": ACCE_MAX_PORTFOLIO_HEAT_PCT,
+        "allowed": heat <= ACCE_MAX_PORTFOLIO_HEAT_PCT,
+    }
+
+
+def _acce_has_profit_cushion(state_mgr: StateManager = _STATE_MGR) -> bool:
+    for t in get_trades(state_mgr).values():
+        if not isinstance(t, dict) or t.get("result") is not None:
+            continue
+        pm = t.get("position_management") or {}
+        if pm.get("collateral_released") or pm.get("acce_state") in {"BREAK_EVEN_PROTECTED", "PROFIT_PROTECTED", "TREND_RIDER"}:
+            return True
+    return False
+
+
+def acce_trade_eligibility(result: dict, state_mgr: StateManager = _STATE_MGR) -> dict:
+    """ACCE gate: signal != trade.
+
+    Keeps the old signal engine intact but changes whether a signal becomes a
+    paper/tracked trade.
+    """
+    if not ACCE_TRADE_BRAIN_ENABLED:
+        return {"allowed": True, "reason": "ACCE Trade Brain disabled.", "checks": []}
+
+    checks: list[str] = []
+    signal = result.get("signal")
+    group = result.get("group", COINS.get(result.get("symbol"), "UNKNOWN"))
+    grade = str(((result.get("trade_quality") or {}).get("grade") or "D")).upper()
+    confidence = float(result.get("confidence", 0) or 0)
+
+    if ACCE_COLLATERAL_ASSET not in ACCE_ALLOWED_COLLATERAL:
+        return {"allowed": False, "reason": f"Collateral {ACCE_COLLATERAL_ASSET} not allowed; only USDT/USDC.", "checks": checks}
+
+    if ACCE_LONG_ONLY and signal != "LONG":
+        return {"allowed": False, "reason": "ACCE v1 long-only; short signals are risk-reduction only.", "checks": checks}
+
+    if ACCE_REQUIRE_RISK_ON_FOR_NEW_LONG and signal == "LONG" and not _acce_is_risk_on_regime(result):
+        return {"allowed": False, "reason": "ACCE new long requires RISK_ON / SQUEEZE_LONG regime.", "checks": checks}
+
+    if not quality_meets_min(grade, ACCE_MIN_QUALITY_GRADE):
+        return {"allowed": False, "reason": f"Trade quality {grade} below ACCE minimum {ACCE_MIN_QUALITY_GRADE}.", "checks": checks}
+
+    if confidence < ACCE_MIN_CONFIDENCE:
+        return {"allowed": False, "reason": f"Confidence {confidence:.1f} below ACCE minimum {ACCE_MIN_CONFIDENCE:.1f}.", "checks": checks}
+
+    heat = acce_portfolio_heat(state_mgr)
+    if not heat["allowed"]:
+        return {"allowed": False, "reason": f"Portfolio heat exceeded: {heat['heat_pct']:.2%} > {ACCE_MAX_PORTFOLIO_HEAT_PCT:.2%}.", "checks": checks, "portfolio_heat": heat}
+
+    active_count = heat["active"]
+    if (
+        ACCE_NO_SECOND_POSITION_WITHOUT_PROFIT_CUSHION
+        and active_count > 0
+        and not _acce_has_profit_cushion(state_mgr)
+    ):
+        return {
+            "allowed": False,
+            "reason": "No protected profit, no second position.",
+            "checks": checks,
+            "portfolio_heat": heat,
+        }
+
+    checks.append(f"group={group}")
+    checks.append(f"quality={grade}")
+    checks.append(f"confidence={confidence:.1f}")
+    checks.append(f"heat={heat['heat_pct']:.2%}")
+    return {
+        "allowed": True,
+        "reason": "ACCE trade gate passed.",
+        "checks": checks,
+        "portfolio_heat": heat,
+        "risk_multiplier": _acce_group_risk_multiplier(group),
+    }
+
+
+def acce_apply_trade_brain_to_plan(result: dict, plan: dict) -> dict:
+    """Transform legacy plan into ACCE initial stable-collateral plan.
+
+    The old bot's signal, execution quality, quality grade and regime remain in
+    place. This function only caps trade size/collateral behavior.
+    """
+    if not ACCE_TRADE_BRAIN_ENABLED:
+        return plan
+
+    group = result.get("group", COINS.get(result.get("symbol"), "UNKNOWN"))
+    entry = float(plan.get("reference_entry") or 0.0)
+    stop = float(plan.get("stop_price") or 0.0)
+    if entry <= 0 or stop <= 0:
+        return plan
+
+    stop_pct = abs(entry - stop) / entry
+    allocated_collateral = ACCOUNT_SIZE_USD * ACCE_INITIAL_NOTIONAL_MAX_COLLATERAL_PCT
+    group_mult = _acce_group_risk_multiplier(group)
+
+    # Initial position notional is capped by stable collateral mental model.
+    original_notional = float(plan.get("position_notional", 0.0) or 0.0)
+    capped_notional = min(original_notional if original_notional > 0 else allocated_collateral, allocated_collateral)
+    capped_notional *= group_mult
+    capped_notional = max(0.0, capped_notional)
+
+    quantity = capped_notional / entry if entry > 0 else 0.0
+    risk_amount = capped_notional * stop_pct
+    risk_pct = risk_amount / ACCOUNT_SIZE_USD if ACCOUNT_SIZE_USD > 0 else 0.0
+
+    plan["position_notional"] = capped_notional
+    plan["quantity"] = quantity
+    plan["risk_amount"] = risk_amount
+    plan["risk_pct"] = risk_pct
+
+    ps = copy.deepcopy(plan.get("position_sizing") or {})
+    ps.update({
+        "acce_trade_brain": True,
+        "original_position_notional": original_notional,
+        "position_notional": capped_notional,
+        "risk_amount": risk_amount,
+        "risk_pct": risk_pct,
+        "group_risk_multiplier": group_mult,
+        "collateral_asset": ACCE_COLLATERAL_ASSET,
+        "allocated_collateral_usd": allocated_collateral,
+        "effective_portfolio_leverage": capped_notional / ACCOUNT_SIZE_USD if ACCOUNT_SIZE_USD > 0 else 0.0,
+        "rule": "initial_notional_capped_by_stable_collateral",
+    })
+    plan["position_sizing"] = ps
+    plan["acce_trade_brain"] = {
+        "enabled": True,
+        "mode": "Risk-On Collateral Recycling Long",
+        "collateral_asset": ACCE_COLLATERAL_ASSET,
+        "allowed_collateral": sorted(ACCE_ALLOWED_COLLATERAL),
+        "long_only": ACCE_LONG_ONLY,
+        "initial_position_rule": "position_notional <= allocated_stable_collateral",
+        "allocated_collateral_usd": allocated_collateral,
+        "original_notional_usd": original_notional,
+        "final_notional_usd": capped_notional,
+        "effective_portfolio_leverage": capped_notional / ACCOUNT_SIZE_USD if ACCOUNT_SIZE_USD > 0 else 0.0,
+        "risk_amount_usd": risk_amount,
+        "risk_pct": risk_pct,
+        "profit_cushion_trigger_pct": ACCE_PROFIT_CUSHION_TRIGGER_PCT,
+        "scale_in_rule": "No protected profit, no scale-in.",
+    }
+    return plan
+
+
+def acce_update_position_state(trade: dict, latest_result: dict, price: float) -> bool:
+    """Update ACCE state, profit cushion, collateral release and stop.
+
+    This does not execute scale-ins. It only manages permission/state.
+    """
+    if not ACCE_TRADE_BRAIN_ENABLED:
+        return False
+
+    pm = trade.setdefault("position_management", {})
+    direction = trade.get("direction")
+    if direction != "LONG":
+        pm["acce_state"] = "REDUCE_ONLY"
+        pm["acce_action"] = "SHORT_SIGNAL_RISK_REDUCTION_ONLY"
+        return True
+
+    entry = float(pm.get("avg_entry") or trade.get("entry") or 0.0)
+    old_stop = float(pm.get("managed_stop") or trade.get("stop") or 0.0)
+    if entry <= 0 or price <= 0:
+        return False
+
+    pnl_pct = (price - entry) / entry
+    new_stop = old_stop
+    state = pm.get("acce_state", "OPEN_RISK")
+    action = "HOLD"
+    reasons: list[str] = []
+
+    if pnl_pct >= ACCE_PROFIT_CUSHION_TRIGGER_PCT:
+        be_stop = entry * (1 + ACCE_BREAK_EVEN_BUFFER_PCT)
+        if be_stop > new_stop:
+            new_stop = be_stop
+            reasons.append("break_even_stop_activated")
+        state = "BREAK_EVEN_PROTECTED"
+        pm["profit_cushion_active"] = True
+
+    if pnl_pct >= ACCE_PROFIT_LOCK_TRIGGER_PCT:
+        lock_stop = entry + (price - entry) * ACCE_PROFIT_LOCK_FRACTION
+        if lock_stop > new_stop:
+            new_stop = lock_stop
+            reasons.append("profit_lock_stop_activated")
+        state = "PROFIT_PROTECTED"
+        pm["collateral_released"] = True
+
+    if pnl_pct >= ACCE_TREND_RIDER_TRIGGER_PCT:
+        trail_stop = entry + (price - entry) * ACCE_TREND_RIDER_LOCK_FRACTION
+        if trail_stop > new_stop:
+            new_stop = trail_stop
+            reasons.append("trend_rider_trailing_stop_activated")
+        state = "TREND_RIDER"
+        pm["collateral_released"] = True
+
+    regime_name = (latest_result.get("regime") or {}).get("regime")
+    raw_signal = latest_result.get("raw_signal", latest_result.get("signal"))
+    if regime_name in {"RISK_OFF_TREND_DOWN", "NEWS_CHAOS", "CHOP_RANGE"}:
+        if state not in {"PROFIT_PROTECTED", "TREND_RIDER"}:
+            state = "WARNING" if regime_name == "CHOP_RANGE" else "REDUCE_ONLY"
+        action = "TIGHTEN_OR_REDUCE"
+        reasons.append(f"regime_defensive:{regime_name}")
+
+    if raw_signal != trade.get("direction"):
+        state = "EXIT_READY"
+        action = "SIGNAL_CHANGED"
+        reasons.append("signal_changed")
+
+    pm["managed_stop"] = new_stop
+    trade["stop"] = new_stop
+    pm["last_price"] = price
+    pm["last_pnl_pct"] = pnl_pct
+    pm["acce_state"] = state
+    pm["acce_action"] = action
+    pm["scale_in_allowed"] = bool(
+        state in {"BREAK_EVEN_PROTECTED", "PROFIT_PROTECTED", "TREND_RIDER"}
+        and _acce_is_risk_on_regime(latest_result)
+        and pnl_pct >= ACCE_PROFIT_CUSHION_TRIGGER_PCT
+    )
+    pm["scale_in_reason"] = (
+        "Scale-in allowed by ACCE gate."
+        if pm["scale_in_allowed"]
+        else "No protected profit / no risk-on confirmation."
+    )
+    if reasons:
+        _pm_append_event(trade, {"type": "ACCE_STATE_UPDATE", "state": state, "reasons": reasons, "stop": new_stop})
+    return bool(reasons)
+
+
 def build_trade_plan(result: dict) -> Optional[dict]:
     """Sinyal varsa entry/stop/TP/pozisyon büyüklüğü planı üretir.
 
@@ -3612,6 +3955,9 @@ def build_trade_plan(result: dict) -> Optional[dict]:
     """
     signal = result.get("signal")
     if signal not in ("LONG", "SHORT"):
+        return None
+    if ACCE_TRADE_BRAIN_ENABLED and ACCE_LONG_ONLY and signal == "SHORT":
+        log.info("%s trade plan iptal: ACCE v1 long-only; SHORT risk azaltma sinyali olarak izlenecek.", result.get("symbol"))
         return None
     tq = result.get("trade_quality")
     if tq and not tq.get("tradable", False):
@@ -3761,7 +4107,7 @@ def build_trade_plan(result: dict) -> Optional[dict]:
             leverage_policy["risk_amount_usd"] = round(risk_amount, 4)
             # v3.2: liquidation distance is based on recommended exchange leverage, not economic leverage.
             safe_exchange_lev = float(leverage_policy.get("safe_max_exchange_leverage", leverage_policy.get("recommended_exchange_leverage", 1.0)) or 1.0)
-            exchange_cap = LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA if group == "HIGH_BETA" else LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE
+            exchange_cap = LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA if group in {"HIGH_BETA", "MEME"} else LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE
             leverage_policy["recommended_exchange_leverage"] = _recommended_exchange_leverage(
                 leverage_policy["final_leverage"], safe_exchange_lev, exchange_cap
             )
@@ -3784,7 +4130,7 @@ def build_trade_plan(result: dict) -> Optional[dict]:
     # R:R sanity check — trader'a görünür olsun
     rr_ratio = cfg["tp2_r"]  # tp2'yi referans alıyoruz (hedef R:R)
 
-    return {
+    plan = {
         "direction": signal,
         "account_size": ACCOUNT_SIZE_USD,
         "risk_pct": risk_pct,
@@ -3806,6 +4152,7 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         "position_notional": position_notional,
         "quantity": quantity,
     }
+    return acce_apply_trade_brain_to_plan(result, plan)
 
 
 def format_trade_plan_block(plan: Optional[dict]) -> list[str]:
@@ -3995,7 +4342,7 @@ def apply_regime_first_scoring(result: dict, regime: dict) -> dict:
     elif original_signal == "SHORT" and not strategy.get("allow_short", True):
         adjusted = 0.0
         action = "blocked_short_by_regime"
-    elif group == "HIGH_BETA" and not strategy.get("high_beta_allowed", False):
+    elif group in {"HIGH_BETA", "MEME"} and not strategy.get("high_beta_allowed", False):
         adjusted = 0.0
         action = "blocked_high_beta_by_regime"
     else:
@@ -4143,7 +4490,7 @@ def _paper_json_write(path: str, data) -> None:
 
 
 def _paper_slippage_bps(group: str) -> float:
-    return PAPER_SLIPPAGE_BPS_HIGH_BETA if group == "HIGH_BETA" else PAPER_SLIPPAGE_BPS_CORE
+    return PAPER_SLIPPAGE_BPS_HIGH_BETA if group in {"HIGH_BETA", "MEME"} else PAPER_SLIPPAGE_BPS_CORE
 
 
 def _paper_cost_adjusted_price(reference_price: float, *, direction: str, action: str, spread_bps: float, group: str) -> float:
@@ -4555,22 +4902,22 @@ def compute_trade_quality(result: dict, regime: dict) -> dict:
         score -= 25
         reasons.append("Rejim bu yönü desteklemiyor")
 
-    if group == "HIGH_BETA" and not strategy.get("high_beta_allowed", False):
+    if group in {"HIGH_BETA", "MEME"} and not strategy.get("high_beta_allowed", False):
         score -= 18
         reasons.append("Rejim HIGH_BETA riskini desteklemiyor")
 
     if signal == "LONG":
-        if group == "HIGH_BETA" and f.get("ret_1h", 0) > REGIME_CONFIG["high_vol_1h_high_beta"]:
+        if group in {"HIGH_BETA", "MEME"} and f.get("ret_1h", 0) > REGIME_CONFIG["high_vol_1h_high_beta"]:
             score -= 20
             reasons.append("HIGH_BETA 1s pump yüksek; FOMO riski")
-        elif group == "CORE" and f.get("ret_1h", 0) > REGIME_CONFIG["high_vol_1h_core"]:
+        elif group in {"CORE", "MAJOR_ALT"} and f.get("ret_1h", 0) > REGIME_CONFIG["high_vol_1h_core"]:
             score -= 15
             reasons.append("CORE 1s hareket aşırı; pullback beklemek daha sağlıklı")
     else:
-        if group == "HIGH_BETA" and f.get("ret_1h", 0) < -REGIME_CONFIG["high_vol_1h_high_beta"]:
+        if group in {"HIGH_BETA", "MEME"} and f.get("ret_1h", 0) < -REGIME_CONFIG["high_vol_1h_high_beta"]:
             score -= 20
             reasons.append("HIGH_BETA 1s dump yüksek; geç short riski")
-        elif group == "CORE" and f.get("ret_1h", 0) < -REGIME_CONFIG["high_vol_1h_core"]:
+        elif group in {"CORE", "MAJOR_ALT"} and f.get("ret_1h", 0) < -REGIME_CONFIG["high_vol_1h_core"]:
             score -= 15
             reasons.append("CORE 1s düşüş aşırı; geç short riski")
 
@@ -4629,14 +4976,14 @@ def evaluate_entry_engine(result: dict) -> dict:
     direction = 1 if signal == "LONG" else -1
 
     if signal == "LONG":
-        if group == "HIGH_BETA" and ret_1h > REGIME_CONFIG["high_vol_1h_high_beta"]:
+        if group in {"HIGH_BETA", "MEME"} and ret_1h > REGIME_CONFIG["high_vol_1h_high_beta"]:
             return {"status": "WAIT_PULLBACK", "reason": "HIGH_BETA long için 1s pump yüksek; pullback bekle.", "checks": checks}
-        if group == "CORE" and ret_1h > REGIME_CONFIG["high_vol_1h_core"]:
+        if group in {"CORE", "MAJOR_ALT"} and ret_1h > REGIME_CONFIG["high_vol_1h_core"]:
             return {"status": "WAIT_PULLBACK", "reason": "CORE long için fiyat uzamış; pullback bekle.", "checks": checks}
     else:
-        if group == "HIGH_BETA" and ret_1h < -REGIME_CONFIG["high_vol_1h_high_beta"]:
+        if group in {"HIGH_BETA", "MEME"} and ret_1h < -REGIME_CONFIG["high_vol_1h_high_beta"]:
             return {"status": "WAIT_PULLBACK", "reason": "HIGH_BETA short için dump sonrası geç giriş riski; retest bekle.", "checks": checks}
-        if group == "CORE" and ret_1h < -REGIME_CONFIG["high_vol_1h_core"]:
+        if group in {"CORE", "MAJOR_ALT"} and ret_1h < -REGIME_CONFIG["high_vol_1h_core"]:
             return {"status": "WAIT_PULLBACK", "reason": "CORE short için düşüş uzamış; retest bekle.", "checks": checks}
 
     if vol_ratio > 4.0:
@@ -4682,7 +5029,7 @@ def regime_commander_decision(result: dict, regime: dict) -> dict:
     if signal == "SHORT" and not strategy.get("allow_short", True):
         return {"allowed": False, "reason": f"Regime Commander: {regime.get('regime')} SHORT yönünü kapatıyor.", "strategy": strategy}
 
-    if group == "HIGH_BETA" and not strategy.get("high_beta_allowed", False):
+    if group in {"HIGH_BETA", "MEME"} and not strategy.get("high_beta_allowed", False):
         return {"allowed": False, "reason": f"Regime Commander: {regime.get('regime')} HIGH_BETA riskini kapatıyor.", "strategy": strategy}
 
     tq = result.get("trade_quality") or {}
@@ -4995,6 +5342,13 @@ def init_position_management(trade: dict) -> dict:
         "realized_pnl_usd": 0.0,
         "last_action": "INIT",
         "last_action_ts": now_ts(),
+        "acce_state": "OPEN_RISK",
+        "acce_action": "HOLD",
+        "collateral_asset": ACCE_COLLATERAL_ASSET,
+        "collateral_released": False,
+        "profit_cushion_active": False,
+        "scale_in_allowed": False,
+        "scale_in_reason": "No protected profit yet.",
         "events": [],
     }
 
@@ -5187,6 +5541,11 @@ def update_position_management(trade: dict, latest_result: dict) -> tuple[bool, 
             close_result = "WIN" if total_est > 0 else "EXIT"
             close_reason = "PM_TIME_EXIT"
 
+    # ACCE overlay: stable-collateral profit cushion / stop / scale-in state.
+    if acce_update_position_state(trade, latest_result, price):
+        changed = True
+        pm = trade.get("position_management") or pm
+
     pm["last_price"] = price
     pm["last_r"] = round(r_now, 3)
     pm["unrealized_pnl_pct"] = pnl_pct
@@ -5222,12 +5581,13 @@ def format_position_management_brief(t: dict) -> str:
     if not pm:
         return "PM: yok"
     return (
-        f"PM: {pm.get('status', 'OPEN')} | "
+        f"PM: {pm.get('status', 'OPEN')} / ACCE {pm.get('acce_state', '-')} | "
         f"RemQty {float(pm.get('remaining_qty', 0)):.6f} | "
         f"Stop {format_price(pm.get('managed_stop'))} | "
         f"R {pm.get('last_r', 0)} | "
-        f"TP1 {'✓' if pm.get('tp1_done') else '-'} / TP2 {'✓' if pm.get('tp2_done') else '-'} | "
-        f"Scale {'✓' if pm.get('scale_in_done') else '-'}"
+        f"Cushion {'✓' if pm.get('profit_cushion_active') else '-'} | "
+        f"Collateral {'free' if pm.get('collateral_released') else 'locked'} | "
+        f"ScaleGate {'✓' if pm.get('scale_in_allowed') else '-'}"
     )
 
 
@@ -5513,7 +5873,7 @@ def portfolio_correlation_check(result: dict, state_mgr: StateManager = _STATE_M
     if direction == "LONG" and len(btc_beta_longs) >= PORTFOLIO_MAX_BTC_BETA_LONGS:
         risk_mult *= PORTFOLIO_CORRELATION_RISK_MULTIPLIER
         reasons.append("BTC beta long yoğunluğu yüksek; risk azaltıldı.")
-    if group == "HIGH_BETA" and len(high_beta_same) >= PORTFOLIO_MAX_HIGH_BETA_CLUSTER:
+    if group in {"HIGH_BETA", "MEME"} and len(high_beta_same) >= PORTFOLIO_MAX_HIGH_BETA_CLUSTER:
         allowed = False if PORTFOLIO_MAX_HIGH_BETA_CLUSTER == 0 else allowed
         risk_mult *= PORTFOLIO_CORRELATION_RISK_MULTIPLIER
         reasons.append("HIGH_BETA cluster riski yüksek.")
@@ -6401,6 +6761,11 @@ def can_open_new_trade(result: dict, state_mgr: StateManager) -> tuple[bool, str
         return False, "LONG/SHORT sinyali yok."
     if not result.get("actionable", True):
         return False, "Sinyal actionable değil."
+
+    acce = acce_trade_eligibility(result, state_mgr)
+    result["acce_trade_gate"] = acce
+    if not acce.get("allowed", True):
+        return False, f"ACCE Trade Brain blokladı: {acce.get('reason', '-')}"
     rg = risk_governor_allows_trade(result, state_mgr) if 'risk_governor_allows_trade' in globals() else {"allowed": True}
     if not rg.get("allowed", True):
         return False, f"Risk Governor blokladı: {rg.get('reason', '-')}"
@@ -6424,7 +6789,7 @@ def format_trade_open_msg(t: dict) -> str:
     regime = t.get("regime") or {}
     pm = t.get("position_management") or {}
     return (
-        "🚀 TRADE OPENED\n\n"
+        "🚀 ACCE PAPER TRADE OPENED\n\n"
         f"{t['symbol']} → {t['direction']}\n\n"
         f"Entry: {format_price(t['entry'])}\n"
         f"Entry Zone: {format_price(t.get('entry_zone_low'))} - {format_price(t.get('entry_zone_high'))}\n"
@@ -6442,6 +6807,7 @@ def format_trade_open_msg(t: dict) -> str:
         f"Risk: {format_money(t.get('risk_amount'))} (%{float(t.get('risk_pct', 0))*100:.2f}) | Notional: {format_money(t.get('position_notional'))}\n"
         f"{format_position_sizing_brief(t.get('position_sizing'))}\n"
         f"{format_leverage_policy_brief(t.get('leverage_policy'))}\n"
+        f"ACCE: {(t.get('acce_trade_brain') or {}).get('mode', '-')} | Collateral {(t.get('acce_trade_brain') or {}).get('collateral_asset', '-')} | Notional≤Collateral | Scale: No protected profit, no scale-in\n"
         f"{format_position_management_brief(t)}\n"
         f"PaperExec: {(t.get('paper_execution') or {}).get('status', '-')} | Fill: {format_price((t.get('paper_execution') or {}).get('fill_price'))} | Fee: {format_money((t.get('paper_execution') or {}).get('open_fee_usd'))}\n\n"
         f"Not: Bu mesaj otomatik emir değildir; botun trade tracking + paper execution + position management kaydıdır.\n"
@@ -6523,6 +6889,8 @@ def open_trade(result: dict, plan: dict, state_mgr: StateManager = _STATE_MGR) -
         "quantity": float(plan.get("quantity", 0)),
         "position_sizing": copy.deepcopy(plan.get("position_sizing", {})),
         "leverage_policy": copy.deepcopy(plan.get("leverage_policy", {})),
+        "acce_trade_brain": copy.deepcopy(plan.get("acce_trade_brain", {})),
+        "acce_trade_gate": copy.deepcopy(result.get("acce_trade_gate", {})),
         "execution_quality": copy.deepcopy(plan.get("execution_quality", {})),
         "entry_engine": copy.deepcopy(plan.get("entry_engine", {})),
         "regime_commander": copy.deepcopy(plan.get("regime_commander", {})),
@@ -8255,7 +8623,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
     """Ana bot döngüsü."""
     log.info("BOT BAŞLADI v%s", __version__)
     send_message(
-        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + MacroRisk + ExecQ + LiqLev + RegimeDash + PaperExec + PM + RiskGov/CapitalGuard/RegimeEdge/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON"
+        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + MacroRisk + SignalBrain + ACCETradeBrain + StableCollateral + PaperExec + PM + RiskGov/CapitalGuard/RegimeEdge/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON"
     )
 
     state_mgr = _STATE_MGR
@@ -8501,7 +8869,7 @@ def replay_features(symbol: str, windows: dict[str, list[list]]) -> Optional[dic
     recent = v5[-(VOLUME_WINDOW + 1):-1]
     median_vol = statistics.median(recent) if recent else 0.0
     group = COINS.get(symbol, "CORE")
-    spread = PAPER_SLIPPAGE_BPS_HIGH_BETA if group == "HIGH_BETA" else PAPER_SLIPPAGE_BPS_CORE
+    spread = PAPER_SLIPPAGE_BPS_HIGH_BETA if group in {"HIGH_BETA", "MEME"} else PAPER_SLIPPAGE_BPS_CORE
 
     return {
         "last": c5[-1],
