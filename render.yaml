@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: signal-bot-acce
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python signal_bot_3_3_0_acce_trade_brain.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: EXECUTION_MODE
+        value: PAPER
+      - key: ENABLE_LIVE_TRADING
+        value: "0"
+      - key: TRADE_TRACKING_ENABLED
+        value: "1"
+      - key: PAPER_EXECUTION_ENABLED
+        value: "1"
+      - key: ACCE_TRADE_BRAIN_ENABLED
+        value: "1"
+      - key: ACCE_LONG_ONLY
+        value: "1"
+      - key: ACCE_COLLATERAL_ASSET
+        value: USDT
+      - key: PM_SCALE_IN_ENABLED
+        value: "0"
+      - key: SCAN_INTERVAL
+        value: "300"
+      - key: SEND_STANDALONE_NEWS_ALERTS
+        value: "0"
+      - key: SEND_MOVEMENT_ALERTS
+        value: "0"
+      - key: SEND_SUMMARY_MESSAGES
+        value: "0"
