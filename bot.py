@@ -499,6 +499,11 @@ PM_CONFIG: dict[str, dict[str, Any]] = {
         "trail_steps": PM_TRAIL_STEPS_HIGH_BETA,
     },
 }
+PM_CONFIG.setdefault("MAJOR_ALT", copy.deepcopy(PM_CONFIG["CORE"]))
+PM_CONFIG.setdefault("MEME", copy.deepcopy(PM_CONFIG["HIGH_BETA"]))
+PM_CONFIG["MEME"]["sl_pct"] = max(float(PM_CONFIG["MEME"]["sl_pct"]), 0.06)
+PM_CONFIG["MEME"]["max_hold_min"] = min(int(PM_CONFIG["MEME"]["max_hold_min"]), 60)
+
 
 
 # ============================================================
@@ -532,15 +537,6 @@ ACCE_HIGH_BETA_RISK_MULTIPLIER = env_float("ACCE_HIGH_BETA_RISK_MULTIPLIER", 0.7
 ACCE_MAJOR_ALT_RISK_MULTIPLIER = env_float("ACCE_MAJOR_ALT_RISK_MULTIPLIER", 0.90, min_value=0.0)
 ACCE_CORE_RISK_MULTIPLIER = env_float("ACCE_CORE_RISK_MULTIPLIER", 1.00, min_value=0.0)
 ACCE_CLOSE_ON_RISK_OFF = os.getenv("ACCE_CLOSE_ON_RISK_OFF", "0") == "1"
-
-# Extend legacy group config safely.
-MOVEMENT_ALERT_THRESHOLDS.setdefault("MAJOR_ALT", copy.deepcopy(MOVEMENT_ALERT_THRESHOLDS["CORE"]))
-MOVEMENT_ALERT_THRESHOLDS.setdefault("MEME", {"ret_15m": 4.0, "ret_1h": 7.0, "volume_ratio": 2.5})
-PM_CONFIG.setdefault("MAJOR_ALT", copy.deepcopy(PM_CONFIG["CORE"]))
-PM_CONFIG.setdefault("MEME", copy.deepcopy(PM_CONFIG["HIGH_BETA"]))
-PM_CONFIG["MEME"]["sl_pct"] = max(float(PM_CONFIG["MEME"]["sl_pct"]), 0.06)
-PM_CONFIG["MEME"]["max_hold_min"] = min(int(PM_CONFIG["MEME"]["max_hold_min"]), 60)
-
 
 
 # Risk Governor + Portfolio Correlation + AI Signal Optimization v1
@@ -675,6 +671,9 @@ MOVEMENT_ALERT_THRESHOLDS: dict[str, dict[str, float]] = {
     "CORE": {"ret_15m": 2.0, "ret_1h": 3.0, "volume_ratio": 2.5},
     "HIGH_BETA": {"ret_15m": 3.0, "ret_1h": 5.0, "volume_ratio": 2.0},
 }
+MOVEMENT_ALERT_THRESHOLDS.setdefault("MAJOR_ALT", copy.deepcopy(MOVEMENT_ALERT_THRESHOLDS["CORE"]))
+MOVEMENT_ALERT_THRESHOLDS.setdefault("MEME", {"ret_15m": 4.0, "ret_1h": 7.0, "volume_ratio": 2.5})
+
 # ============================================================
 # TRADE PLAN CONFIG (sadece plan üretir, emir göndermez)
 # ============================================================
