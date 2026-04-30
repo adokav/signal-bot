@@ -3,7 +3,7 @@ services:
     name: signal-bot-acce
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python signal_bot_3_3_0_acce_trade_brain.py
+    startCommand: python bot.py
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -21,6 +21,8 @@ services:
         value: "1"
       - key: ACCE_COLLATERAL_ASSET
         value: USDT
+      - key: ACCE_NO_SECOND_POSITION_WITHOUT_PROFIT_CUSHION
+        value: "1"
       - key: PM_SCALE_IN_ENABLED
         value: "0"
       - key: SCAN_INTERVAL
