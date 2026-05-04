@@ -211,6 +211,8 @@ MOVEMENT_ALERT_COOLDOWN_SECONDS = env_int(
 SEND_STANDALONE_NEWS_ALERTS = os.getenv("SEND_STANDALONE_NEWS_ALERTS", "0") == "1"
 SEND_MOVEMENT_ALERTS = os.getenv("SEND_MOVEMENT_ALERTS", "0") == "1"
 SEND_SUMMARY_MESSAGES = os.getenv("SEND_SUMMARY_MESSAGES", "0") == "1"
+TELEGRAM_REPORT_STYLE = os.getenv("TELEGRAM_REPORT_STYLE", "HUMAN").upper()
+TELEGRAM_FULL_HEARTBEAT = os.getenv("TELEGRAM_FULL_HEARTBEAT", "0") == "1"
 
 TRADE_TRACKING_ENABLED = os.getenv("TRADE_TRACKING_ENABLED", "1") == "1"
 TRADE_OPEN_COOLDOWN_SECONDS = env_int("TRADE_OPEN_COOLDOWN_SECONDS", 4 * 60 * 60, min_value=0)
@@ -8633,6 +8635,252 @@ def format_regime_strategy_brief(results: list[dict]) -> str:
     )
 
 
+
+# ============================================================
+# HUMAN-READABLE TELEGRAM REPORTING v1
+# ============================================================
+
+def _safe_get(d: Any, path: list[str], default: Any = "-") -> Any:
+    cur = d
+    for key in path:
+        if not isinstance(cur, dict) or key not in cur:
+            return default
+        cur = cur.get(key)
+    return cur if cur not in (None, "") else default
+
+
+def _yes_no(value: Any) -> str:
+    return "EVET" if bool(value) else "HAYIR"
+
+
+def _status_emoji(status: str) -> str:
+    s = str(status or "").upper()
+    if any(k in s for k in ["PASS", "GOOD", "YES", "READY", "RISK_ON", "AGGRESSIVE", "NORMAL"]):
+        return "🟢"
+    if any(k in s for k in ["WARN", "WAIT", "TRAINING", "NEUTRAL", "CHOP", "DEFENSIVE"]):
+        return "🟡"
+    if any(k in s for k in ["BLOCK", "NO", "STOP", "RISK_OFF", "NEWS_CHAOS", "PAUSED"]):
+        return "🔴"
+    return "🔵"
+
+
+def bot_decision_summary(results: list[dict], state_mgr: StateManager = _STATE_MGR) -> dict:
+    rg = risk_governor_snapshot(state_mgr)
+    pm = position_management_report(state_mgr)
+    open_count = int(pm.get("open", 0) or 0)
+    tradable = [r for r in results if r.get("signal") in {"LONG", "SHORT"} and r.get("actionable", True)]
+    longs = [r for r in tradable if r.get("signal") == "LONG"]
+
+    if rg.get("mode") in {"STOP", "PAUSED"}:
+        return {"decision": "BLOCKED", "reason": f"Risk Governor {rg.get('mode')} modunda.", "trade_allowed": False}
+
+    if longs:
+        best = sorted(longs, key=lambda x: float(x.get("confidence", 0) or 0), reverse=True)[0]
+        gate = best.get("acce_trade_gate") or {}
+        if gate.get("allowed") is False:
+            return {
+                "decision": "WAIT",
+                "reason": f"En iyi aday {best.get('symbol')} ama ACCE gate bekletiyor: {gate.get('reason', '-')}",
+                "trade_allowed": False,
+            }
+        return {
+            "decision": "LONG SETUP WATCH",
+            "reason": f"En güçlü aday: {best.get('symbol')} | kalite {_safe_get(best, ['trade_quality', 'grade'], '-')} | güven %{best.get('confidence', 0)}",
+            "trade_allowed": True,
+        }
+
+    if open_count > 0:
+        return {"decision": "MANAGE POSITIONS", "reason": "Açık pozisyonlar yönetiliyor; yeni kaliteli setup yok.", "trade_allowed": False}
+
+    return {"decision": "WAIT", "reason": "Trade-worthy setup yok; sistem izliyor.", "trade_allowed": False}
+
+
+def format_human_heartbeat(
+    state_mgr: StateManager,
+    results: list[dict],
+    session_ctx: SessionContext,
+    news_ctx: dict,
+    pending_count: int = 0,
+) -> str:
+    decision = bot_decision_summary(results, state_mgr)
+    rg = risk_governor_snapshot(state_mgr)
+    pm = position_management_report(state_mgr)
+    paper = paper_execution_report(state_mgr)
+    lr = live_readiness_report(state_mgr)
+    fi = feature_importance_analysis(state_mgr)
+    wl = weight_learning_analysis(state_mgr)
+    mlv = ml_validation_report(state_mgr)
+
+    regime_txt = format_regime_strategy_brief(results).replace("Regime: ", "")
+    macro_txt = format_macro_risk_brief(state_mgr).replace("MacroRisk: ", "")
+    exec_txt = format_execution_quality_brief(results).replace("ExecQ: ", "")
+    ai_txt = format_ai_optimization_brief(state_mgr).replace("AIOpt: ", "")
+
+    open_count = int(pm.get("open", 0) or 0)
+    realized = float(pm.get("realized_pnl_usd", 0) or 0)
+    equity = float(rg.get("equity", ACCOUNT_SIZE_USD) or ACCOUNT_SIZE_USD)
+    dd = float(rg.get("drawdown_pct", 0) or 0)
+    loss_streak = int(rg.get("loss_streak", 0) or 0)
+
+    learning_status = "READY" if fi.get("ready") and wl.get("ready") else "TRAINING"
+    fi_status = "hazır" if fi.get("ready") else fi.get("summary", "veri yetersiz")
+    wl_status = "hazır" if wl.get("ready") else wl.get("summary", "beklemede")
+    ml_status = "PASS" if mlv.get("passed") else mlv.get("summary", "training")
+
+    warnings = []
+    if pending_count:
+        warnings.append(f"Onay bekleyen öneri: {pending_count}")
+    if not lr.get("ready_for_live"):
+        warnings.append("Live trading hazır değil; güvenli PAPER modda.")
+    if open_count == 0:
+        warnings.append("Açık pozisyon yok; bot uygun setup bekliyor.")
+    if not fi.get("ready"):
+        warnings.append("Öğrenme modülleri için kapanmış trade verisi yetersiz.")
+
+    action_line = (
+        "Bot izliyor; uygun setup oluşursa ACCE Trade Brain değerlendirecek."
+        if decision["decision"] in {"WAIT", "LONG SETUP WATCH"}
+        else "Risk modunu koru; yeni manuel trade açma."
+    )
+
+    lines = [
+        "🧠 SIGNAL BOT STATUS",
+        f"⏰ Son kontrol: {tr_now_text()}",
+        "",
+        "📌 BOT KARARI",
+        f"• Karar: {_status_emoji(decision['decision'])} {decision['decision']}",
+        f"• Gerekçe: {decision['reason']}",
+        "",
+        "🌍 PİYASA DURUMU",
+        f"• Rejim: {regime_txt}",
+        f"• Macro Risk: {macro_txt}",
+        f"• Seans: {session_ctx.session}",
+        f"• Haber: {news_ctx.get('category', 'N/A')} | {news_ctx.get('note', '-')}",
+        "",
+        "📈 TRADE DURUMU",
+        f"• Açık pozisyon: {open_count}",
+        f"• Yeni trade izni: {_yes_no(decision.get('trade_allowed'))}",
+        f"• Execution Quality: {exec_txt}",
+        f"• Paper Execution: {paper.get('summary', 'veri yok')}",
+        "",
+        "💰 SERMAYE & RİSK",
+        f"• Equity: {format_money(equity)}",
+        f"• Realized PnL: {format_money(realized)}",
+        f"• Drawdown: %{dd * 100:.2f}",
+        f"• Loss Streak: {loss_streak}",
+        f"• Risk Modu: {rg.get('mode', '-')}",
+        "",
+        "🧠 ÖĞRENME MOTORU",
+        f"• Durum: {learning_status}",
+        f"• Feature Importance: {fi_status}",
+        f"• Weight Learning: {wl_status}",
+        f"• ML Gate: {ml_status}",
+        f"• AI Optimization: {ai_txt}",
+        "",
+        "⚠️ UYARILAR",
+    ]
+    if warnings:
+        lines.extend([f"• {w}" for w in warnings[:4]])
+    else:
+        lines.append("• Kritik uyarı yok.")
+    lines.extend(["", "🎯 AKSİYON", f"• {action_line}"])
+    return "\n".join(lines)
+
+
+def format_debug_heartbeat(state_mgr: StateManager, results: list[dict], pending_count: int) -> str:
+    return (
+        f"✅ BOT AKTİF (v{__version__})\n\n"
+        f"Son kontrol: {tr_now_text()}\n"
+        f"{format_edge_brief(state_mgr)}\n"
+        f"{format_feature_importance_brief(state_mgr)}\n"
+        f"{format_weight_learning_brief(state_mgr)}\n"
+        f"{format_regime_strategy_brief(results)}\n"
+        f"{format_macro_risk_brief(state_mgr)}\n"
+        f"{format_execution_quality_brief(results)}\n"
+        f"{format_strategy_simulation_brief(state_mgr)}\n"
+        f"{format_paper_execution_brief(state_mgr)}\n"
+        f"{format_position_management_heartbeat(state_mgr)}\n"
+        f"{format_risk_governor_brief(state_mgr)}\n"
+        f"{format_capital_milestone_brief(state_mgr)}\n"
+        f"{format_portfolio_correlation_brief(state_mgr)}\n"
+        f"{format_regime_edge_brief(state_mgr)}\n"
+        f"{format_regime_dashboard_brief(state_mgr)}\n"
+        f"{format_live_readiness_brief(state_mgr)}\n"
+        f"{format_ai_optimization_brief(state_mgr)}\n"
+        f"{format_ml_validation_brief(state_mgr)}\n"
+        f"PS: base %{POSITION_SIZING_BASE_RISK_PCT*100:.2f} | clamp %{POSITION_SIZING_MIN_RISK_PCT*100:.2f}-%{POSITION_SIZING_MAX_RISK_PCT*100:.2f}\n"
+        f"{format_backtest_validation_brief()}\n"
+        f"Pending suggestions: {pending_count}"
+    )
+
+
+def format_trade_open_msg(t: dict) -> str:
+    pm = t.get("position_management") or {}
+    acce = t.get("acce_trade_brain") or {}
+    gate = t.get("acce_trade_gate") or {}
+    quality = t.get("trade_quality") or {}
+    regime = t.get("regime") or {}
+    execq = t.get("execution_quality") or {}
+
+    return "\n".join([
+        "🚀 PAPER TRADE OPENED",
+        "",
+        f"Coin: {t.get('symbol')}",
+        f"Yön: {t.get('direction')}",
+        f"Kalite: {quality.get('grade', '-')}",
+        f"Rejim: {regime.get('regime', '-')}",
+        "",
+        "📍 PLAN",
+        f"Entry: {format_price(t.get('entry'))}",
+        f"Stop: {format_price(t.get('stop'))}",
+        f"TP1: {format_price(t.get('tp1'))}",
+        f"TP2: {format_price(t.get('tp2'))}",
+        f"TP3: {format_price(t.get('tp3'))}",
+        "",
+        "💰 RİSK",
+        f"Notional: {format_money(t.get('position_notional'))}",
+        f"Risk: %{float(t.get('risk_pct', 0) or 0) * 100:.2f} = {format_money(t.get('risk_amount'))}",
+        f"Collateral: {acce.get('collateral_asset', ACCE_COLLATERAL_ASSET)}",
+        f"ACCE State: {pm.get('acce_state', 'OPEN_RISK')}",
+        "",
+        "✅ GEREKÇE",
+        f"• ACCE Gate: {gate.get('reason', 'onaylandı')}",
+        f"• Execution Quality: {execq.get('status', '-')}",
+        "• Kural: Kâr yastığı oluşmadan scale-in yok.",
+    ])
+
+
+def format_trade_close_msg(t: dict) -> str:
+    pm = t.get("position_management") or {}
+    result = t.get("result", "-")
+    pnl_pct = float(t.get("pnl_pct", 0) or 0) * 100
+    pm_pnl = t.get("pm_realized_pnl_usd", None)
+    pnl_money = format_money(pm_pnl) if pm_pnl is not None else "N/A"
+
+    return "\n".join([
+        "✅ PAPER TRADE CLOSED" if result == "WIN" else "🔻 PAPER TRADE CLOSED",
+        "",
+        f"Coin: {t.get('symbol')}",
+        f"Yön: {t.get('direction')}",
+        f"Sonuç: {result}",
+        f"Kapanış sebebi: {t.get('close_reason', '-')}",
+        "",
+        "📍 FİYATLAR",
+        f"Entry: {format_price(t.get('entry'))}",
+        f"Exit: {format_price(t.get('exit_price'))}",
+        f"Stop son hali: {format_price(pm.get('managed_stop', t.get('stop')))}",
+        "",
+        "💰 PNL",
+        f"PnL: %{pnl_pct:.2f}",
+        f"PM Realized: {pnl_money}",
+        "",
+        "🧠 DERS",
+        f"• Rejim: {_safe_get(t, ['regime', 'regime'], '-')}",
+        f"• ACCE final state: {pm.get('acce_state', '-')}",
+        "• Sonuç learning journal’a işlendi.",
+    ])
+
+
 def _send_periodic_messages(
     state_mgr: StateManager,
     results: list[dict],
@@ -8656,30 +8904,11 @@ def _send_periodic_messages(
             s for s in _suggestions_payload().get("suggestions", [])
             if isinstance(s, dict) and s.get("status") == "PENDING"
         ])
-        send_message(
-            f"✅ BOT AKTİF (v{__version__})\n\n"
-            f"Son kontrol: {tr_now_text()}\n"
-            f"{format_edge_brief(state_mgr)}\n"
-            f"{format_feature_importance_brief(state_mgr)}\n"
-            f"{format_weight_learning_brief(state_mgr)}\n"
-            f"{format_regime_strategy_brief(results)}\n"
-            f"{format_macro_risk_brief(state_mgr)}\n"
-            f"{format_execution_quality_brief(results)}\n"
-            f"{format_strategy_simulation_brief(state_mgr)}\n"
-            f"{format_paper_execution_brief(state_mgr)}\n"
-            f"{format_position_management_heartbeat(state_mgr)}\n"
-            f"{format_risk_governor_brief(state_mgr)}\n"
-            f"{format_capital_milestone_brief(state_mgr)}\n"
-            f"{format_portfolio_correlation_brief(state_mgr)}\n"
-            f"{format_regime_edge_brief(state_mgr)}\n"
-            f"{format_regime_dashboard_brief(state_mgr)}\n"
-            f"{format_live_readiness_brief(state_mgr)}\n"
-            f"{format_ai_optimization_brief(state_mgr)}\n"
-            f"{format_ml_validation_brief(state_mgr)}\n"
-            f"PS: base %{POSITION_SIZING_BASE_RISK_PCT*100:.2f} | clamp %{POSITION_SIZING_MIN_RISK_PCT*100:.2f}-%{POSITION_SIZING_MAX_RISK_PCT*100:.2f}\n"
-            f"{format_backtest_validation_brief()}\n"
-            f"Pending suggestions: {pending_count}"
-        )
+        if TELEGRAM_REPORT_STYLE == "DEBUG" or TELEGRAM_FULL_HEARTBEAT:
+            heartbeat_text = format_debug_heartbeat(state_mgr, results, pending_count)
+        else:
+            heartbeat_text = format_human_heartbeat(state_mgr, results, session_ctx, news_ctx, pending_count)
+        send_message(heartbeat_text)
         state_mgr.set_meta("last_heartbeat_ts", now_ts())
 
 

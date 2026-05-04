@@ -1,15 +1,24 @@
-# Signal Bot ACCE
+# Signal Bot ACCE — Reporting v3
 
-Render Build Command:
+Bu sürüm Telegram mesajlarını okunabilir karar raporu formatına çevirir.
 
+Build Command:
 ```bash
 pip install -r requirements.txt
 ```
 
-Render Start Command:
-
+Start Command:
 ```bash
 python bot.py
 ```
 
-Bu v2 pakette `MOVEMENT_ALERT_THRESHOLDS` sıralama hatası düzeltilmiştir.
+Yeni env:
+```text
+TELEGRAM_REPORT_STYLE=HUMAN
+TELEGRAM_FULL_HEARTBEAT=0
+```
+
+Debug rapora dönmek için:
+```text
+TELEGRAM_REPORT_STYLE=DEBUG
+```

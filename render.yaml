@@ -11,25 +11,17 @@ services:
         value: PAPER
       - key: ENABLE_LIVE_TRADING
         value: "0"
-      - key: TRADE_TRACKING_ENABLED
-        value: "1"
-      - key: PAPER_EXECUTION_ENABLED
-        value: "1"
       - key: ACCE_TRADE_BRAIN_ENABLED
         value: "1"
       - key: ACCE_LONG_ONLY
         value: "1"
       - key: ACCE_COLLATERAL_ASSET
         value: USDT
-      - key: ACCE_NO_SECOND_POSITION_WITHOUT_PROFIT_CUSHION
-        value: "1"
       - key: PM_SCALE_IN_ENABLED
+        value: "0"
+      - key: TELEGRAM_REPORT_STYLE
+        value: HUMAN
+      - key: TELEGRAM_FULL_HEARTBEAT
         value: "0"
       - key: SCAN_INTERVAL
         value: "300"
-      - key: SEND_STANDALONE_NEWS_ALERTS
-        value: "0"
-      - key: SEND_MOVEMENT_ALERTS
-        value: "0"
-      - key: SEND_SUMMARY_MESSAGES
-        value: "0"
