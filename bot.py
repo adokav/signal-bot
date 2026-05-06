@@ -8951,9 +8951,19 @@ def bot_decision_summary(results: list[dict], state_mgr: StateManager = _STATE_M
             reverse=True,
         )[0]
         ls = best.get("long_setup") or {}
+        cscore = float(((ls.get("confluence") or {}).get("score", 0)) or 0)
+        setup_thr = float(globals().get("LONG_CONFLUENCE_MIN_SETUP", 45.0))
+        trade_thr = float(globals().get("LONG_CONFLUENCE_MIN_TRADE", 68.0))
+        state = ls.get("state", "LONG_SETUP_FORMING")
+        if cscore >= trade_thr:
+            reason = f"{best.get('symbol')} long setup radarında; confluence {cscore:.2f}. Trade eşiği geçildi ama trigger/ACCE gate teyidi bekleniyor."
+        elif cscore >= setup_thr:
+            reason = f"{best.get('symbol')} radar’a girdi; confluence {cscore:.2f}. Setup eşiği geçti, trade eşiği henüz geçilmedi."
+        else:
+            reason = f"{best.get('symbol')} izleme listesinde; confluence {cscore:.2f}. Radar eşiği henüz zayıf."
         return {
-            "decision": ls.get("state", "LONG_SETUP_FORMING"),
-            "reason": f"{best.get('symbol')} long radarında | confluence {((ls.get('confluence') or {}).get('score', 0))} | {((ls.get('late_entry') or {}).get('status', '-'))}",
+            "decision": state,
+            "reason": reason,
             "trade_allowed": False,
         }
 
@@ -9039,6 +9049,139 @@ def should_send_decision_report(
     return False, current, "unchanged"
 
 
+
+def _long_state_human(state: str) -> str:
+    mapping = {
+        "NO_LONG_SETUP": "Long fırsatı yok",
+        "LONG_SETUP_FORMING": "Long setup oluşuyor",
+        "LONG_TRIGGER_READY": "Giriş tetiklenmek üzere",
+        "LONG_TRADE_ALLOWED": "Paper trade açılabilir",
+        "LONG_TRADE_BLOCKED": "Setup var ama trade engellendi",
+    }
+    return mapping.get(str(state or "-"), str(state or "-"))
+
+
+def _best_long_setup_result(results: list[dict]) -> Optional[dict]:
+    candidates = [
+        r for r in results
+        if (r.get("long_setup") or {}).get("state") not in {None, "NO_LONG_SETUP", "DISABLED"}
+    ]
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda x: float(((x.get("long_setup") or {}).get("confluence") or {}).get("score", 0) or 0),
+        reverse=True,
+    )[0]
+
+
+def format_long_radar_explanation(results: list[dict]) -> list[str]:
+    """Readable Long Radar explanation for Telegram."""
+    best = _best_long_setup_result(results)
+    if not best:
+        return [
+            "📡 LONG RADAR",
+            "• Durum: Sakin",
+            "• Aday coin: yok",
+            "• Aksiyon: Yeni long setup bekle.",
+        ]
+
+    symbol = best.get("symbol", "-")
+    group = best.get("group", COINS.get(symbol, "-"))
+    setup = best.get("long_setup") or {}
+    state = str(setup.get("state", "-"))
+    confluence = setup.get("confluence") or {}
+    late = setup.get("late_entry") or {}
+    qgate = setup.get("quality_gate") or {}
+    entry_status = setup.get("entry_status") or _safe_get(best, ["entry_engine", "status"], "-")
+    exec_status = _safe_get(best, ["execution_quality", "status"], "-")
+    regime_name = _safe_get(best, ["regime", "regime"], "-")
+
+    cscore = float(confluence.get("score", 0) or 0)
+    setup_threshold = float(globals().get("LONG_CONFLUENCE_MIN_SETUP", 45.0))
+    trade_threshold = float(globals().get("LONG_CONFLUENCE_MIN_TRADE", 68.0))
+
+    radar_pass = cscore >= setup_threshold
+    trade_pass = state == "LONG_TRADE_ALLOWED" and bool(qgate.get("allowed", False))
+
+    olumlu: list[str] = []
+    eksik: list[str] = []
+
+    if radar_pass:
+        olumlu.append("Long setup radar eşiği geçildi.")
+    else:
+        eksik.append("Long setup radar eşiği henüz geçilmedi.")
+
+    if exec_status == "PASS":
+        olumlu.append("Execution Quality uygun.")
+    elif exec_status == "WARN":
+        eksik.append("Execution Quality uyarı veriyor.")
+    elif exec_status == "BLOCKED":
+        eksik.append("Execution Quality trade'i blokluyor.")
+
+    if late.get("status") == "PASS":
+        olumlu.append("Geç giriş / FOMO riski düşük.")
+    elif late.get("status") in {"WAIT_PULLBACK", "WAIT_RETEST"}:
+        eksik.append(f"Giriş için {late.get('status')} bekleniyor: {late.get('reason', '-')}")
+
+    if entry_status == "READY":
+        olumlu.append("Entry / trigger şartı hazır.")
+    elif entry_status not in {None, "-", ""}:
+        eksik.append(f"Entry / trigger henüz hazır değil: {entry_status}")
+
+    if regime_name in {"RISK_ON_TREND_UP", "RISK_ON_ALTSEASON", "SQUEEZE_LONG"}:
+        olumlu.append(f"Rejim long yönünü destekliyor: {regime_name}.")
+    else:
+        eksik.append(f"Rejim tam risk-on değil: {regime_name}.")
+
+    reasons = confluence.get("reasons") or setup.get("reasons") or []
+    if reasons:
+        pretty = ", ".join(str(x).replace("_", " ") for x in reasons[:4])
+        olumlu.append(f"Confluence bileşenleri: {pretty}.")
+
+    if cscore < trade_threshold:
+        eksik.append(f"Confluence trade eşiğinin altında: {cscore:.2f} < {trade_threshold:.2f}.")
+
+    if qgate.get("allowed") is False:
+        for r in qgate.get("reasons", [])[:3]:
+            eksik.append(str(r))
+
+    if not olumlu:
+        olumlu.append("Radar izleniyor ancak güçlü pozitif bileşen sınırlı.")
+    if not eksik and not trade_pass:
+        eksik.append("ACCE Trade Brain henüz nihai trade izni üretmedi.")
+
+    status_line = "🟢 TRADE ALLOWED" if trade_pass else "🟡 SETUP FORMING — henüz trade değil"
+    action = (
+        "Paper trade açılabilir; yine de ACCE risk kapıları izlenmeli."
+        if trade_pass
+        else "Trade açma. Pullback / retest / trigger ve confluence güçlenmesini bekle."
+    )
+
+    lines = [
+        "📡 LONG RADAR",
+        f"• En güçlü aday: {symbol} ({group})",
+        f"• Durum: {status_line}",
+        f"• Teknik statü: {state} — {_long_state_human(state)}",
+        "",
+        f"• Long Confluence: {cscore:.2f} / 100",
+        f"• Radar eşiği: {setup_threshold:.0f} {'✅' if radar_pass else '❌'}",
+        f"• Trade eşiği: {trade_threshold:.0f} {'✅' if cscore >= trade_threshold else '❌'}",
+        "",
+        "✅ Olumlu taraflar",
+    ]
+    lines.extend([f"• {x}" for x in olumlu[:5]])
+    lines.append("")
+    lines.append("⚠️ Eksik taraflar")
+    lines.extend([f"• {x}" for x in eksik[:6]])
+    lines.extend([
+        "",
+        "🎯 Long Radar Aksiyonu",
+        f"• {action}",
+    ])
+    return lines
+
+
 def format_human_heartbeat(
     state_mgr: StateManager,
     results: list[dict],
@@ -9081,11 +9224,12 @@ def format_human_heartbeat(
     if not fi.get("ready"):
         warnings.append("Öğrenme modülleri için kapanmış trade verisi yetersiz.")
 
-    action_line = (
-        "Bot izliyor; uygun setup oluşursa ACCE Trade Brain değerlendirecek."
-        if decision["decision"] in {"WAIT", "LONG SETUP WATCH"}
-        else "Risk modunu koru; yeni manuel trade açma."
-    )
+    if str(decision["decision"]).startswith("LONG_"):
+        action_line = "Long radar aktif; trade açma, trigger/retest ve ACCE trade iznini bekle."
+    elif decision["decision"] in {"WAIT", "LONG SETUP WATCH"}:
+        action_line = "Bot izliyor; uygun setup oluşursa ACCE Trade Brain değerlendirecek."
+    else:
+        action_line = "Risk modunu koru; yeni manuel trade açma."
 
     lines = [
         "🧠 SIGNAL BOT STATUS",
@@ -9105,8 +9249,13 @@ def format_human_heartbeat(
         f"• Açık pozisyon: {open_count}",
         f"• Yeni trade izni: {_yes_no(decision.get('trade_allowed'))}",
         f"• Execution Quality: {exec_txt}",
-        f"• Long Radar: {next(((r.get('long_setup') or {}).get('state') for r in results if (r.get('long_setup') or {}).get('state') not in {None, 'NO_LONG_SETUP'}), 'sakin')}",
         f"• Paper Execution: {paper.get('summary', 'veri yok')}",
+        "",
+    ]
+
+    lines.extend(format_long_radar_explanation(results))
+
+    lines.extend([
         "",
         "💰 SERMAYE & RİSK",
         f"• Equity: {format_money(equity)}",
@@ -9123,12 +9272,18 @@ def format_human_heartbeat(
         f"• AI Optimization: {ai_txt}",
         "",
         "⚠️ UYARILAR",
-    ]
+    ])
+
     if warnings:
         lines.extend([f"• {w}" for w in warnings[:4]])
     else:
         lines.append("• Kritik uyarı yok.")
-    lines.extend(["", "🎯 AKSİYON", f"• {action_line}"])
+
+    lines.extend([
+        "",
+        "🎯 AKSİYON",
+        f"• {action_line}",
+    ])
     return "\n".join(lines)
 
 

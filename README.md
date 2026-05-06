@@ -73,3 +73,19 @@ LONG_TRADE_BLOCKED
 ```
 
 Amaç: Daha erken radar, daha seçici tetik, daha sağlam long trade.
+
+
+## Sprint 10 — Long Radar Explanation Upgrade
+
+Bu sürümde Long Radar açıklaması sadeleştirildi ve detaylandırıldı.
+
+Yeni format:
+- En güçlü aday coin
+- Teknik statü + insan diliyle açıklama
+- Long Confluence / Radar eşiği / Trade eşiği
+- Olumlu taraflar
+- Eksik taraflar
+- Net aksiyon
+
+Artık `LDOUSDT long radarında | confluence 58.35 | PASS` gibi belirsiz ifade yerine:
+`LDOUSDT radar’a girdi; setup eşiği geçti, trade eşiği henüz geçilmedi` mantığı kullanılır.
