@@ -537,6 +537,23 @@ ACCE_TREND_RIDER_LOCK_FRACTION = env_float("ACCE_TREND_RIDER_LOCK_FRACTION", 0.6
 ACCE_REQUIRE_RISK_ON_FOR_NEW_LONG = os.getenv("ACCE_REQUIRE_RISK_ON_FOR_NEW_LONG", "1") == "1"
 ACCE_MIN_QUALITY_GRADE = os.getenv("ACCE_MIN_QUALITY_GRADE", "A").upper()
 ACCE_MIN_CONFIDENCE = env_float("ACCE_MIN_CONFIDENCE", 55.0, min_value=0.0)
+# Long Signal Sensitivity & Quality Upgrade v1
+LONG_SETUP_ENGINE_ENABLED = os.getenv("LONG_SETUP_ENGINE_ENABLED", "1") == "1"
+LONG_SETUP_FORMING_FACTOR = env_float("LONG_SETUP_FORMING_FACTOR", 0.62, min_value=0.10)
+LONG_TRIGGER_READY_FACTOR = env_float("LONG_TRIGGER_READY_FACTOR", 0.88, min_value=0.10)
+LONG_CONFLUENCE_MIN_SETUP = env_float("LONG_CONFLUENCE_MIN_SETUP", 45.0, min_value=0.0)
+LONG_CONFLUENCE_MIN_TRADE = env_float("LONG_CONFLUENCE_MIN_TRADE", 68.0, min_value=0.0)
+LONG_LATE_ENTRY_FILTER_ENABLED = os.getenv("LONG_LATE_ENTRY_FILTER_ENABLED", "1") == "1"
+LONG_LATE_ENTRY_15M_CORE = env_float("LONG_LATE_ENTRY_15M_CORE", 2.20, min_value=0.1)
+LONG_LATE_ENTRY_1H_CORE = env_float("LONG_LATE_ENTRY_1H_CORE", 4.50, min_value=0.1)
+LONG_LATE_ENTRY_15M_HIGH_BETA = env_float("LONG_LATE_ENTRY_15M_HIGH_BETA", 4.00, min_value=0.1)
+LONG_LATE_ENTRY_1H_HIGH_BETA = env_float("LONG_LATE_ENTRY_1H_HIGH_BETA", 8.00, min_value=0.1)
+LONG_LATE_ENTRY_15M_MEME = env_float("LONG_LATE_ENTRY_15M_MEME", 5.50, min_value=0.1)
+LONG_LATE_ENTRY_1H_MEME = env_float("LONG_LATE_ENTRY_1H_MEME", 11.00, min_value=0.1)
+LONG_VOLUME_SPIKE_WAIT_RETEST = env_float("LONG_VOLUME_SPIKE_WAIT_RETEST", 3.00, min_value=0.1)
+LONG_MEME_MIN_VOLUME_RATIO = env_float("LONG_MEME_MIN_VOLUME_RATIO", 1.80, min_value=0.0)
+LONG_MEME_MIN_CONFLUENCE = env_float("LONG_MEME_MIN_CONFLUENCE", 76.0, min_value=0.0)
+LONG_BLOCK_REASONS_FILE = os.getenv("LONG_BLOCK_REASONS_FILE", "long_block_reasons.jsonl")
 ACCE_MEME_RISK_MULTIPLIER = env_float("ACCE_MEME_RISK_MULTIPLIER", 0.45, min_value=0.0)
 ACCE_HIGH_BETA_RISK_MULTIPLIER = env_float("ACCE_HIGH_BETA_RISK_MULTIPLIER", 0.75, min_value=0.0)
 ACCE_MAJOR_ALT_RISK_MULTIPLIER = env_float("ACCE_MAJOR_ALT_RISK_MULTIPLIER", 0.90, min_value=0.0)
@@ -5145,6 +5162,229 @@ def portfolio_risk_check(result: dict, state_mgr: StateManager) -> dict:
     return {"allowed": True, "reason": "Portföy riski uygun."}
 
 
+
+# ============================================================
+# LONG SIGNAL SENSITIVITY & QUALITY GATE v1
+# ============================================================
+
+def _long_threshold(result: dict) -> float:
+    group = result.get("group", COINS.get(result.get("symbol"), "CORE"))
+    return float((THRESHOLDS.get(group) or THRESHOLDS["CORE"]).get("long", 1.55))
+
+
+def long_confluence_score(result: dict) -> dict:
+    """Long-only confluence score in 0-100.
+
+    Measures whether the internal evidence supports a long setup. This is a
+    radar score, not a trade command.
+    """
+    raw = result.get("raw") or {}
+    features = result.get("features") or {}
+    regime = result.get("regime") or {}
+    entry = result.get("entry_engine") or {}
+    execq = result.get("execution_quality") or {}
+    group = result.get("group", COINS.get(result.get("symbol"), "CORE"))
+
+    weights = {
+        "mtf": 18, "trend": 18, "momentum": 18, "market": 10,
+        "volume": 10, "liquidity": 8, "basis": 7, "funding": 6,
+        "regime": 3, "entry_exec": 2,
+    }
+    score = 0.0
+    reasons: list[str] = []
+
+    for key in ("mtf", "trend", "momentum", "market", "volume", "liquidity", "basis", "funding"):
+        val = float(raw.get(key, 0.0) or 0.0)
+        part = clamp(val, -2.0, 2.0) / 2.0
+        score += max(0.0, part) * weights[key]
+        if val > 0.35:
+            reasons.append(f"{key}+")
+        elif val < -0.35:
+            reasons.append(f"{key}-")
+
+    regime_name = str(regime.get("regime", ""))
+    strategy = get_regime_strategy(regime_name or "NEUTRAL")
+    if strategy.get("allow_long"):
+        score += weights["regime"]
+        reasons.append("regime_long_ok")
+    else:
+        reasons.append("regime_long_block")
+
+    if entry.get("status") == "READY":
+        score += weights["entry_exec"]
+        reasons.append("entry_ready")
+    elif entry.get("status") == "WAIT_PULLBACK":
+        reasons.append("entry_wait_pullback")
+
+    if execq.get("status") == "PASS":
+        reasons.append("exec_pass")
+    elif execq.get("status") == "WARN":
+        reasons.append("exec_warn")
+    elif execq.get("status") == "BLOCKED":
+        reasons.append("exec_block")
+
+    # Group sensitivity: meme needs stronger confirmation for trade, but can still be setup-forming.
+    if group == "MEME":
+        score = max(0.0, score - 5.0)
+
+    if score >= 75:
+        label = "STRONG"
+    elif score >= 60:
+        label = "GOOD"
+    elif score >= 45:
+        label = "FORMING"
+    else:
+        label = "WEAK"
+
+    return {"score": round(clamp(score, 0.0, 100.0), 2), "label": label, "reasons": reasons[:10]}
+
+
+def long_late_entry_filter(result: dict) -> dict:
+    """Detect FOMO/chase risk for long setups."""
+    if not LONG_LATE_ENTRY_FILTER_ENABLED:
+        return {"status": "PASS", "reason": "disabled"}
+
+    group = result.get("group", COINS.get(result.get("symbol"), "CORE"))
+    f = result.get("features") or {}
+    ret15 = float(f.get("ret_15m", 0.0) or 0.0)
+    ret1h = float(f.get("ret_1h", 0.0) or 0.0)
+    vol_ratio = float(f.get("vol_ratio", 1.0) or 1.0)
+
+    if group == "MEME":
+        max15, max1h = LONG_LATE_ENTRY_15M_MEME, LONG_LATE_ENTRY_1H_MEME
+    elif group == "HIGH_BETA":
+        max15, max1h = LONG_LATE_ENTRY_15M_HIGH_BETA, LONG_LATE_ENTRY_1H_HIGH_BETA
+    else:
+        max15, max1h = LONG_LATE_ENTRY_15M_CORE, LONG_LATE_ENTRY_1H_CORE
+
+    if ret1h >= max1h or ret15 >= max15:
+        return {
+            "status": "WAIT_PULLBACK",
+            "reason": f"late-entry risk: ret15={ret15:.2f}% ret1h={ret1h:.2f}%",
+            "ret_15m": ret15,
+            "ret_1h": ret1h,
+            "volume_ratio": vol_ratio,
+        }
+    if vol_ratio >= LONG_VOLUME_SPIKE_WAIT_RETEST and ret15 > max15 * 0.55:
+        return {
+            "status": "WAIT_RETEST",
+            "reason": f"volume spike; retest beklenmeli: vol={vol_ratio:.2f}x ret15={ret15:.2f}%",
+            "ret_15m": ret15,
+            "ret_1h": ret1h,
+            "volume_ratio": vol_ratio,
+        }
+    return {"status": "PASS", "reason": "entry not stretched", "ret_15m": ret15, "ret_1h": ret1h, "volume_ratio": vol_ratio}
+
+
+def annotate_long_setup_state(result: dict, state_mgr: StateManager = _STATE_MGR) -> dict:
+    """Attach long setup state to every result, even if it is not a trade."""
+    if not LONG_SETUP_ENGINE_ENABLED:
+        result["long_setup"] = {"enabled": False, "state": "DISABLED"}
+        return result
+
+    group = result.get("group", COINS.get(result.get("symbol"), "CORE"))
+    score = float(result.get("score", 0.0) or 0.0)
+    threshold = _long_threshold(result)
+    confluence = long_confluence_score(result)
+    late = long_late_entry_filter(result)
+    entry = result.get("entry_engine") or {}
+
+    state = "NO_LONG_SETUP"
+    reasons: list[str] = []
+
+    if score > 0 and score >= threshold * LONG_SETUP_FORMING_FACTOR and confluence["score"] >= LONG_CONFLUENCE_MIN_SETUP:
+        state = "LONG_SETUP_FORMING"
+        reasons.append("score_near_long_threshold")
+    if score > 0 and score >= threshold * LONG_TRIGGER_READY_FACTOR and confluence["score"] >= LONG_CONFLUENCE_MIN_TRADE:
+        state = "LONG_TRIGGER_READY"
+        reasons.append("score_and_confluence_ready")
+    if result.get("signal") == "LONG" and result.get("actionable", True):
+        state = "LONG_TRADE_ALLOWED"
+        reasons.append("signal_long_actionable")
+
+    if late.get("status") in {"WAIT_PULLBACK", "WAIT_RETEST"}:
+        if state in {"LONG_TRIGGER_READY", "LONG_TRADE_ALLOWED"}:
+            state = "LONG_SETUP_FORMING"
+        reasons.append(late.get("reason", "late-entry"))
+
+    result["long_setup"] = {
+        "enabled": True,
+        "state": state,
+        "score": round(score, 3),
+        "threshold": threshold,
+        "confluence": confluence,
+        "late_entry": late,
+        "entry_status": entry.get("status"),
+        "reasons": reasons or confluence.get("reasons", []),
+    }
+    return result
+
+
+def apply_long_quality_gate(result: dict) -> dict:
+    """Extra quality gate for LONG signals.
+
+    This improves quality without losing the early long setup radar. Blocks do
+    not delete the setup; they mark it as LONG_TRADE_BLOCKED with reasons.
+    """
+    if not LONG_SETUP_ENGINE_ENABLED or result.get("signal") != "LONG":
+        return result
+
+    setup = result.get("long_setup") or {}
+    confluence = (setup.get("confluence") or {}).get("score", 0.0)
+    late = setup.get("late_entry") or long_late_entry_filter(result)
+    group = result.get("group", COINS.get(result.get("symbol"), "CORE"))
+    f = result.get("features") or {}
+    execq = result.get("execution_quality") or {}
+    reasons: list[str] = []
+
+    if confluence < LONG_CONFLUENCE_MIN_TRADE:
+        reasons.append(f"Long confluence low: {confluence:.1f} < {LONG_CONFLUENCE_MIN_TRADE:.1f}")
+
+    if late.get("status") in {"WAIT_PULLBACK", "WAIT_RETEST"}:
+        reasons.append(late.get("reason", "late entry / retest wait"))
+
+    if execq.get("status") == "BLOCKED":
+        reasons.append(f"Execution quality blocked: {execq.get('reason', '-')}")
+
+    if group == "MEME":
+        vol_ratio = float(f.get("vol_ratio", 1.0) or 1.0)
+        if vol_ratio < LONG_MEME_MIN_VOLUME_RATIO:
+            reasons.append(f"MEME volume weak: {vol_ratio:.2f}x < {LONG_MEME_MIN_VOLUME_RATIO:.2f}x")
+        if confluence < LONG_MEME_MIN_CONFLUENCE:
+            reasons.append(f"MEME confluence low: {confluence:.1f} < {LONG_MEME_MIN_CONFLUENCE:.1f}")
+        regime_name = str((result.get("regime") or {}).get("regime", ""))
+        if regime_name not in {"RISK_ON_TREND_UP", "RISK_ON_ALTSEASON", "SQUEEZE_LONG"}:
+            reasons.append(f"MEME long requires stronger risk-on regime; regime={regime_name}")
+
+    if not reasons:
+        setup["state"] = "LONG_TRADE_ALLOWED"
+        setup["quality_gate"] = {"allowed": True, "reason": "Long quality gate passed."}
+        result["long_setup"] = setup
+        return result
+
+    result["blocked_signal"] = result.get("signal")
+    result["blocked_level"] = result.get("level")
+    result["signal"] = "NO_TRADE"
+    result["level"] = "WEAK"
+    result["confidence"] = 0.0
+    result["actionable"] = False
+    result["veto"] = result.get("veto") or "Long quality gate: " + "; ".join(reasons[:3])
+    setup["state"] = "LONG_TRADE_BLOCKED"
+    setup["quality_gate"] = {"allowed": False, "reasons": reasons}
+    result["long_setup"] = setup
+
+    append_jsonl(LONG_BLOCK_REASONS_FILE, {
+        "ts": now_ts(),
+        "ts_tr": tr_now_text(),
+        "symbol": result.get("symbol"),
+        "group": group,
+        "score": result.get("score"),
+        "confluence": confluence,
+        "late_entry": late,
+        "reasons": reasons,
+    })
+    return result
+
 def apply_trade_filters(result: dict) -> dict:
     """Regime Commander + Quality + Entry + Portfolio filtrelerini aksiyon alınabilir sinyale uygular."""
     result["raw_signal"] = result.get("signal")
@@ -5160,6 +5400,10 @@ def apply_trade_filters(result: dict) -> dict:
     rg = result.get("risk_governor") or {}
     corr = result.get("portfolio_correlation") or {}
     reg_edge = result.get("regime_edge_guard") or {}
+
+    result = apply_long_quality_gate(result)
+    if result.get("signal") not in ("LONG", "SHORT"):
+        return result
 
     veto_reason = None
     if rg and not rg.get("allowed", True):
@@ -8569,6 +8813,7 @@ def _process_symbol(
         result["portfolio_correlation"] = portfolio_correlation_check(result, state_mgr)
         result["regime_edge_guard"] = regime_edge_guard(result, state_mgr)
         result["risk_governor"] = risk_governor_allows_trade(result, state_mgr)
+        result = annotate_long_setup_state(result, state_mgr)
         result = apply_trade_filters(result)
 
         # Noise-free mode:
@@ -8609,6 +8854,9 @@ def _process_symbol(
             "regime_edge_allowed": result.get("regime_edge_guard", {}).get("allowed"),
             "regime_edge_ready": result.get("regime_edge_guard", {}).get("ready"),
             "ai_adjustment": result.get("ai_optimization", {}).get("score_adjustment"),
+            "long_setup_state": (result.get("long_setup") or {}).get("state"),
+            "long_confluence_score": ((result.get("long_setup") or {}).get("confluence") or {}).get("score"),
+            "long_late_entry_status": ((result.get("long_setup") or {}).get("late_entry") or {}).get("status"),
             "last_alert_ts": last_alert_ts,
             "pending_alert_type": pending,
             "updated_at": now_ts(),
@@ -8692,6 +8940,23 @@ def bot_decision_summary(results: list[dict], state_mgr: StateManager = _STATE_M
             "trade_allowed": True,
         }
 
+    setup_candidates = [
+        r for r in results
+        if (r.get("long_setup") or {}).get("state") in {"LONG_SETUP_FORMING", "LONG_TRIGGER_READY", "LONG_TRADE_BLOCKED"}
+    ]
+    if setup_candidates:
+        best = sorted(
+            setup_candidates,
+            key=lambda x: float(((x.get("long_setup") or {}).get("confluence") or {}).get("score", 0) or 0),
+            reverse=True,
+        )[0]
+        ls = best.get("long_setup") or {}
+        return {
+            "decision": ls.get("state", "LONG_SETUP_FORMING"),
+            "reason": f"{best.get('symbol')} long radarında | confluence {((ls.get('confluence') or {}).get('score', 0))} | {((ls.get('late_entry') or {}).get('status', '-'))}",
+            "trade_allowed": False,
+        }
+
     if open_count > 0:
         return {"decision": "MANAGE POSITIONS", "reason": "Açık pozisyonlar yönetiliyor; yeni kaliteli setup yok.", "trade_allowed": False}
 
@@ -8744,6 +9009,7 @@ def telegram_decision_fingerprint(
         "open_positions": int(pm.get("open", 0) or 0),
         "best_symbol": best_symbol,
         "best_signal": best_signal,
+        "best_long_setup": str((next((r.get("long_setup") for r in results if (r.get("long_setup") or {}).get("state") not in {None, "NO_LONG_SETUP"}), {}) or {}).get("state", "-")),
         "news_category": str(news_ctx.get("category", "NONE")),
     }
     return json.dumps(payload, sort_keys=True, ensure_ascii=False)
@@ -8839,6 +9105,7 @@ def format_human_heartbeat(
         f"• Açık pozisyon: {open_count}",
         f"• Yeni trade izni: {_yes_no(decision.get('trade_allowed'))}",
         f"• Execution Quality: {exec_txt}",
+        f"• Long Radar: {next(((r.get('long_setup') or {}).get('state') for r in results if (r.get('long_setup') or {}).get('state') not in {None, 'NO_LONG_SETUP'}), 'sakin')}",
         f"• Paper Execution: {paper.get('summary', 'veri yok')}",
         "",
         "💰 SERMAYE & RİSK",

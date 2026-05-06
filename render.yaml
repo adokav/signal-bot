@@ -29,3 +29,13 @@ services:
         value: "0"
       - key: SCAN_INTERVAL
         value: "300"
+      - key: LONG_SETUP_ENGINE_ENABLED
+        value: "1"
+      - key: LONG_CONFLUENCE_MIN_SETUP
+        value: "45"
+      - key: LONG_CONFLUENCE_MIN_TRADE
+        value: "68"
+      - key: LONG_LATE_ENTRY_FILTER_ENABLED
+        value: "1"
+      - key: LONG_MEME_MIN_VOLUME_RATIO
+        value: "1.8"

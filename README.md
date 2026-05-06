@@ -46,3 +46,30 @@ Nadir zorunlu heartbeat istersen örneğin 6 saatte bir:
 ```text
 TELEGRAM_FORCE_HEARTBEAT_SECONDS=21600
 ```
+
+
+## Sprint 9 — Long Signal Sensitivity & Quality Upgrade
+
+Bu sürüm long yönlü sinyal hassasiyetini artırır, fakat trade kalitesi için ek kalite kapısı koyar.
+
+Eklenenler:
+
+```text
+LONG_SETUP_ENGINE_ENABLED=1
+LONG_CONFLUENCE_MIN_SETUP=45
+LONG_CONFLUENCE_MIN_TRADE=68
+LONG_LATE_ENTRY_FILTER_ENABLED=1
+LONG_MEME_MIN_VOLUME_RATIO=1.8
+```
+
+Yeni long durumları:
+
+```text
+NO_LONG_SETUP
+LONG_SETUP_FORMING
+LONG_TRIGGER_READY
+LONG_TRADE_ALLOWED
+LONG_TRADE_BLOCKED
+```
+
+Amaç: Daha erken radar, daha seçici tetik, daha sağlam long trade.
