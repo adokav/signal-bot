@@ -89,3 +89,19 @@ Yeni format:
 
 Artık `LDOUSDT long radarında | confluence 58.35 | PASS` gibi belirsiz ifade yerine:
 `LDOUSDT radar’a girdi; setup eşiği geçti, trade eşiği henüz geçilmedi` mantığı kullanılır.
+
+
+## Sprint 11 — Volume Surge & Relative Strength Radar
+
+Bu sürüm, piyasa sakin olsa bile tekil coinde hacim patlaması ve BTC’ye göre relatif güçlenmeyi erken yakalamak için Coin Atak Radarı ekler.
+
+Yeni env:
+```text
+VOLUME_SURGE_RADAR_ENABLED=1
+VOLUME_SURGE_MIN_SCORE=55
+VOLUME_SURGE_STRONG_SCORE=70
+VOLUME_SURGE_TRIGGER_SCORE=80
+VOLUME_SURGE_REL_STRENGTH_MIN=0.70
+```
+
+Önemli: Bu radar trade açmaz; sadece coin atağını erken yakalar. Trade için retest/trigger ve ACCE Trade Brain onayı gerekir.

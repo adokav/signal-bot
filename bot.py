@@ -539,6 +539,19 @@ ACCE_MIN_QUALITY_GRADE = os.getenv("ACCE_MIN_QUALITY_GRADE", "A").upper()
 ACCE_MIN_CONFIDENCE = env_float("ACCE_MIN_CONFIDENCE", 55.0, min_value=0.0)
 # Long Signal Sensitivity & Quality Upgrade v1
 LONG_SETUP_ENGINE_ENABLED = os.getenv("LONG_SETUP_ENGINE_ENABLED", "1") == "1"
+# Volume Surge & Relative Strength Radar v1
+VOLUME_SURGE_RADAR_ENABLED = os.getenv("VOLUME_SURGE_RADAR_ENABLED", "1") == "1"
+VOLUME_SURGE_MIN_SCORE = env_float("VOLUME_SURGE_MIN_SCORE", 55.0, min_value=0.0)
+VOLUME_SURGE_STRONG_SCORE = env_float("VOLUME_SURGE_STRONG_SCORE", 70.0, min_value=0.0)
+VOLUME_SURGE_TRIGGER_SCORE = env_float("VOLUME_SURGE_TRIGGER_SCORE", 80.0, min_value=0.0)
+VOLUME_SURGE_MIN_VOLUME_RATIO_CORE = env_float("VOLUME_SURGE_MIN_VOLUME_RATIO_CORE", 1.50, min_value=0.1)
+VOLUME_SURGE_MIN_VOLUME_RATIO_MAJOR_ALT = env_float("VOLUME_SURGE_MIN_VOLUME_RATIO_MAJOR_ALT", 1.70, min_value=0.1)
+VOLUME_SURGE_MIN_VOLUME_RATIO_HIGH_BETA = env_float("VOLUME_SURGE_MIN_VOLUME_RATIO_HIGH_BETA", 1.90, min_value=0.1)
+VOLUME_SURGE_MIN_VOLUME_RATIO_MEME = env_float("VOLUME_SURGE_MIN_VOLUME_RATIO_MEME", 2.20, min_value=0.1)
+VOLUME_SURGE_REL_STRENGTH_MIN = env_float("VOLUME_SURGE_REL_STRENGTH_MIN", 0.70)
+VOLUME_SURGE_QUIET_BTC_RET_1H_ABS_MAX = env_float("VOLUME_SURGE_QUIET_BTC_RET_1H_ABS_MAX", 0.45, min_value=0.0)
+VOLUME_SURGE_QUIET_MARKET_BONUS = env_float("VOLUME_SURGE_QUIET_MARKET_BONUS", 8.0, min_value=0.0)
+VOLUME_SURGE_SPREAD_MAX_MULTIPLIER = env_float("VOLUME_SURGE_SPREAD_MAX_MULTIPLIER", 1.20, min_value=0.1)
 LONG_SETUP_FORMING_FACTOR = env_float("LONG_SETUP_FORMING_FACTOR", 0.62, min_value=0.10)
 LONG_TRIGGER_READY_FACTOR = env_float("LONG_TRIGGER_READY_FACTOR", 0.88, min_value=0.10)
 LONG_CONFLUENCE_MIN_SETUP = env_float("LONG_CONFLUENCE_MIN_SETUP", 45.0, min_value=0.0)
@@ -8967,6 +8980,15 @@ def bot_decision_summary(results: list[dict], state_mgr: StateManager = _STATE_M
             "trade_allowed": False,
         }
 
+    attack_best = _best_attack_radar_result(results)
+    if attack_best:
+        radar = attack_best.get("volume_surge_radar") or {}
+        return {
+            "decision": "COIN_ATTACK_RADAR",
+            "reason": f"{radar.get('symbol', attack_best.get('symbol'))} atak radarında | score {float(radar.get('score', 0) or 0):.2f}. Hacim/relatif güç var; trade için retest ve ACCE gate bekleniyor.",
+            "trade_allowed": False,
+        }
+
     if open_count > 0:
         return {"decision": "MANAGE POSITIONS", "reason": "Açık pozisyonlar yönetiliyor; yeni kaliteli setup yok.", "trade_allowed": False}
 
@@ -9073,6 +9095,176 @@ def _best_long_setup_result(results: list[dict]) -> Optional[dict]:
         key=lambda x: float(((x.get("long_setup") or {}).get("confluence") or {}).get("score", 0) or 0),
         reverse=True,
     )[0]
+
+
+
+def _surge_min_volume_for_group(group: str) -> float:
+    group = str(group or "").upper()
+    if group == "MEME":
+        return VOLUME_SURGE_MIN_VOLUME_RATIO_MEME
+    if group == "HIGH_BETA":
+        return VOLUME_SURGE_MIN_VOLUME_RATIO_HIGH_BETA
+    if group == "MAJOR_ALT":
+        return VOLUME_SURGE_MIN_VOLUME_RATIO_MAJOR_ALT
+    return VOLUME_SURGE_MIN_VOLUME_RATIO_CORE
+
+
+def _extract_feature_number(result: dict, keys: list[str], default: float = 0.0) -> float:
+    for key in keys:
+        for container in (result, result.get("components") or {}, result.get("features") or {}):
+            if isinstance(container, dict) and key in container:
+                try:
+                    return float(container.get(key) or default)
+                except Exception:
+                    pass
+    return default
+
+
+def volume_surge_radar_score(result: dict, btc_result: Optional[dict] = None) -> dict:
+    """Coin-specific attack detector.
+
+    Radar-only module: it does not open trades.
+    """
+    if not VOLUME_SURGE_RADAR_ENABLED:
+        return {"enabled": False, "state": "DISABLED", "score": 0.0, "reasons": []}
+
+    symbol = result.get("symbol", "-")
+    group = str(result.get("group", COINS.get(symbol, "CORE")) or "CORE").upper()
+
+    ret_5m = _extract_feature_number(result, ["ret_5m", "return_5m"], 0.0)
+    ret_15m = _extract_feature_number(result, ["ret_15m", "return_15m"], 0.0)
+    ret_1h = _extract_feature_number(result, ["ret_1h", "return_1h"], 0.0)
+    volume_ratio = _extract_feature_number(result, ["volume_ratio", "vol_ratio"], 1.0)
+    spread_bps = _extract_feature_number(result, ["spread_bps", "spread"], 0.0)
+
+    btc_ret_1h = 0.0
+    if isinstance(btc_result, dict):
+        btc_ret_1h = _extract_feature_number(btc_result, ["ret_1h", "return_1h"], 0.0)
+
+    rel_strength_1h = ret_1h - btc_ret_1h
+    min_vol = _surge_min_volume_for_group(group)
+    spread_limit = float(SPREAD_LIMITS.get(group, SPREAD_LIMITS.get("HIGH_BETA", 25))) * VOLUME_SURGE_SPREAD_MAX_MULTIPLIER
+
+    volume_score = clamp((volume_ratio / max(min_vol, 0.01)) * 35.0, 0.0, 35.0)
+    rel_strength_score = clamp((rel_strength_1h / max(VOLUME_SURGE_REL_STRENGTH_MIN, 0.01)) * 25.0, 0.0, 25.0)
+    momentum_score = clamp(max(ret_5m * 6.0, ret_15m * 3.0, ret_1h * 1.5), 0.0, 20.0)
+    spread_score = 15.0 if spread_bps <= spread_limit else max(0.0, 15.0 - (spread_bps - spread_limit) * 0.75)
+    quiet_bonus = VOLUME_SURGE_QUIET_MARKET_BONUS if abs(btc_ret_1h) <= VOLUME_SURGE_QUIET_BTC_RET_1H_ABS_MAX and ret_1h > 0 else 0.0
+
+    score = clamp(volume_score + rel_strength_score + momentum_score + spread_score + quiet_bonus, 0.0, 100.0)
+
+    reasons: list[str] = []
+    if volume_ratio >= min_vol:
+        reasons.append(f"hacim {volume_ratio:.2f}x")
+    if rel_strength_1h >= VOLUME_SURGE_REL_STRENGTH_MIN:
+        reasons.append(f"BTC'ye göre 1h relatif güç +{rel_strength_1h:.2f}%")
+    if ret_15m > 0 or ret_1h > 0:
+        reasons.append(f"kısa vade momentum 15m {ret_15m:+.2f}% / 1h {ret_1h:+.2f}%")
+    if spread_bps <= spread_limit:
+        reasons.append(f"spread uygun {spread_bps:.1f}bps")
+    if quiet_bonus > 0:
+        reasons.append("BTC sakin; coin ayrışıyor")
+
+    if score >= VOLUME_SURGE_TRIGGER_SCORE:
+        state = "ATTACK_TRIGGER_WATCH"
+    elif score >= VOLUME_SURGE_STRONG_SCORE:
+        state = "ATTACK_RADAR_STRONG"
+    elif score >= VOLUME_SURGE_MIN_SCORE:
+        state = "ATTACK_RADAR"
+    else:
+        state = "NO_ATTACK_RADAR"
+
+    return {
+        "enabled": True,
+        "state": state,
+        "score": round(score, 2),
+        "symbol": symbol,
+        "group": group,
+        "volume_ratio": round(volume_ratio, 3),
+        "min_volume_ratio": round(min_vol, 3),
+        "ret_5m": round(ret_5m, 4),
+        "ret_15m": round(ret_15m, 4),
+        "ret_1h": round(ret_1h, 4),
+        "btc_ret_1h": round(btc_ret_1h, 4),
+        "relative_strength_1h": round(rel_strength_1h, 4),
+        "spread_bps": round(spread_bps, 4),
+        "spread_limit": round(spread_limit, 4),
+        "quiet_bonus": round(quiet_bonus, 2),
+        "reasons": reasons,
+    }
+
+
+def attach_volume_surge_radar(results: list[dict]) -> None:
+    btc = next((r for r in results if r.get("symbol") == "BTCUSDT"), None)
+    for r in results:
+        if isinstance(r, dict):
+            r["volume_surge_radar"] = volume_surge_radar_score(r, btc)
+
+
+def _best_attack_radar_result(results: list[dict]) -> Optional[dict]:
+    attach_volume_surge_radar(results)
+    candidates = [
+        r for r in results
+        if (r.get("volume_surge_radar") or {}).get("state") not in {None, "DISABLED", "NO_ATTACK_RADAR"}
+    ]
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda x: float((x.get("volume_surge_radar") or {}).get("score", 0) or 0),
+        reverse=True,
+    )[0]
+
+
+def format_attack_radar_explanation(results: list[dict]) -> list[str]:
+    best = _best_attack_radar_result(results)
+    if not best:
+        return [
+            "⚡ COIN ATAK RADARI",
+            "• Durum: sakin",
+            "• Aday coin: yok",
+            "• Aksiyon: Hacim + relatif güç atağı bekle.",
+        ]
+
+    radar = best.get("volume_surge_radar") or {}
+    symbol = radar.get("symbol", best.get("symbol", "-"))
+    group = radar.get("group", best.get("group", "-"))
+    score = float(radar.get("score", 0) or 0)
+    state = str(radar.get("state", "-"))
+    reasons = radar.get("reasons") or []
+
+    action = (
+        "Retest/trigger teyidi bekle; ACCE gate onaylamadan trade açma."
+        if state == "ATTACK_TRIGGER_WATCH"
+        else "Trade açma. Coini izlemeye al; hacim kalıcı mı ve retest tutuyor mu bekle."
+    )
+
+    lines = [
+        "⚡ COIN ATAK RADARI",
+        f"• En güçlü atak adayı: {symbol} ({group})",
+        f"• Durum: 🟡 {state} — henüz trade değil",
+        f"• Attack Score: {score:.2f} / 100",
+        f"• Radar eşiği: {VOLUME_SURGE_MIN_SCORE:.0f} {'✅' if score >= VOLUME_SURGE_MIN_SCORE else '❌'}",
+        f"• Güçlü atak eşiği: {VOLUME_SURGE_STRONG_SCORE:.0f} {'✅' if score >= VOLUME_SURGE_STRONG_SCORE else '❌'}",
+        "",
+        "Neden radar’a girdi?",
+    ]
+    if reasons:
+        lines.extend([f"✅ {x}" for x in reasons[:5]])
+    else:
+        lines.append("• Henüz güçlü atak bileşeni yok.")
+
+    lines.extend([
+        "",
+        "Neden trade değil?",
+        "⚠️ İlk impuls geç olabilir; FOMO girişi yasak.",
+        "⚠️ Retest / pullback / trigger bekleniyor.",
+        "⚠️ ACCE Trade Brain nihai işlem izni vermeden pozisyon açılmaz.",
+        "",
+        "🎯 Atak Radarı Aksiyonu",
+        f"• {action}",
+    ])
+    return lines
 
 
 def format_long_radar_explanation(results: list[dict]) -> list[str]:
@@ -9226,6 +9418,8 @@ def format_human_heartbeat(
 
     if str(decision["decision"]).startswith("LONG_"):
         action_line = "Long radar aktif; trade açma, trigger/retest ve ACCE trade iznini bekle."
+    elif decision["decision"] == "COIN_ATTACK_RADAR":
+        action_line = "Coin atak radarında; trade açma, retest/trigger ve ACCE trade iznini bekle."
     elif decision["decision"] in {"WAIT", "LONG SETUP WATCH"}:
         action_line = "Bot izliyor; uygun setup oluşursa ACCE Trade Brain değerlendirecek."
     else:
@@ -9254,6 +9448,8 @@ def format_human_heartbeat(
     ]
 
     lines.extend(format_long_radar_explanation(results))
+    lines.extend([""])
+    lines.extend(format_attack_radar_explanation(results))
 
     lines.extend([
         "",
