@@ -120,8 +120,8 @@ def env_str_list(name: str, default: list[str]) -> list[str]:
     return values or list(default)
 
 
-# Early helper: some configuration blocks use clamp before the Math Helpers
-# section is reached. The same implementation is repeated later intentionally.
+# Early helper: bazı config blokları clamp fonksiyonunu Math Helpers bölümünden
+# önce kullanır; bu yüzden fonksiyon burada tanımlı tutulur.
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
@@ -1708,10 +1708,6 @@ def closed_bar_return(closes: list[float], bars: int, *, series_name: str) -> fl
     latest_closed = closes[-2]
     reference = closes[-(bars + 2)]
     return pct(latest_closed, reference)
-
-
-def clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
 
 
 def ema(values: list[float], period: int) -> float:
