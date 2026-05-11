@@ -552,6 +552,17 @@ VOLUME_SURGE_REL_STRENGTH_MIN = env_float("VOLUME_SURGE_REL_STRENGTH_MIN", 0.70)
 VOLUME_SURGE_QUIET_BTC_RET_1H_ABS_MAX = env_float("VOLUME_SURGE_QUIET_BTC_RET_1H_ABS_MAX", 0.45, min_value=0.0)
 VOLUME_SURGE_QUIET_MARKET_BONUS = env_float("VOLUME_SURGE_QUIET_MARKET_BONUS", 8.0, min_value=0.0)
 VOLUME_SURGE_SPREAD_MAX_MULTIPLIER = env_float("VOLUME_SURGE_SPREAD_MAX_MULTIPLIER", 1.20, min_value=0.1)
+# Rational FOMO Early Warning Engine v1
+RATIONAL_FOMO_ENGINE_ENABLED = os.getenv("RATIONAL_FOMO_ENGINE_ENABLED", "1") == "1"
+FOMO_SEED_SCORE = env_float("FOMO_SEED_SCORE", 40.0, min_value=0.0)
+FOMO_BUILDING_SCORE = env_float("FOMO_BUILDING_SCORE", 55.0, min_value=0.0)
+FOMO_ACCELERATING_SCORE = env_float("FOMO_ACCELERATING_SCORE", 70.0, min_value=0.0)
+FOMO_CHASE_RISK_SCORE = env_float("FOMO_CHASE_RISK_SCORE", 85.0, min_value=0.0)
+FOMO_PRICE_EFFICIENCY_MIN = env_float("FOMO_PRICE_EFFICIENCY_MIN", 0.35, min_value=0.0)
+FOMO_PULLBACK_HEALTH_MIN = env_float("FOMO_PULLBACK_HEALTH_MIN", 0.40, min_value=0.0)
+FOMO_EXTREME_15M_RET = env_float("FOMO_EXTREME_15M_RET", 5.0, min_value=0.1)
+FOMO_EXTREME_1H_RET = env_float("FOMO_EXTREME_1H_RET", 9.0, min_value=0.1)
+FOMO_CHASE_VOLUME_RATIO = env_float("FOMO_CHASE_VOLUME_RATIO", 4.5, min_value=0.1)
 LONG_SETUP_FORMING_FACTOR = env_float("LONG_SETUP_FORMING_FACTOR", 0.62, min_value=0.10)
 LONG_TRIGGER_READY_FACTOR = env_float("LONG_TRIGGER_READY_FACTOR", 0.88, min_value=0.10)
 LONG_CONFLUENCE_MIN_SETUP = env_float("LONG_CONFLUENCE_MIN_SETUP", 45.0, min_value=0.0)
@@ -8989,6 +9000,15 @@ def bot_decision_summary(results: list[dict], state_mgr: StateManager = _STATE_M
             "trade_allowed": False,
         }
 
+    fomo_best = _best_rational_fomo_result(results)
+    if fomo_best:
+        fomo = fomo_best.get("rational_fomo") or {}
+        return {
+            "decision": fomo.get("state", "FOMO_BUILDING"),
+            "reason": f"{fomo.get('symbol', fomo_best.get('symbol'))} rasyonel önsezi radarında | FOMO score {float(fomo.get('score', 0) or 0):.2f}. Henüz trade değil; retest/trigger bekleniyor.",
+            "trade_allowed": False,
+        }
+
     if open_count > 0:
         return {"decision": "MANAGE POSITIONS", "reason": "Açık pozisyonlar yönetiliyor; yeni kaliteli setup yok.", "trade_allowed": False}
 
@@ -9216,6 +9236,92 @@ def _best_attack_radar_result(results: list[dict]) -> Optional[dict]:
     )[0]
 
 
+
+def rational_fomo_score(result: dict, btc_result: Optional[dict] = None) -> dict:
+    """Rational FOMO Early Warning. Radar only; never opens trades."""
+    if not RATIONAL_FOMO_ENGINE_ENABLED:
+        return {"enabled": False, "state": "DISABLED", "score": 0.0, "reasons": []}
+    symbol = result.get("symbol", "-")
+    group = str(result.get("group", COINS.get(symbol, "CORE")) or "CORE").upper()
+    ret_5m = _extract_feature_number(result, ["ret_5m", "return_5m"], 0.0)
+    ret_15m = _extract_feature_number(result, ["ret_15m", "return_15m"], 0.0)
+    ret_1h = _extract_feature_number(result, ["ret_1h", "return_1h"], 0.0)
+    volume_ratio = _extract_feature_number(result, ["volume_ratio", "vol_ratio"], 1.0)
+    spread_bps = _extract_feature_number(result, ["spread_bps", "spread"], 0.0)
+    btc_ret_1h = 0.0
+    if isinstance(btc_result, dict):
+        btc_ret_1h = _extract_feature_number(btc_result, ["ret_1h", "return_1h"], 0.0)
+    rel_strength_1h = ret_1h - btc_ret_1h
+    min_vol = _surge_min_volume_for_group(group)
+    spread_limit = float(SPREAD_LIMITS.get(group, SPREAD_LIMITS.get("HIGH_BETA", 25))) * VOLUME_SURGE_SPREAD_MAX_MULTIPLIER
+    volume_anomaly = clamp((volume_ratio / max(min_vol, 0.01)) * 25.0, 0.0, 25.0)
+    relative_strength = clamp((rel_strength_1h / max(VOLUME_SURGE_REL_STRENGTH_MIN, 0.01)) * 25.0, 0.0, 25.0)
+    short_momentum = clamp(max(ret_5m * 5.0, ret_15m * 2.5, ret_1h * 1.25), 0.0, 15.0)
+    spread_quality = 1.0 if spread_bps <= spread_limit else max(0.0, 1.0 - (spread_bps - spread_limit) / max(spread_limit, 1.0))
+    positive_move = max(ret_15m, ret_1h, 0.0)
+    price_efficiency_raw = clamp((positive_move / max(volume_ratio, 1.0)) / 2.0, 0.0, 1.0) * spread_quality
+    price_efficiency = clamp(price_efficiency_raw * 15.0, 0.0, 15.0)
+    extended_penalty = 0.0
+    if ret_15m >= FOMO_EXTREME_15M_RET or ret_1h >= FOMO_EXTREME_1H_RET:
+        extended_penalty += 0.45
+    if volume_ratio >= FOMO_CHASE_VOLUME_RATIO:
+        extended_penalty += 0.20
+    pullback_health_raw = clamp(0.75 - extended_penalty + (0.15 if ret_5m >= 0 else -0.15), 0.0, 1.0)
+    pullback_health = pullback_health_raw * 10.0
+    liquidity_quality = clamp((100.0 - spread_bps * 2.0) / 100.0, 0.0, 1.0) * 10.0
+    score = clamp(volume_anomaly + relative_strength + short_momentum + price_efficiency + pullback_health + liquidity_quality, 0.0, 100.0)
+    chase_reasons=[]; reasons=[]
+    if ret_15m >= FOMO_EXTREME_15M_RET: chase_reasons.append(f"15m hareket çok hızlı: {ret_15m:+.2f}%")
+    if ret_1h >= FOMO_EXTREME_1H_RET: chase_reasons.append(f"1h hareket çok hızlı: {ret_1h:+.2f}%")
+    if volume_ratio >= FOMO_CHASE_VOLUME_RATIO: chase_reasons.append(f"hacim spike aşırı: {volume_ratio:.2f}x")
+    if spread_bps > spread_limit: chase_reasons.append(f"spread genişliyor: {spread_bps:.1f}bps")
+    if volume_ratio >= min_vol: reasons.append(f"hacim anomalisi {volume_ratio:.2f}x")
+    if rel_strength_1h >= VOLUME_SURGE_REL_STRENGTH_MIN: reasons.append(f"BTC'ye göre relatif güç +{rel_strength_1h:.2f}%")
+    if short_momentum > 0: reasons.append(f"kısa vade momentum pozitif: 15m {ret_15m:+.2f}% / 1h {ret_1h:+.2f}%")
+    if spread_bps <= spread_limit: reasons.append(f"spread normal: {spread_bps:.1f}bps")
+    if price_efficiency_raw >= FOMO_PRICE_EFFICIENCY_MIN: reasons.append("hacim-fiyat verimliliği sağlıklı")
+    if pullback_health_raw >= FOMO_PULLBACK_HEALTH_MIN: reasons.append("hareket henüz aşırı uzamış görünmüyor")
+    if chase_reasons and score >= FOMO_ACCELERATING_SCORE: state="FOMO_CHASE_RISK"
+    elif score >= FOMO_CHASE_RISK_SCORE: state="FOMO_CHASE_RISK"
+    elif score >= FOMO_ACCELERATING_SCORE: state="FOMO_ACCELERATING"
+    elif score >= FOMO_BUILDING_SCORE: state="FOMO_BUILDING"
+    elif score >= FOMO_SEED_SCORE: state="FOMO_SEED"
+    else: state="NO_FOMO"
+    return {"enabled": True, "symbol": symbol, "group": group, "state": state, "score": round(score,2), "volume_ratio": round(volume_ratio,3), "relative_strength_1h": round(rel_strength_1h,4), "ret_5m": round(ret_5m,4), "ret_15m": round(ret_15m,4), "ret_1h": round(ret_1h,4), "spread_bps": round(spread_bps,4), "price_efficiency": round(price_efficiency_raw,4), "pullback_health": round(pullback_health_raw,4), "reasons": reasons, "chase_reasons": chase_reasons, "components": {"volume_anomaly": round(volume_anomaly,2), "relative_strength": round(relative_strength,2), "short_momentum": round(short_momentum,2), "price_efficiency": round(price_efficiency,2), "pullback_health": round(pullback_health,2), "liquidity_quality": round(liquidity_quality,2)}}
+
+def attach_rational_fomo(results: list[dict]) -> None:
+    btc = next((r for r in results if r.get("symbol") == "BTCUSDT"), None)
+    for r in results:
+        if isinstance(r, dict): r["rational_fomo"] = rational_fomo_score(r, btc)
+
+def _best_rational_fomo_result(results: list[dict]) -> Optional[dict]:
+    attach_rational_fomo(results)
+    candidates=[r for r in results if (r.get("rational_fomo") or {}).get("state") not in {None,"DISABLED","NO_FOMO"}]
+    if not candidates: return None
+    return sorted(candidates, key=lambda x: float((x.get("rational_fomo") or {}).get("score",0) or 0), reverse=True)[0]
+
+def format_rational_fomo_warning(results: list[dict]) -> list[str]:
+    best = _best_rational_fomo_result(results)
+    if not best:
+        return ["🧭 RASYONEL ÖNSEZİ", "• Durum: FOMO ön koşulu yok", "• Aksiyon: Piyasa/coin davranışı izleniyor."]
+    fomo = best.get("rational_fomo") or {}
+    symbol = fomo.get("symbol", best.get("symbol", "-"))
+    state = str(fomo.get("state", "-")); score=float(fomo.get("score",0) or 0)
+    reasons=fomo.get("reasons") or []; chase=fomo.get("chase_reasons") or []
+    if state == "FOMO_SEED": status="🟡 FOMO_SEED — erken talep tohumu"; comment="Bu coinde erken talep belirtisi var ama sinyal henüz zayıf."
+    elif state == "FOMO_BUILDING": status="🟡 FOMO_BUILDING — henüz trade değil"; comment="Bu coinde piyasa geneline göre erken talep belirtileri var."
+    elif state == "FOMO_ACCELERATING": status="🟠 FOMO_ACCELERATING — yakından izle"; comment="Talep hızlanıyor; trigger/retest gelirse Long Radar güçlenebilir."
+    elif state == "FOMO_CHASE_RISK": status="🔴 FOMO_CHASE_RISK — kovalamak yasak"; comment="İlk impuls fazla uzamış olabilir. FOMO ile marketten atlama riski yüksek."
+    else: status=f"🔵 {state}"; comment="Rasyonel önsezi izleme modunda."
+    trade_condition=["Retest / pullback tutmalı.", "Volume geri çekilmede tamamen sönmemeli.", "5m/15m momentum bozulmamalı.", "Execution Quality PASS kalmalı.", "ACCE Trade Brain onay vermeli."]
+    dont_do=["Marketten kovalamak yok.", "Kaldıraçla FOMO girişi yok.", "Plan oluşmadan trade yok."]
+    lines=["🧭 RASYONEL ÖNSEZİ UYARISI", "", f"Coin: {symbol}", f"Durum: {status}", f"FOMO Early Score: {score:.2f} / 100", "", "📌 Kısa yorum", f"• {comment}", "", "✅ Olumlu sinyaller"]
+    lines.extend([f"• {x}" for x in reasons[:5]] if reasons else ["• Belirgin olumlu FOMO bileşeni yok."])
+    lines.extend(["", "⚠️ Eksik / riskli noktalar"])
+    lines.extend([f"• {x}" for x in chase[:5]] if chase else ["• Retest / pullback teyidi henüz şart.", "• ACCE Trade Brain henüz trade izni vermedi."])
+    lines.extend(["", "🎯 Hangi şartta trade’e döner?"] + [f"• {x}" for x in trade_condition] + ["", "🚫 Ne yapılmamalı?"] + [f"• {x}" for x in dont_do])
+    return lines
+
 def format_attack_radar_explanation(results: list[dict]) -> list[str]:
     best = _best_attack_radar_result(results)
     if not best:
@@ -9420,6 +9526,8 @@ def format_human_heartbeat(
         action_line = "Long radar aktif; trade açma, trigger/retest ve ACCE trade iznini bekle."
     elif decision["decision"] == "COIN_ATTACK_RADAR":
         action_line = "Coin atak radarında; trade açma, retest/trigger ve ACCE trade iznini bekle."
+    elif str(decision["decision"]).startswith("FOMO_"):
+        action_line = "Rasyonel önsezi aktif; FOMO’ya kapılma, retest/trigger ve ACCE onayı bekle."
     elif decision["decision"] in {"WAIT", "LONG SETUP WATCH"}:
         action_line = "Bot izliyor; uygun setup oluşursa ACCE Trade Brain değerlendirecek."
     else:
@@ -9450,6 +9558,8 @@ def format_human_heartbeat(
     lines.extend(format_long_radar_explanation(results))
     lines.extend([""])
     lines.extend(format_attack_radar_explanation(results))
+    lines.extend([""])
+    lines.extend(format_rational_fomo_warning(results))
 
     lines.extend([
         "",

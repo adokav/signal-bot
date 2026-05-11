@@ -105,3 +105,34 @@ VOLUME_SURGE_REL_STRENGTH_MIN=0.70
 ```
 
 Önemli: Bu radar trade açmaz; sadece coin atağını erken yakalar. Trade için retest/trigger ve ACCE Trade Brain onayı gerekir.
+
+
+## Sprint 12 — Rational FOMO Early Warning Engine
+
+Bu sürüm `Rasyonel Önsezi Uyarısı` ekler.
+
+Amaç:
+```text
+FOMO'yu yakalamak,
+FOMO'ya kapılmamak.
+```
+
+Yeni durumlar:
+```text
+NO_FOMO
+FOMO_SEED
+FOMO_BUILDING
+FOMO_ACCELERATING
+FOMO_CHASE_RISK
+```
+
+Yeni env:
+```text
+RATIONAL_FOMO_ENGINE_ENABLED=1
+FOMO_SEED_SCORE=40
+FOMO_BUILDING_SCORE=55
+FOMO_ACCELERATING_SCORE=70
+FOMO_CHASE_RISK_SCORE=85
+```
+
+Bu modül trade açmaz. Trade için retest/trigger ve ACCE Trade Brain onayı gerekir.
