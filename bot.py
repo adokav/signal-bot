@@ -214,6 +214,7 @@ TELEGRAM_FULL_HEARTBEAT = os.getenv("TELEGRAM_FULL_HEARTBEAT", "0") == "1"
 TELEGRAM_DECISION_CHANGE_ONLY = os.getenv("TELEGRAM_DECISION_CHANGE_ONLY", "1") == "1"
 # 0 = never force periodic heartbeat; only decision changes create heartbeat messages.
 TELEGRAM_FORCE_HEARTBEAT_SECONDS = env_int("TELEGRAM_FORCE_HEARTBEAT_SECONDS", 0, min_value=0)
+TELEGRAM_NOTIFY_TRADE_WORTHY_ONLY = os.getenv("TELEGRAM_NOTIFY_TRADE_WORTHY_ONLY", "1") == "1"
 
 TRADE_TRACKING_ENABLED = os.getenv("TRADE_TRACKING_ENABLED", "1") == "1"
 TRADE_OPEN_COOLDOWN_SECONDS = env_int("TRADE_OPEN_COOLDOWN_SECONDS", 4 * 60 * 60, min_value=0)
@@ -712,6 +713,8 @@ MEXC_API_SECRET = os.getenv("MEXC_API_SECRET")
 # Hesaptaki USDT/USDC bakiyeyi read-only okur. Emir göndermez.
 MEXC_ACCOUNT_SYNC_ENABLED = os.getenv("MEXC_ACCOUNT_SYNC_ENABLED", "0") == "1"
 MEXC_ACCOUNT_RECV_WINDOW = env_int("MEXC_ACCOUNT_RECV_WINDOW", 5000, min_value=1000)
+MEXC_LIVE_RECV_WINDOW = env_int("MEXC_LIVE_RECV_WINDOW", 5000, min_value=1000)
+MEXC_LIVE_ORDER_OPEN_TYPE = env_int("MEXC_LIVE_ORDER_OPEN_TYPE", 2, min_value=1)  # 1 isolated, 2 cross
 ACCE_ACCOUNT_EQUITY_SOURCE = os.getenv("ACCE_ACCOUNT_EQUITY_SOURCE", "AUTO").upper()  # AUTO / ENV_ONLY / MEXC_SPOT
 ACCE_ACCOUNT_SYNC_CACHE_TTL_SECONDS = env_int("ACCE_ACCOUNT_SYNC_CACHE_TTL_SECONDS", 60, min_value=5)
 ACCE_RISK_BUDGET_SOURCE = os.getenv("ACCE_RISK_BUDGET_SOURCE", "PLAN").upper()  # PLAN / FIXED
@@ -4942,6 +4945,16 @@ def _mexc_signed_query(params: dict) -> str:
     return f"{query}&signature={signature}"
 
 
+def _mexc_contract_signature(payload: dict, request_time_ms: int) -> str:
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    sign_target = f"{MEXC_API_KEY}{request_time_ms}{body}"
+    return hmac.new(
+        str(MEXC_API_SECRET or "").encode("utf-8"),
+        sign_target.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def mexc_spot_account_snapshot() -> dict:
     """Read MEXC spot account balances with SPOT_ACCOUNT_READ permission.
 
@@ -5248,11 +5261,56 @@ class ExecutionAdapter:
                 return {"submitted": False, "mode": self.mode, "reason": "live_disabled"}
             if not MEXC_API_KEY or not MEXC_API_SECRET:
                 return {"submitted": False, "mode": self.mode, "reason": "missing_mexc_keys"}
-            # Bilerek kapalı: imza, precision, reduceOnly, order lifecycle, retry ve
-            # duplicate-order guard tamamlanmadan canlı emir açmıyoruz.
-            return {"submitted": False, "mode": self.mode, "reason": "live_not_implemented_safe_guard"}
+            try:
+                return self._submit_live_contract_market_order(trade, intent)
+            except Exception as e:
+                log.exception("LIVE order submit failed: %s", e)
+                return {"submitted": False, "mode": self.mode, "reason": f"live_submit_failed: {e}"}
 
         return {"submitted": False, "mode": self.mode, "reason": "unknown_mode"}
+
+    def _submit_live_contract_market_order(self, trade: dict, intent: dict) -> dict:
+        direction = str(trade.get("direction") or "").upper()
+        side = 1 if direction == "LONG" else 3  # 1=open long, 3=open short
+        qty = float(trade.get("quantity") or 0.0)
+        symbol = _to_futures_symbol(str(trade.get("symbol") or ""))
+        if qty <= 0 or not symbol:
+            return {"submitted": False, "mode": self.mode, "reason": "invalid_symbol_or_quantity"}
+        payload = {
+            "symbol": symbol,
+            "vol": qty,
+            "side": side,
+            "type": 6,  # market via fair price
+            "openType": MEXC_LIVE_ORDER_OPEN_TYPE,
+            "externalOid": str(trade.get("id") or _trade_id(symbol)),
+        }
+        req_time = int(time.time() * 1000)
+        signature = _mexc_contract_signature(payload, req_time)
+        headers = {
+            "ApiKey": str(MEXC_API_KEY),
+            "Request-Time": str(req_time),
+            "Signature": signature,
+            "Content-Type": "application/json",
+            "Recv-Window": str(MEXC_LIVE_RECV_WINDOW),
+        }
+        url = f"{MEXC_FUTURES_BASE}/api/v1/private/order/submit"
+        response = http_post(url, headers=headers, json_data=payload, timeout=10)
+        ok = isinstance(response, dict) and int(response.get("success", False)) == 1
+        result = {
+            **intent,
+            "submitted": bool(ok),
+            "paper": False,
+            "mode": self.mode,
+            "live_endpoint": url,
+            "live_payload": payload,
+            "live_response": response,
+        }
+        if not ok:
+            result["reason"] = f"live_rejected: {str(response)[:280]}"
+        else:
+            result["reason"] = "live_order_submitted"
+        append_jsonl(EXECUTION_LOG_FILE, result)
+        return result
 
 
 _EXECUTION_ADAPTER = ExecutionAdapter()
@@ -10601,7 +10659,13 @@ def should_send_decision_report(
     previous = state_mgr.get_meta("last_telegram_decision_fingerprint", "")
     last_sent = float(state_mgr.get_meta("last_telegram_decision_report_ts", 0) or 0)
 
+    decision = bot_decision_summary(results, state_mgr)
+    important_decisions = {"MANAGE POSITIONS", "BLOCKED", "LIQUIDATION_HUNT_BLOCK", "SHORT_LIQ_MAGNET_WATCH"}
+    is_trade_worthy = bool(decision.get("trade_allowed")) or str(decision.get("decision")) in important_decisions
+
     if current != previous:
+        if TELEGRAM_NOTIFY_TRADE_WORTHY_ONLY and not is_trade_worthy:
+            return False, current, "decision_changed_but_not_trade_worthy"
         return True, current, "decision_changed"
 
     if TELEGRAM_FORCE_HEARTBEAT_SECONDS > 0 and now_ts() - last_sent >= TELEGRAM_FORCE_HEARTBEAT_SECONDS:
