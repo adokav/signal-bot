@@ -18,6 +18,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -36,7 +37,7 @@ from flask import Flask
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-__version__ = "1.3.0"
+__version__ = "2.0.0"
 
 # ============================================================
 # LOGGING
@@ -181,10 +182,20 @@ EMA_MID = 21
 EMA_SLOW = 50
 ATR_PERIOD = 14
 RSI_PERIOD = 14
+ADX_PERIOD = 14
+BB_PERIOD = 20
+BB_STD = 2.0
+
+# Higher timeframe konteksti: 1h ve 4h trend yonu icin ek kline cekilir.
+# Buyuk timeframe HER ZAMAN yon belirler; kucuk timeframe entry timing yapar.
+HTF_1H_LIMIT = env_int("HTF_1H_LIMIT", 60, min_value=EMA_SLOW + 5)
+HTF_4H_LIMIT = env_int("HTF_4H_LIMIT", 60, min_value=EMA_SLOW + 5)
 
 # Asgari kline sayisi: indikator periyodu + return offset + emniyet payi.
-MIN_KLINES_5M = max(EMA_SLOW + 5, RET_1H_OFFSET + 2, ATR_PERIOD + 2, RSI_PERIOD + 2)
-MIN_KLINES_15M = max(EMA_SLOW + 5, RET_4H_OFFSET + 2)
+MIN_KLINES_5M = max(
+    EMA_SLOW + 5, RET_1H_OFFSET + 2, ATR_PERIOD + 2, RSI_PERIOD + 2, BB_PERIOD + 2, ADX_PERIOD + 2
+)
+MIN_KLINES_15M = max(EMA_SLOW + 5, RET_4H_OFFSET + 2, BB_PERIOD + 2)
 
 # Volatilite filtresi: ATR%/spot bu sinirin ustundeyse veto (flash event korumasi).
 ATR_PCT_VETO = env_float("ATR_PCT_VETO", 8.0, min_value=0.5)
@@ -194,6 +205,55 @@ ATR_PCT_LOW = env_float("ATR_PCT_LOW", 0.4, min_value=0.0)
 # Funding rate esikleri (yuzde - 8h periyodu icin tipik range +/- 0.01..0.05)
 FUNDING_EXTREME = env_float("FUNDING_EXTREME", 0.05, min_value=0.0)
 FUNDING_HIGH = env_float("FUNDING_HIGH", 0.02, min_value=0.0)
+
+# ============================================================
+# MARKET REGIME CONFIG
+# ============================================================
+# Profesyonel algoritmik trading'de en kritik karar: hangi rejimde olduğunu bilmek.
+# Aynı sinyal TREND_UP'ta altın değerinde, RANGE'de gürültü olabilir.
+#
+# Rejim siniflandirma kriterleri:
+#   ADX >= ADX_TREND_MIN              -> trend rejimi (yon EMA spread isareti)
+#   BB width <= BB_SQUEEZE_MAX        -> compression / squeeze (breakout adayi)
+#   ATR% >= ATR_PCT_HIGH              -> high volatility regime
+#   yukaridakilerin hicbiri -> RANGE
+ADX_TREND_MIN = env_float("ADX_TREND_MIN", 22.0, min_value=10.0)
+ADX_STRONG_TREND = env_float("ADX_STRONG_TREND", 30.0, min_value=15.0)
+BB_SQUEEZE_MAX = env_float("BB_SQUEEZE_MAX", 2.5, min_value=0.5)   # BB genisligi spot'un %2.5'inden az -> squeeze
+BB_EXPANDED_MIN = env_float("BB_EXPANDED_MIN", 6.0, min_value=2.0)
+
+# Rejim bazli risk carpani (taban risk_pct ile carpilir):
+# Pozisyon sizing = base_risk_pct * regime_size_mult * confidence_mult
+REGIME_PROFILES: dict[str, dict[str, float]] = {
+    # TREND'de winner'lara binmek icin biraz daha cesur; runner kullan.
+    "TREND_UP":   {"size_mult": 1.3, "tp1_r": 1.0, "tp2_r": 2.5, "tp3_r": 5.0, "threshold_long": 0.85, "threshold_short": 1.20},
+    "TREND_DOWN": {"size_mult": 1.3, "tp1_r": 1.0, "tp2_r": 2.5, "tp3_r": 5.0, "threshold_long": 1.20, "threshold_short": 0.85},
+    # RANGE'de aggressive profit taking; runner yok.
+    "RANGE":      {"size_mult": 0.8, "tp1_r": 0.8, "tp2_r": 1.5, "tp3_r": 2.0, "threshold_long": 1.10, "threshold_short": 1.10},
+    # VOLATILE'da position size kucult, stop genis, agresif TP1.
+    "VOLATILE":   {"size_mult": 0.4, "tp1_r": 1.0, "tp2_r": 1.5, "tp3_r": 2.5, "threshold_long": 1.30, "threshold_short": 1.30},
+    # SQUEEZE breakout bekleme rejimi; sadece guclu confluence ile gir, kucuk size.
+    "SQUEEZE":    {"size_mult": 0.6, "tp1_r": 1.2, "tp2_r": 2.5, "tp3_r": 4.0, "threshold_long": 1.15, "threshold_short": 1.15},
+}
+
+# Multi-timeframe gate: HIGH_BETA sinyalleri 4h BTC trendiyle ayni yonde olmali.
+# CORE coin'lerde daha esnek (BTC/ETH zaten kendi).
+HTF_GATE_HIGH_BETA = os.getenv("HTF_GATE_HIGH_BETA", "1") == "1"
+HTF_GATE_CORE = os.getenv("HTF_GATE_CORE", "0") == "1"
+
+# ============================================================
+# RISK / CAPITAL PROTECTION
+# ============================================================
+# Compounding stratejisinin en buyuk dusmani: tek bir kotu gun.
+# Gunluk maximum sinyal sayisi ve consecutive-veto cooldown'u ile koruma.
+MAX_SIGNALS_PER_DAY = env_int("MAX_SIGNALS_PER_DAY", 12, min_value=1)
+MAX_SIGNALS_PER_SYMBOL_PER_DAY = env_int("MAX_SIGNALS_PER_SYMBOL_PER_DAY", 3, min_value=1)
+LOSING_STREAK_COOLDOWN_MIN = env_int("LOSING_STREAK_COOLDOWN_MIN", 120, min_value=10)
+LOSING_STREAK_THRESHOLD = env_int("LOSING_STREAK_THRESHOLD", 3, min_value=2)
+
+# Confidence-based sizing: 50% confidence = 0.7x, 100% confidence = 1.5x
+CONFIDENCE_SIZE_MIN = env_float("CONFIDENCE_SIZE_MIN", 0.5, min_value=0.1)
+CONFIDENCE_SIZE_MAX = env_float("CONFIDENCE_SIZE_MAX", 1.5, min_value=1.0)
 
 # ============================================================
 # MOVEMENT ALERT THRESHOLDS
@@ -903,9 +963,6 @@ def get_futures_funding_rate(symbol: str) -> Optional[float]:
 # ============================================================
 
 
-import math
-
-
 def _is_finite(x: float) -> bool:
     return isinstance(x, (int, float)) and math.isfinite(float(x))
 
@@ -973,6 +1030,104 @@ def atr(highs: list[float], lows: list[float], closes: list[float], period: int 
     for tr in trs[period:]:
         atr_val = (atr_val * (period - 1) + tr) / period
     return atr_val
+
+
+def adx(
+    highs: list[float], lows: list[float], closes: list[float], period: int = ADX_PERIOD
+) -> tuple[float, float, float]:
+    """Wilder ADX (trend gucu) + +DI ve -DI (trend yonu).
+
+    Returns:
+        (adx, plus_di, minus_di). Yetersiz veride (0, 0, 0).
+
+    Yorumlama:
+        ADX < 20: trend yok / zayif
+        ADX 20-25: gelisen trend
+        ADX 25-50: guclu trend
+        ADX > 50: cok guclu trend (genelde donus yakin)
+        +DI > -DI: yukseliste; -DI > +DI: dususte.
+    """
+    n = min(len(highs), len(lows), len(closes))
+    if n < period * 2:
+        return 0.0, 0.0, 0.0
+
+    plus_dm: list[float] = []
+    minus_dm: list[float] = []
+    trs: list[float] = []
+
+    for i in range(1, n):
+        up = highs[i] - highs[i - 1]
+        down = lows[i - 1] - lows[i]
+        plus_dm.append(up if up > down and up > 0 else 0.0)
+        minus_dm.append(down if down > up and down > 0 else 0.0)
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        trs.append(tr)
+
+    if len(trs) < period:
+        return 0.0, 0.0, 0.0
+
+    # Wilder smoothing
+    atr_sm = sum(trs[:period])
+    plus_sm = sum(plus_dm[:period])
+    minus_sm = sum(minus_dm[:period])
+
+    dx_values: list[float] = []
+    for i in range(period, len(trs)):
+        atr_sm = atr_sm - (atr_sm / period) + trs[i]
+        plus_sm = plus_sm - (plus_sm / period) + plus_dm[i]
+        minus_sm = minus_sm - (minus_sm / period) + minus_dm[i]
+        if atr_sm == 0:
+            continue
+        plus_di_i = 100.0 * plus_sm / atr_sm
+        minus_di_i = 100.0 * minus_sm / atr_sm
+        denom = plus_di_i + minus_di_i
+        if denom == 0:
+            continue
+        dx = 100.0 * abs(plus_di_i - minus_di_i) / denom
+        dx_values.append(dx)
+
+    if not dx_values:
+        return 0.0, 0.0, 0.0
+
+    # ADX = dx_values'in Wilder smooth ortalamasi
+    if len(dx_values) < period:
+        adx_val = sum(dx_values) / len(dx_values)
+    else:
+        adx_val = sum(dx_values[:period]) / period
+        for dx in dx_values[period:]:
+            adx_val = (adx_val * (period - 1) + dx) / period
+
+    plus_di_final = 100.0 * plus_sm / atr_sm if atr_sm > 0 else 0.0
+    minus_di_final = 100.0 * minus_sm / atr_sm if atr_sm > 0 else 0.0
+    return adx_val, plus_di_final, minus_di_final
+
+
+def bollinger_bands(
+    closes: list[float], period: int = BB_PERIOD, std_dev: float = BB_STD
+) -> tuple[float, float, float, float]:
+    """Bollinger Bands.
+
+    Returns:
+        (upper, middle, lower, width_pct).
+        width_pct = (upper - lower) / middle * 100 -> spot'a normalize edilmis bant genisligi.
+        Squeeze tespiti icin width_pct historik percentile karsilastirmasi onerilir;
+        sade kullanim icin BB_SQUEEZE_MAX esiginin altinda kalmasi yeterli proxy.
+    """
+    if len(closes) < period:
+        last = closes[-1] if closes else 0.0
+        return last, last, last, 0.0
+    window = closes[-period:]
+    middle = sum(window) / period
+    variance = sum((c - middle) ** 2 for c in window) / period
+    std = math.sqrt(variance)
+    upper = middle + std_dev * std
+    lower = middle - std_dev * std
+    width_pct = ((upper - lower) / middle * 100.0) if middle > 0 else 0.0
+    return upper, middle, lower, width_pct
 
 
 def rsi(closes: list[float], period: int = RSI_PERIOD) -> float:
@@ -1436,11 +1591,32 @@ def _to_float(value: Any, field: str) -> float:
         raise ValueError(f"{field} float'a cevrilemedi: {value!r}") from e
 
 
+def _htf_trend_label(closes: list[float], ema_fast: int = EMA_FAST, ema_slow: int = EMA_SLOW) -> str:
+    """Higher-timeframe trend etiketi: UP / DOWN / FLAT.
+
+    EMA_FAST > EMA_SLOW ve last_close > EMA_SLOW: UP.
+    EMA_FAST < EMA_SLOW ve last_close < EMA_SLOW: DOWN.
+    Diger: FLAT.
+    """
+    if len(closes) < ema_slow + 2:
+        return "FLAT"
+    fast = ema(closes, ema_fast)
+    slow = ema(closes, ema_slow)
+    last = closes[-1]
+    if fast > slow and last > slow:
+        return "UP"
+    if fast < slow and last < slow:
+        return "DOWN"
+    return "FLAT"
+
+
 def get_features(symbol: str) -> dict:
     """Tek coin icin spot endpoint'ler paralel cagrilir; futures non-kritiktir."""
     futures = {
         "k5": _FEATURE_EXECUTOR.submit(get_klines, symbol, "5m", KLINE_LIMIT),
         "k15": _FEATURE_EXECUTOR.submit(get_klines, symbol, "15m", KLINE_LIMIT),
+        "k1h": _FEATURE_EXECUTOR.submit(get_klines, symbol, "1h", HTF_1H_LIMIT),
+        "k4h": _FEATURE_EXECUTOR.submit(get_klines, symbol, "4h", HTF_4H_LIMIT),
         "ticker": _FEATURE_EXECUTOR.submit(get_ticker, symbol),
         "book": _FEATURE_EXECUTOR.submit(get_book, symbol),
         "spot": _FEATURE_EXECUTOR.submit(get_spot_price, symbol),
@@ -1454,7 +1630,9 @@ def get_features(symbol: str) -> dict:
         except Exception as e:
             errors[key] = e
 
-    failed = [key for key in ("k5", "k15", "ticker", "book", "spot") if key in errors]
+    # k1h/k4h non-kritik: HTF context yoksa FLAT olarak isaretlenir, sinyal yine uretilir.
+    critical = ("k5", "k15", "ticker", "book", "spot")
+    failed = [key for key in critical if key in errors]
     if failed:
         raise RuntimeError(f"{symbol}: kritik endpoint hatasi ({', '.join(failed)}): {errors[failed[0]]}")
 
@@ -1470,6 +1648,24 @@ def get_features(symbol: str) -> dict:
     closes_5 = [_to_float(x[4], f"{symbol}.k5.close") for x in k5]
     closes_15 = [_to_float(x[4], f"{symbol}.k15.close") for x in k15]
     volumes_5 = [_to_float(x[5], f"{symbol}.k5.volume") for x in k5]
+
+    # HTF kapali olabilir; gracefully degrade et.
+    closes_1h: list[float] = []
+    closes_4h: list[float] = []
+    htf_1h_trend = "FLAT"
+    htf_4h_trend = "FLAT"
+    if "k1h" in results:
+        try:
+            closes_1h = [_to_float(x[4], f"{symbol}.k1h.close") for x in results["k1h"]]
+            htf_1h_trend = _htf_trend_label(closes_1h)
+        except Exception as e:
+            log.debug("%s 1h HTF islenemedi: %s", symbol, e)
+    if "k4h" in results:
+        try:
+            closes_4h = [_to_float(x[4], f"{symbol}.k4h.close") for x in results["k4h"]]
+            htf_4h_trend = _htf_trend_label(closes_4h)
+        except Exception as e:
+            log.debug("%s 4h HTF islenemedi: %s", symbol, e)
 
     if len(closes_5) < MIN_KLINES_5M or len(closes_15) < MIN_KLINES_15M:
         raise ValueError(
@@ -1495,6 +1691,14 @@ def get_features(symbol: str) -> dict:
     atr_pct = (atr_value / last_close * 100.0) if last_close > 0 else 0.0
     rsi_5m = rsi(closes_5, RSI_PERIOD)
     rsi_15m = rsi(closes_15, RSI_PERIOD)
+
+    # Rejim icin: ADX trend gucu, BB width volatility/squeeze.
+    adx_val, plus_di, minus_di = adx(highs_5, lows_5, closes_5, ADX_PERIOD)
+    bb_upper, bb_middle, bb_lower, bb_width_pct = bollinger_bands(closes_5, BB_PERIOD, BB_STD)
+    # Last close'un BB icindeki pozisyonu (0=lower, 1=upper)
+    bb_position = 0.5
+    if bb_upper > bb_lower:
+        bb_position = clamp((last_close - bb_lower) / (bb_upper - bb_lower), 0.0, 1.0)
 
     recent_vols = volumes_5[-(VOLUME_WINDOW + 1) : -1]
     if recent_vols:
@@ -1546,6 +1750,16 @@ def get_features(symbol: str) -> dict:
         "atr_pct": atr_pct,
         "rsi_5m": rsi_5m,
         "rsi_15m": rsi_15m,
+        "adx": adx_val,
+        "plus_di": plus_di,
+        "minus_di": minus_di,
+        "bb_upper": bb_upper,
+        "bb_middle": bb_middle,
+        "bb_lower": bb_lower,
+        "bb_width_pct": bb_width_pct,
+        "bb_position": bb_position,
+        "htf_1h_trend": htf_1h_trend,
+        "htf_4h_trend": htf_4h_trend,
         "vol_ratio": vol_ratio,
         "spread_bps": spread_bps,
         "change_24h": change_24h,
@@ -1725,11 +1939,98 @@ def score_basis(basis_pct: Optional[float], f: dict) -> float:
 
 
 # ============================================================
+# MARKET REGIME ENGINE
+# ============================================================
+
+
+def classify_regime(btc: dict) -> dict:
+    """BTC verilerine bakarak piyasa rejimini siniflandirir.
+
+    Karar agaci:
+        1) ATR% > ATR_PCT_HIGH -> VOLATILE (oncelikli; volatilite herseyin onunde)
+        2) BB width <= BB_SQUEEZE_MAX -> SQUEEZE (compression, breakout bekleyisi)
+        3) ADX >= ADX_TREND_MIN:
+              +DI > -DI ve 4h_trend UP -> TREND_UP
+              -DI > +DI ve 4h_trend DOWN -> TREND_DOWN
+        4) Aksi: RANGE
+
+    Returns:
+        {
+            "regime": <str>,
+            "regime_strength": 0..1 (rejimin guveni),
+            "adx": float, "plus_di": float, "minus_di": float,
+            "bb_width_pct": float,
+            "htf_1h": str, "htf_4h": str,
+            "profile": REGIME_PROFILES[regime]
+        }
+    """
+    adx_val = safe_float(btc.get("adx"), 0.0)
+    plus_di = safe_float(btc.get("plus_di"), 0.0)
+    minus_di = safe_float(btc.get("minus_di"), 0.0)
+    atr_pct_btc = safe_float(btc.get("atr_pct"), 0.0)
+    bb_w = safe_float(btc.get("bb_width_pct"), 0.0)
+    htf_1h = btc.get("htf_1h_trend", "FLAT")
+    htf_4h = btc.get("htf_4h_trend", "FLAT")
+
+    regime = "RANGE"
+    strength = 0.3
+
+    if atr_pct_btc >= ATR_PCT_HIGH:
+        regime = "VOLATILE"
+        strength = min(1.0, atr_pct_btc / ATR_PCT_VETO)
+    elif bb_w > 0 and bb_w <= BB_SQUEEZE_MAX:
+        regime = "SQUEEZE"
+        strength = clamp(1.0 - (bb_w / BB_SQUEEZE_MAX), 0.3, 1.0)
+    elif adx_val >= ADX_TREND_MIN:
+        # ADX trend gosteriyor; yon icin +DI/-DI ve 4h HTF teyidi gerek.
+        if plus_di > minus_di and htf_4h in ("UP", "FLAT"):
+            regime = "TREND_UP"
+        elif minus_di > plus_di and htf_4h in ("DOWN", "FLAT"):
+            regime = "TREND_DOWN"
+        else:
+            # ADX trend diyor ama HTF teyit etmiyor -> RANGE'e dus
+            regime = "RANGE"
+        # Strength ADX'in [ADX_TREND_MIN, ADX_STRONG_TREND] araliginda normalize edilir.
+        strength = clamp(
+            (adx_val - ADX_TREND_MIN) / max(1.0, ADX_STRONG_TREND - ADX_TREND_MIN),
+            0.3, 1.0,
+        )
+
+    profile = REGIME_PROFILES.get(regime, REGIME_PROFILES["RANGE"])
+
+    return {
+        "regime": regime,
+        "regime_strength": round(strength, 3),
+        "adx": round(adx_val, 1),
+        "plus_di": round(plus_di, 1),
+        "minus_di": round(minus_di, 1),
+        "bb_width_pct": round(bb_w, 2),
+        "atr_pct": round(atr_pct_btc, 2),
+        "htf_1h": htf_1h,
+        "htf_4h": htf_4h,
+        "profile": profile,
+    }
+
+
+def regime_note(regime_ctx: dict) -> str:
+    """Insan-okur rejim aciklamasi."""
+    r = regime_ctx["regime"]
+    notes = {
+        "TREND_UP": f"Trend UP (ADX={regime_ctx['adx']}). Trendde kal, runner'a izin ver.",
+        "TREND_DOWN": f"Trend DOWN (ADX={regime_ctx['adx']}). Pullback short'lari oncelikli.",
+        "RANGE": f"Range (ADX={regime_ctx['adx']}). Aggressive profit-taking; TP1'de bagla.",
+        "VOLATILE": f"Yuksek volatilite (ATR%={regime_ctx['atr_pct']}). Pozisyon kucult; gec gir.",
+        "SQUEEZE": f"BB squeeze (width={regime_ctx['bb_width_pct']}%). Breakout bekle, kucuk size.",
+    }
+    return notes.get(r, "Rejim bilinmiyor.")
+
+
+# ============================================================
 # SIGNAL ENGINE
 # ============================================================
 
 
-def veto_signal(symbol: str, f: dict, btc: dict, eth: dict) -> Optional[str]:
+def veto_signal(symbol: str, f: dict, btc: dict, eth: dict, regime_ctx: Optional[dict] = None) -> Optional[str]:
     del eth
     group = COINS[symbol]
     p = SCORE_PARAMS["veto"]
@@ -1751,6 +2052,36 @@ def veto_signal(symbol: str, f: dict, btc: dict, eth: dict) -> Optional[str]:
         btc_unclear = abs(btc["ret_1h"]) < p["btc_unclear_1h"] and abs(btc["ret_4h"]) < p["btc_unclear_4h"]
         if btc_unclear:
             return "BTC yonu belirsiz"
+    return None
+
+
+def htf_alignment_veto(symbol: str, intended_direction: str, f: dict, btc: dict) -> Optional[str]:
+    """Multi-timeframe gate: kucuk TF sinyalinin HTF trendine UYUMLU olmasini sart kos.
+
+    HIGH_BETA: HER ZAMAN 4h BTC trendiyle ayni yonde olmali (alts BTC'ye bagimli).
+    CORE (HTF_GATE_CORE acikken): kendi 4h trendiyle uyumlu olmali.
+
+    HTF FLAT ise gate gevser (FLAT, "karsi" sayilmaz).
+    """
+    group = COINS[symbol]
+    use_gate = (group == "HIGH_BETA" and HTF_GATE_HIGH_BETA) or (group == "CORE" and HTF_GATE_CORE)
+    if not use_gate or intended_direction not in ("LONG", "SHORT"):
+        return None
+
+    # HIGH_BETA -> BTC 4h trend dominant
+    if group == "HIGH_BETA":
+        btc_4h = btc.get("htf_4h_trend", "FLAT")
+        if intended_direction == "LONG" and btc_4h == "DOWN":
+            return "BTC 4h DOWN, LONG riskli"
+        if intended_direction == "SHORT" and btc_4h == "UP":
+            return "BTC 4h UP, SHORT riskli"
+
+    # Kendi 4h'i de teyit etsin (CORE icin)
+    own_4h = f.get("htf_4h_trend", "FLAT")
+    if intended_direction == "LONG" and own_4h == "DOWN":
+        return f"{symbol} 4h DOWN, LONG karsi-trend"
+    if intended_direction == "SHORT" and own_4h == "UP":
+        return f"{symbol} 4h UP, SHORT karsi-trend"
     return None
 
 
@@ -1801,10 +2132,11 @@ def weighted_signal(
     eth: dict,
     session_context: SessionContext,
     news_context: dict,
+    regime_ctx: Optional[dict] = None,
 ) -> dict:
     group = COINS[symbol]
     weights = normalize_weights_if_basis_missing(WEIGHTS[group], features)
-    veto = veto_signal(symbol, features, btc, eth)
+    veto = veto_signal(symbol, features, btc, eth, regime_ctx)
 
     macro_mult = session_context.macro_multiplier
     micro_mult = session_context.micro_multiplier
@@ -1834,8 +2166,19 @@ def weighted_signal(
         "basis": 2 * abs(micro_mult),
     }
     base_max_total = sum(weights[k] * max_components[k] for k in raw)
-    # News boost (1.1x) max_total'a yansitilmali ki confidence dogru bound'lansin.
     max_total = base_max_total * NEWS_BOOST_FACTOR
+
+    # Rejim bazli dinamik threshold: TREND'de yon-uyumlu sinyallere kapi alcalir,
+    # karsi-yon sinyallerine yukselir. RANGE'de simetrik daha yuksek esik.
+    base_long = THRESHOLDS[group]["long"]
+    base_short = THRESHOLDS[group]["short"]
+    if regime_ctx:
+        prof = regime_ctx["profile"]
+        long_threshold = base_long * prof["threshold_long"]
+        short_threshold = base_short * prof["threshold_short"]
+    else:
+        long_threshold = base_long
+        short_threshold = base_short
 
     if modulated_total is None:
         signal = "NO_TRADE"
@@ -1844,13 +2187,24 @@ def weighted_signal(
         veto = veto or f"Haber riski ({news_context['category']})"
     else:
         total = modulated_total
+        intended = (
+            "LONG" if total >= long_threshold
+            else "SHORT" if total <= short_threshold
+            else None
+        )
+
+        # Multi-timeframe gate: HIGH_BETA + CORE (gate aciksa) icin
+        htf_veto = htf_alignment_veto(symbol, intended, features, btc) if intended else None
+        if htf_veto:
+            veto = veto or htf_veto
+
         if veto:
             signal = "NO_TRADE"
             level = "WEAK"
-        elif total >= THRESHOLDS[group]["long"]:
+        elif intended == "LONG":
             signal = "LONG"
             level = classify_level(abs(total), group)
-        elif total <= THRESHOLDS[group]["short"]:
+        elif intended == "SHORT":
             signal = "SHORT"
             level = classify_level(abs(total), group)
         else:
@@ -1862,7 +2216,7 @@ def weighted_signal(
     else:
         confidence = 0.0
 
-    return {
+    result = {
         "symbol": symbol,
         "group": group,
         "signal": signal,
@@ -1870,6 +2224,8 @@ def weighted_signal(
         "score": round(total, 3),
         "pre_news_score": round(pre_news_total, 3),
         "max_score": round(max_total, 3),
+        "long_threshold": round(long_threshold, 3),
+        "short_threshold": round(short_threshold, 3),
         "confidence": confidence,
         "raw": raw,
         "features": features,
@@ -1879,6 +2235,9 @@ def weighted_signal(
         "news_context": news_context,
         "basis_missing": features["basis_pct"] is None,
     }
+    if regime_ctx:
+        result["regime_context"] = regime_ctx
+    return result
 
 
 # ============================================================
@@ -1905,6 +2264,43 @@ def _resolve_stop_pct(cfg: dict, features: dict) -> tuple[float, str]:
     return clamp(raw, pct_min, pct_max), "atr"
 
 
+def _compute_size_multiplier(result: dict) -> tuple[float, dict]:
+    """Adaptif pozisyon sizing carpani.
+
+    final_multiplier = regime_size_mult * confidence_size_mult
+        regime_size_mult: REGIME_PROFILES[regime]["size_mult"]
+        confidence_size_mult: confidence [0..100] -> [CONFIDENCE_SIZE_MIN..CONFIDENCE_SIZE_MAX]
+
+    Bu, compounding stratejisinin omurgasi:
+      - High-conviction setup (high conf + favorable regime) -> 2x'e kadar boost
+      - Low-conviction setup (low conf + volatile regime) -> 0.3x'e kadar kucult
+      - Kelly-inspired bet sizing (asagi yonlu agirlikli, partial Kelly).
+    """
+    regime_ctx = result.get("regime_context")
+    if regime_ctx:
+        regime_mult = float(regime_ctx["profile"].get("size_mult", 1.0))
+    else:
+        regime_mult = 1.0
+
+    conf = safe_float(result.get("confidence"), 0.0)
+    # 50% conf -> CONFIDENCE_SIZE_MIN, 100% conf -> CONFIDENCE_SIZE_MAX, lineer
+    conf_mult = CONFIDENCE_SIZE_MIN + (CONFIDENCE_SIZE_MAX - CONFIDENCE_SIZE_MIN) * clamp(
+        (conf - 50.0) / 50.0, 0.0, 1.0
+    )
+
+    final = clamp(regime_mult * conf_mult, 0.2, 2.0)
+    return final, {"regime_mult": round(regime_mult, 3), "confidence_mult": round(conf_mult, 3)}
+
+
+def _resolve_tp_multipliers(result: dict, cfg: dict) -> tuple[float, float, float]:
+    """Rejim varsa REGIME_PROFILES'den tp_r degerlerini, yoksa cfg'den al."""
+    regime_ctx = result.get("regime_context")
+    if regime_ctx:
+        prof = regime_ctx["profile"]
+        return float(prof["tp1_r"]), float(prof["tp2_r"]), float(prof["tp3_r"])
+    return float(cfg["tp1_r"]), float(cfg["tp2_r"]), float(cfg["tp3_r"])
+
+
 def build_trade_plan(result: dict) -> Optional[dict]:
     signal = result.get("signal")
     if signal not in ("LONG", "SHORT"):
@@ -1923,6 +2319,7 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         return None
 
     stop_pct, stop_source = _resolve_stop_pct(cfg, f)
+    tp1_r, tp2_r, tp3_r = _resolve_tp_multipliers(result, cfg)
     reference_entry = spot
     ema_low = min(ema9, ema21)
     ema_high = max(ema9, ema21)
@@ -1937,9 +2334,9 @@ def build_trade_plan(result: dict) -> Optional[dict]:
 
         stop_price = reference_entry * (1 - stop_pct)
         risk_per_unit = reference_entry - stop_price
-        tp1 = reference_entry + risk_per_unit * cfg["tp1_r"]
-        tp2 = reference_entry + risk_per_unit * cfg["tp2_r"]
-        tp3 = reference_entry + risk_per_unit * cfg["tp3_r"]
+        tp1 = reference_entry + risk_per_unit * tp1_r
+        tp2 = reference_entry + risk_per_unit * tp2_r
+        tp3 = reference_entry + risk_per_unit * tp3_r
     else:
         if ema_low > spot:
             zone_low = ema_low
@@ -1950,13 +2347,15 @@ def build_trade_plan(result: dict) -> Optional[dict]:
 
         stop_price = reference_entry * (1 + stop_pct)
         risk_per_unit = stop_price - reference_entry
-        tp1 = reference_entry - risk_per_unit * cfg["tp1_r"]
-        tp2 = reference_entry - risk_per_unit * cfg["tp2_r"]
-        tp3 = reference_entry - risk_per_unit * cfg["tp3_r"]
+        tp1 = reference_entry - risk_per_unit * tp1_r
+        tp2 = reference_entry - risk_per_unit * tp2_r
+        tp3 = reference_entry - risk_per_unit * tp3_r
 
-    risk_amount = ACCOUNT_SIZE_USD * RISK_PCT_PER_TRADE
-    # Pozisyon buyuklugu: risk_amount risk_per_unit'a bolunur (klasik formul).
-    # Boylece stop_pct degisirse notional otomatik adapte olur.
+    # Adaptif risk sizing: rejim x confidence carpanlari
+    size_mult, size_breakdown = _compute_size_multiplier(result)
+    effective_risk_pct = RISK_PCT_PER_TRADE * size_mult
+    risk_amount = ACCOUNT_SIZE_USD * effective_risk_pct
+
     if risk_per_unit > 0 and reference_entry > 0:
         quantity = risk_amount / risk_per_unit
         position_notional = quantity * reference_entry
@@ -1964,10 +2363,29 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         quantity = 0.0
         position_notional = 0.0
 
+    # Rejim-aware execution onerisi
+    regime = result.get("regime_context", {}).get("regime", "RANGE")
+    if regime in ("TREND_UP", "TREND_DOWN"):
+        execution_note = (
+            "TREND rejimi: TP1'de %30, TP2'de %30 al, kalan %40'i TP3 runner olarak "
+            "stop'u breakeven'a cek. Trendde kalmak en buyuk yatirim getirisini saglar."
+        )
+    elif regime == "RANGE":
+        execution_note = "RANGE rejimi: TP1'de %60, TP2'de %40 al. Runner kullanma; range'de mean reversion hizli."
+    elif regime == "VOLATILE":
+        execution_note = "VOLATILE rejimi: Pozisyon yariya kucultuldu. TP1'de %70 al, kalan %30 TP2."
+    elif regime == "SQUEEZE":
+        execution_note = "SQUEEZE rejimi: Breakout sonrasi onaylanmis hacim varsa girilir; aksi takdirde bekle."
+    else:
+        execution_note = "Default: TP1'de %50, TP2'de %30, TP3 runner %20."
+
     return {
         "direction": signal,
         "account_size": ACCOUNT_SIZE_USD,
-        "risk_pct": RISK_PCT_PER_TRADE,
+        "base_risk_pct": RISK_PCT_PER_TRADE,
+        "effective_risk_pct": round(effective_risk_pct, 5),
+        "size_multiplier": round(size_mult, 3),
+        "size_breakdown": size_breakdown,
         "risk_amount": risk_amount,
         "reference_entry": reference_entry,
         "entry_zone_low": zone_low,
@@ -1975,13 +2393,15 @@ def build_trade_plan(result: dict) -> Optional[dict]:
         "stop_price": stop_price,
         "stop_pct": stop_pct,
         "stop_source": stop_source,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "rr_ratio": cfg["tp2_r"],
+        "tp1": tp1, "tp1_r": tp1_r,
+        "tp2": tp2, "tp2_r": tp2_r,
+        "tp3": tp3, "tp3_r": tp3_r,
+        "rr_ratio": tp2_r,
         "position_notional": position_notional,
         "quantity": quantity,
         "atr_pct": safe_float(f.get("atr_pct")),
+        "regime": regime,
+        "execution_note": execution_note,
     }
 
 
@@ -1995,22 +2415,26 @@ def format_trade_plan_block(plan: Optional[dict]) -> list[str]:
         "fixed_fallback": "sabit (ATR yok)",
     }.get(plan.get("stop_source", "fixed"), "sabit")
 
+    size_b = plan.get("size_breakdown", {})
     return [
         "",
-        "📌 Trade Plan (emir gondermez)",
+        f"📌 Trade Plan ({plan.get('regime', 'N/A')} rejimi)",
         f"Yon: {plan['direction']}",
         f"Referans Entry: {format_price(plan['reference_entry'])}",
         f"Tercihli Entry Bolgesi: {format_price(plan['entry_zone_low'])} - {format_price(plan['entry_zone_high'])}",
         f"Stop: {format_price(plan['stop_price'])} (%{plan['stop_pct'] * 100:.2f}, {stop_label})",
         f"ATR%: {plan.get('atr_pct', 0):.2f}",
-        f"TP1 (1R): {format_price(plan['tp1'])}",
-        f"TP2 (2R): {format_price(plan['tp2'])}",
-        f"TP3 / Runner (3R): {format_price(plan['tp3'])}",
+        f"TP1 ({plan.get('tp1_r', 1):.1f}R): {format_price(plan['tp1'])}",
+        f"TP2 ({plan.get('tp2_r', 2):.1f}R): {format_price(plan['tp2'])}",
+        f"TP3 ({plan.get('tp3_r', 3):.1f}R): {format_price(plan['tp3'])}",
         f"Hesap: {format_money(plan['account_size'])}",
-        f"Islem Riski: %{plan['risk_pct'] * 100:.2f} = {format_money(plan['risk_amount'])}",
+        f"Base Risk: %{plan.get('base_risk_pct', 0.01) * 100:.2f}",
+        f"Efektif Risk: %{plan.get('effective_risk_pct', 0.01) * 100:.2f} = {format_money(plan['risk_amount'])}",
+        f"Size Carpani: x{plan.get('size_multiplier', 1):.2f} "
+        f"(regime x{size_b.get('regime_mult', 1):.2f} * conf x{size_b.get('confidence_mult', 1):.2f})",
         f"Onerilen Notional: {format_money(plan['position_notional'])}",
         f"Yaklasik Miktar: {plan['quantity']:.6f}",
-        "Not: Sinyal geldi diye anlik piyasa emri sart degildir; entry bolgesine pullback beklemek daha sagliklidir.",
+        f"Execution: {plan.get('execution_note', '-')}",
     ]
 
 
@@ -2034,21 +2458,31 @@ def format_signal(result: dict, title: str) -> str:
     rsi_15m = safe_float(f.get("rsi_15m"), 50.0)
     atr_pct = safe_float(f.get("atr_pct"), 0.0)
 
+    regime = result.get("regime_context") or {}
+    regime_line = (
+        f"Rejim: {regime.get('regime', 'N/A')} (guc {regime.get('regime_strength', 0):.2f}) | "
+        f"ADX {regime.get('adx', 0):.1f} | BB-w %{regime.get('bb_width_pct', 0):.2f} | "
+        f"BTC 1h:{regime.get('htf_1h', '-')} 4h:{regime.get('htf_4h', '-')}"
+    ) if regime else "Rejim: -"
+
+    own_1h = f.get("htf_1h_trend", "-")
+    own_4h = f.get("htf_4h_trend", "-")
+    adx_own = safe_float(f.get("adx"), 0.0)
+
     lines = [
         title,
         f"{result['symbol']} -> {result['signal']} / {result['level']}",
         f"Skor: {result['score']} / {result['max_score']} {bar(result['score'], result['max_score'])}",
+        f"Threshold: long={result.get('long_threshold')} / short={result.get('short_threshold')}",
         f"News-oncesi Skor: {result['pre_news_score']}",
         f"News Aksiyonu: {result['news_action']}",
         f"Guven: %{result['confidence']}",
+        regime_line,
+        f"Symbol HTF: 1h={own_1h} 4h={own_4h} | ADX(own)={adx_own:.1f}",
         f"Seans: {session['session']}",
-        f"Makro Carpan: x{session['macro_multiplier']}",
-        f"Mikro Carpan: x{session['micro_multiplier']}",
-        f"News Carpani: x{session['news_multiplier']}",
+        f"Makro x{session['macro_multiplier']} | Mikro x{session['micro_multiplier']} | News x{session['news_multiplier']}",
         f"Not: {session['note']}",
-        f"Haber Kategorisi: {news['category']}",
-        f"Haber Risk Skoru: {news['news_risk_score']} / 3",
-        f"Haber Notu: {news['note']}",
+        f"Haber: {news['category']} (risk {news['news_risk_score']}/3) - {news['note']}",
         "",
         "Alt Skorlar:",
         f"Macro: {raw['macro']:+.2f} / 3 {bar(raw['macro'], 3)}",
@@ -2156,6 +2590,84 @@ def should_cooldown(old: Optional[dict], alert_type: str) -> bool:
     return now_ts() - old.get("last_alert_ts", 0) < COOLDOWN_SECONDS
 
 
+def _today_key() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def daily_signal_caps(state_mgr: "StateManager", symbol: str) -> tuple[bool, str]:
+    """Gunluk sinyal cap'i.
+
+    Compounding stratejisinin en buyuk dusmani over-trading. Cap:
+      - Tum portfolyo: MAX_SIGNALS_PER_DAY
+      - Tek symbol: MAX_SIGNALS_PER_SYMBOL_PER_DAY
+
+    Returns:
+        (capped, reason). True donerse sinyal bastirilir.
+    """
+    today = _today_key()
+    counters = state_mgr.get_meta("daily_signal_counts", {})
+    if not isinstance(counters, dict) or counters.get("date") != today:
+        return False, ""
+
+    total = int(counters.get("total", 0))
+    per_symbol = counters.get("per_symbol", {})
+    symbol_count = int(per_symbol.get(symbol, 0))
+
+    if total >= MAX_SIGNALS_PER_DAY:
+        return True, f"Gunluk sinyal limiti ({MAX_SIGNALS_PER_DAY})"
+    if symbol_count >= MAX_SIGNALS_PER_SYMBOL_PER_DAY:
+        return True, f"{symbol} icin gunluk limit ({MAX_SIGNALS_PER_SYMBOL_PER_DAY})"
+    return False, ""
+
+
+def increment_daily_signal(state_mgr: "StateManager", symbol: str) -> None:
+    today = _today_key()
+    counters = state_mgr.get_meta("daily_signal_counts", {})
+    if not isinstance(counters, dict) or counters.get("date") != today:
+        counters = {"date": today, "total": 0, "per_symbol": {}}
+    counters["total"] = int(counters.get("total", 0)) + 1
+    per_symbol = counters.setdefault("per_symbol", {})
+    per_symbol[symbol] = int(per_symbol.get(symbol, 0)) + 1
+    state_mgr.set_meta("daily_signal_counts", counters)
+
+
+def in_losing_streak_cooldown(state_mgr: "StateManager") -> tuple[bool, str]:
+    """Veto streak'i sirasinda cooldown.
+
+    Bot LONG/SHORT urettikten kisa sure sonra ayni coin'de SINYAL IPTAL gelirse
+    bu "muhtemel zarar" sayilir. LOSING_STREAK_THRESHOLD ardarda iptal sonrasi
+    LOSING_STREAK_COOLDOWN_MIN dakika kapan tum yeni sinyalleri bekletir.
+    """
+    streak = state_mgr.get_meta("losing_streak", {})
+    if not isinstance(streak, dict):
+        return False, ""
+    count = int(streak.get("count", 0))
+    last_ts = int(streak.get("last_ts", 0))
+    if count < LOSING_STREAK_THRESHOLD:
+        return False, ""
+    cooldown_until = last_ts + LOSING_STREAK_COOLDOWN_MIN * 60
+    if now_ts() < cooldown_until:
+        remaining = (cooldown_until - now_ts()) // 60
+        return True, f"Losing streak cooldown ({count} iptal, {remaining}dk kaldi)"
+    return False, ""
+
+
+def record_signal_outcome(state_mgr: "StateManager", alert_type: str) -> None:
+    """Sinyal iptal/yon-degisti -> losing streak'i artir. Yeni temiz sinyal -> sifirla."""
+    streak = state_mgr.get_meta("losing_streak", {}) or {}
+    if not isinstance(streak, dict):
+        streak = {}
+
+    if alert_type in ("❌ SİNYAL İPTAL", "🔄 YÖN DEĞİŞTİ", "🛑 NEWS VETO"):
+        streak["count"] = int(streak.get("count", 0)) + 1
+        streak["last_ts"] = now_ts()
+    elif alert_type == "🚀 YENİ SİNYAL":
+        # Yeni temiz sinyal: streak'i sifirla
+        streak = {"count": 0, "last_ts": now_ts()}
+
+    state_mgr.set_meta("losing_streak", streak)
+
+
 def pending_alert_still_relevant(alert_type: Optional[str], new: dict) -> bool:
     if not alert_type:
         return False
@@ -2255,9 +2767,10 @@ def _process_symbol(
     session_ctx: SessionContext,
     news_ctx: dict,
     state_mgr: StateManager,
+    regime_ctx: Optional[dict] = None,
 ) -> Optional[dict]:
     try:
-        result = weighted_signal(symbol, features, btc, eth, session_ctx, news_ctx)
+        result = weighted_signal(symbol, features, btc, eth, session_ctx, news_ctx, regime_ctx)
 
         if SEND_MOVEMENT_ALERTS:
             movement_reasons = detect_movement_alert(symbol, result)
@@ -2275,11 +2788,30 @@ def _process_symbol(
 
         last_alert_ts = old.get("last_alert_ts", 0) if old else 0
         if alert_type and not should_cooldown(old, alert_type):
-            if send_message(format_signal(result, alert_type)):
-                last_alert_ts = now_ts()
-                pending = None
+            # YENI SINYAL icin capital-protection gate'leri
+            is_new_entry = alert_type in ("🚀 YENİ SİNYAL", "🔄 YÖN DEĞİŞTİ")
+            blocked_reason: Optional[str] = None
+            if is_new_entry:
+                capped, cap_reason = daily_signal_caps(state_mgr, symbol)
+                if capped:
+                    blocked_reason = cap_reason
+                else:
+                    in_cd, cd_reason = in_losing_streak_cooldown(state_mgr)
+                    if in_cd:
+                        blocked_reason = cd_reason
+
+            if blocked_reason:
+                log.info("%s %s suppress edildi: %s", symbol, alert_type, blocked_reason)
+                pending = alert_type  # Cooldown bitince tekrar denenir
             else:
-                pending = alert_type
+                if send_message(format_signal(result, alert_type)):
+                    last_alert_ts = now_ts()
+                    pending = None
+                    record_signal_outcome(state_mgr, alert_type)
+                    if is_new_entry:
+                        increment_daily_signal(state_mgr, symbol)
+                else:
+                    pending = alert_type
 
         state_mgr.update_symbol(
             symbol,
@@ -2290,6 +2822,7 @@ def _process_symbol(
                 "confidence": result["confidence"],
                 "last_alert_ts": last_alert_ts,
                 "pending_alert_type": pending,
+                "regime": result.get("regime_context", {}).get("regime") if regime_ctx else None,
                 "updated_at": now_ts(),
             },
         )
@@ -2314,14 +2847,19 @@ def _send_periodic_messages(
 
     last_heartbeat = state_mgr.get_meta("last_heartbeat_ts", 0)
     if now_ts() - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
+        current_regime = state_mgr.get_meta("last_regime", "N/A")
+        daily_counts = state_mgr.get_meta("daily_signal_counts", {})
+        signal_total = daily_counts.get("total", 0) if isinstance(daily_counts, dict) and daily_counts.get("date") == _today_key() else 0
         send_message(
             f"✅ Bot aktif (v{__version__})\n"
             f"Son kontrol: {tr_now_text()}\n"
+            f"Rejim: {current_regime}\n"
             f"Seans: {session_ctx.session}\n"
             f"Makro: x{session_ctx.macro_multiplier} | "
             f"Mikro: x{session_ctx.micro_multiplier} | "
             f"News: x{session_ctx.news_multiplier}\n"
-            f"Haber: {news_ctx['category']} (risk {news_ctx['news_risk_score']})"
+            f"Haber: {news_ctx['category']} (risk {news_ctx['news_risk_score']})\n"
+            f"Bugun sinyal: {signal_total}/{MAX_SIGNALS_PER_DAY}"
         )
         state_mgr.set_meta("last_heartbeat_ts", now_ts())
 
@@ -2363,6 +2901,18 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
             consecutive_failures = 0
             state_mgr.set_meta("consecutive_failures", 0)
 
+            # BTC verisi geldikten sonra piyasa rejimini siniflandir.
+            # Tum coin sinyalleri ayni rejim altinda degerlendirilir; rejim
+            # threshold/TP/sizing'i modulate eder.
+            regime_ctx = classify_regime(btc)
+            state_mgr.set_meta("last_regime", regime_ctx["regime"])
+            state_mgr.set_meta("last_regime_ts", now_ts())
+            log.info(
+                "Rejim: %s (ADX=%.1f, BB-w=%.2f%%, BTC HTF 1h/4h=%s/%s)",
+                regime_ctx["regime"], regime_ctx["adx"], regime_ctx["bb_width_pct"],
+                regime_ctx["htf_1h"], regime_ctx["htf_4h"],
+            )
+
             features_cache: dict[str, dict] = {"BTCUSDT": btc, "ETHUSDT": eth}
             other_symbols = [s for s in COINS if s not in features_cache]
             if other_symbols:
@@ -2379,7 +2929,9 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
                 features = features_cache.get(symbol)
                 if features is None:
                     continue
-                result = _process_symbol(symbol, features, btc, eth, session_ctx, news_context, state_mgr)
+                result = _process_symbol(
+                    symbol, features, btc, eth, session_ctx, news_context, state_mgr, regime_ctx
+                )
                 if result:
                     results.append(result)
 
