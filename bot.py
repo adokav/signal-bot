@@ -121,8 +121,7 @@ def env_str_list(name: str, default: list[str]) -> list[str]:
     return values or list(default)
 
 
-# Early helper: some configuration blocks use clamp before the Math Helpers
-# section is reached. The same implementation is repeated later intentionally.
+# Early helper: config and startup guards use clamp before Math Helpers.
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
@@ -999,6 +998,17 @@ if POSITION_SIZING_MIN_RISK_PCT > POSITION_SIZING_MAX_RISK_PCT:
         POSITION_SIZING_MIN_RISK_PCT,
     )
 
+if WEIGHT_LEARNING_MIN_WEIGHT > WEIGHT_LEARNING_MAX_WEIGHT:
+    log.warning(
+        "WEIGHT_LEARNING_MIN_WEIGHT (%s) > WEIGHT_LEARNING_MAX_WEIGHT (%s), degerler swap edildi.",
+        WEIGHT_LEARNING_MIN_WEIGHT,
+        WEIGHT_LEARNING_MAX_WEIGHT,
+    )
+    WEIGHT_LEARNING_MIN_WEIGHT, WEIGHT_LEARNING_MAX_WEIGHT = (
+        WEIGHT_LEARNING_MAX_WEIGHT,
+        WEIGHT_LEARNING_MIN_WEIGHT,
+    )
+
 
 # ============================================================
 # SIGNAL CONFIG
@@ -1839,10 +1849,6 @@ def closed_bar_return(closes: list[float], bars: int, *, series_name: str) -> fl
     latest_closed = closes[-2]
     reference = closes[-(bars + 2)]
     return pct(latest_closed, reference)
-
-
-def clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
 
 
 def ema(values: list[float], period: int) -> float:
