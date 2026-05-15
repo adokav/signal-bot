@@ -1186,6 +1186,55 @@ REGIME_STRATEGY_MATRIX: dict[str, dict[str, Any]] = {
     },
 }
 
+_REGIME_STRATEGY_REQUIRED_KEYS = {
+    "direction_bias",
+    "allow_long",
+    "allow_short",
+    "high_beta_allowed",
+    "risk_multiplier",
+    "min_quality",
+    "quality_bonus",
+    "tp_style",
+    "note",
+}
+
+def _sanitize_regime_strategy_matrix() -> None:
+    """Harden strategy matrix against env/file tampering.
+
+    Trading safety relies on this matrix. If a regime profile is malformed,
+    we fail closed by replacing it with NEUTRAL instead of raising risk.
+    """
+    neutral = REGIME_STRATEGY_MATRIX.get("NEUTRAL", {})
+    for regime_name, profile in list(REGIME_STRATEGY_MATRIX.items()):
+        if not isinstance(profile, dict):
+            log.error("Regime profile dict değil (%s); NEUTRAL ile değiştirildi.", regime_name)
+            REGIME_STRATEGY_MATRIX[regime_name] = copy.deepcopy(neutral)
+            continue
+
+        missing = _REGIME_STRATEGY_REQUIRED_KEYS.difference(profile.keys())
+        if missing:
+            log.error("Regime profile eksik anahtarlar içeriyor (%s): %s", regime_name, sorted(missing))
+            patched = copy.deepcopy(neutral)
+            patched.update(profile)
+            REGIME_STRATEGY_MATRIX[regime_name] = patched
+            profile = REGIME_STRATEGY_MATRIX[regime_name]
+
+        profile["allow_long"] = bool(profile.get("allow_long"))
+        profile["allow_short"] = bool(profile.get("allow_short"))
+        profile["high_beta_allowed"] = bool(profile.get("high_beta_allowed"))
+        profile["risk_multiplier"] = clamp(float(profile.get("risk_multiplier", 1.0) or 1.0), 0.0, 1.75)
+
+        min_q = str(profile.get("min_quality", "A+") or "A+").upper()
+        if min_q not in TRADE_QUALITY_ORDER:
+            log.warning("Regime %s min_quality=%r geçersiz; A+ kullanılıyor.", regime_name, min_q)
+            min_q = "A+"
+        profile["min_quality"] = min_q
+
+        profile["quality_bonus"] = int(clamp(float(profile.get("quality_bonus", 0) or 0), -50, 25))
+        profile["direction_bias"] = str(profile.get("direction_bias", "BALANCED"))
+        profile["tp_style"] = str(profile.get("tp_style", "standard"))
+        profile["note"] = str(profile.get("note", ""))
+
 TRADE_QUALITY_MIN_GRADE = os.getenv("TRADE_QUALITY_MIN_GRADE", "A")
 TRADE_QUALITY_ORDER = {"D": 0, "C": 1, "B": 2, "A": 3, "A+": 4}
 if TRADE_QUALITY_MIN_GRADE not in TRADE_QUALITY_ORDER:
@@ -1194,6 +1243,7 @@ if TRADE_QUALITY_MIN_GRADE not in TRADE_QUALITY_ORDER:
         TRADE_QUALITY_MIN_GRADE,
     )
     TRADE_QUALITY_MIN_GRADE = "A"
+_sanitize_regime_strategy_matrix()
 
 PORTFOLIO_LIMITS = {
     "max_active_signals": env_int("MAX_ACTIVE_SIGNALS", 2, min_value=1),
