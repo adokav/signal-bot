@@ -136,3 +136,169 @@ FOMO_CHASE_RISK_SCORE=85
 ```
 
 Bu modül trade açmaz. Trade için retest/trigger ve ACCE Trade Brain onayı gerekir.
+
+
+## Sprint 13 — HTF EMA21 Trend Quality Filter
+
+Weekly EMA21 tek başına sinyal üretmez. Long sinyal kalitesini ve risk çarpanını ayarlar.
+
+Yeni env:
+```text
+HTF_EMA21_FILTER_ENABLED=1
+HTF_EMA21_PERIOD=21
+HTF_EMA21_KLINE_LIMIT=80
+HTF_EMA21_CACHE_TTL_SECONDS=21600
+HTF_EMA21_NEAR_PCT=2.0
+HTF_EMA21_OVEREXTENDED_PCT=18.0
+```
+
+Etkileri:
+- Long Confluence puanına +/− katkı verir.
+- Trade eşiğini dinamik sıkılaştırır/gevşetir.
+- Risk multiplier üretir.
+- Telegram raporuna Haftalık Trend Filtresi bölümü ekler.
+
+
+## Sprint 14 — Liquidation Hunt Defense Engine
+
+Bu sürüm kaldıraç temizliği / stop avı riskine karşı savunma katmanı ekler.
+
+Yeni env:
+```text
+LIQ_HUNT_DEFENSE_ENABLED=1
+LIQ_HUNT_WARN_SCORE=55
+LIQ_HUNT_BLOCK_SCORE=70
+LIQ_HUNT_MIN_LIQ_TO_STOP=3.0
+```
+
+Modül şunları yapar:
+- FOMO_CHASE + funding/basis/spread risklerini tespit eder.
+- Long confluence puanını cezalandırır.
+- Yüksek riskte ACCE Trade Gate içinde trade'i bloklar.
+- Sweep-reclaim olasılığını radar olarak işaretler.
+- Telegram raporuna `Liquidation Hunt Defense` bölümü ekler.
+
+Prensip:
+```text
+Onların temizlediği yerde durma.
+Temizlik bittikten sonra, fiyat reclaim ederse değerlendir.
+```
+
+
+## Sprint 15 — Account-Aware Position Sizing
+
+Bu sürüm botun hesaptaki USDT/USDC bakiyeyi read-only okuyarak trade planı üretmesini sağlar.
+
+Yeni env:
+```text
+MEXC_ACCOUNT_SYNC_ENABLED=1
+ACCE_ACCOUNT_EQUITY_SOURCE=AUTO
+ACCE_RISK_BUDGET_SOURCE=PLAN
+ACCE_FIXED_RISK_PCT=0.01
+ACCE_INITIAL_NOTIONAL_MAX_COLLATERAL_PCT=1.0
+ACCE_DEFAULT_EXCHANGE_LEVERAGE_CORE=10
+ACCE_DEFAULT_EXCHANGE_LEVERAGE_MAJOR_ALT=8
+ACCE_DEFAULT_EXCHANGE_LEVERAGE_HIGH_BETA=5
+ACCE_DEFAULT_EXCHANGE_LEVERAGE_MEME=3
+ACCE_MIN_LIQ_TO_STOP_RATIO=3.0
+```
+
+Güvenlik:
+- Bu sürüm emir göndermez.
+- Sadece MEXC `SPOT_ACCOUNT_READ` yetkisiyle hesap bakiyesi okur.
+- LIVE emir hâlâ kapalıdır.
+
+Mantık:
+- Stop seviyesi trade planından gelir.
+- Risk bütçesi hesap equity'sine göre hesaplanır.
+- Position notional risk ve available stable collateral ile sınırlandırılır.
+- Effective leverage ve suggested exchange leverage ayrı gösterilir.
+
+
+## Sprint 16 — Liquidation Distance First Leverage Policy
+
+Bu sürümde kaldıraç mantığı şu şekilde düzeltilmiştir:
+
+```text
+Kaldıraç hedef değildir.
+Önce stop mesafesi belirlenir.
+Sonra liquidation seviyesinin stopun yeterince gerisinde kalması şart koşulur.
+Pozisyon büyüklüğü risk bütçesi + available stable collateral + liquidation buffer ile hesaplanır.
+Exchange leverage sadece teknik/marjin ayarıdır.
+```
+
+Yeni env:
+```text
+ACCE_LIQ_DISTANCE_FIRST_ENABLED=1
+ACCE_TARGET_LIQ_TO_STOP_RATIO_CORE=3.0
+ACCE_TARGET_LIQ_TO_STOP_RATIO_MAJOR_ALT=3.25
+ACCE_TARGET_LIQ_TO_STOP_RATIO_HIGH_BETA=3.5
+ACCE_TARGET_LIQ_TO_STOP_RATIO_MEME=4.0
+ACCE_LIQ_DISTANCE_HARD_BLOCK=1
+ACCE_LIQ_BUFFER_EXTRA_PCT=0.005
+```
+
+Telegram planında:
+- effective leverage
+- suggested exchange leverage
+- approx liquidation price
+- liq/stop ratio
+- liquidation-distance-first sizing plan
+gösterilir.
+
+
+## Sprint 17 — Multi-Position Expansion Gate
+
+Coin evreni güncellendi:
+```text
+BTCUSDT, ETHUSDT, SOLUSDT, LINKUSDT, ONDOUSDT, RENDERUSDT, PYTHUSDT, BONKUSDT, POPCATUSDT
+```
+
+Yeni çoklu pozisyon kuralı:
+```text
+Kâr yastığı yoksa otomatik yasak değil.
+Ancak güvenli stop + güvenli liquidation buffer + portfolio heat uygun değilse yeni pozisyon yok.
+```
+
+Yeni env:
+```text
+ACCE_MULTI_POSITION_ENABLED=1
+ACCE_ALLOW_SECOND_WITH_SAFE_STOP=1
+ACCE_MAX_ACTIVE_POSITIONS=4
+ACCE_MAX_OPEN_RISK_POSITIONS=2
+ACCE_REQUIRE_ALL_EXISTING_STOPS_SAFE=1
+ACCE_REQUIRE_ALL_EXISTING_LIQ_SAFE=1
+ACCE_MAX_PORTFOLIO_HEAT_AFTER_NEW=0.12
+ACCE_MAX_SAME_GROUP_POSITIONS=2
+ACCE_BLOCK_DUPLICATE_SYMBOL=1
+ACCE_BLOCK_NEW_IF_ANY_POSITION_WARNING=1
+```
+
+
+## Sprint 18 — Liquidation Cluster Radar
+
+Bu modül piyasa genelindeki likidasyon birikimlerini şimdilik proxy olarak tahmin eder.
+
+Gerçek heatmap sağlayıcısı yokken kullanılan proxy kaynakları:
+- swing low / swing high
+- round number seviyeleri
+- son momentum
+- volume ratio
+- funding / basis
+- spread kalitesi
+
+Yeni env:
+```text
+LIQ_CLUSTER_RADAR_ENABLED=1
+LIQ_CLUSTER_MODE=PROXY
+LIQ_CLUSTER_NEAR_PCT=2.5
+LIQ_CLUSTER_DOWNSIDE_SWEEP_WARN_PCT=2.0
+LIQ_CLUSTER_UPSIDE_MAGNET_WARN_PCT=3.0
+```
+
+Modül şunu ayırır:
+```text
+Aşağı yakın long liquidation proxy = long için acele etme, sweep/reclaim bekle.
+Yukarı yakın short liquidation proxy = long radar desteklenebilir, trigger bekle.
+Sweep-reclaim proxy = long setup güçlenebilir, yine ACCE Gate şart.
+```

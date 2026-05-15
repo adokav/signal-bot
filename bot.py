@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import bisect
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -35,7 +36,7 @@ from zoneinfo import ZoneInfo
 import requests
 from flask import Flask
 from requests.adapters import HTTPAdapter
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from urllib3.util.retry import Retry
 
@@ -120,8 +121,8 @@ def env_str_list(name: str, default: list[str]) -> list[str]:
     return values or list(default)
 
 
-# Early helper: bazı config blokları clamp fonksiyonunu Math Helpers bölümünden
-# önce kullanır; bu yüzden fonksiyon burada tanımlı tutulur.
+# Early helper: some configuration blocks use clamp before the Math Helpers
+# section is reached. The same implementation is repeated later intentionally.
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
@@ -174,15 +175,13 @@ COINS: dict[str, str] = {
     "ETHUSDT": "CORE",
     "SOLUSDT": "CORE",
 
-    "AVAXUSDT": "MAJOR_ALT",
     "LINKUSDT": "MAJOR_ALT",
 
-    "LDOUSDT": "HIGH_BETA",
     "ONDOUSDT": "HIGH_BETA",
     "RENDERUSDT": "HIGH_BETA",
     "PYTHUSDT": "HIGH_BETA",
 
-    "PEPEUSDT": "MEME",
+    "BONKUSDT": "MEME",
     "POPCATUSDT": "MEME",
 }
 
@@ -563,6 +562,45 @@ FOMO_PULLBACK_HEALTH_MIN = env_float("FOMO_PULLBACK_HEALTH_MIN", 0.40, min_value
 FOMO_EXTREME_15M_RET = env_float("FOMO_EXTREME_15M_RET", 5.0, min_value=0.1)
 FOMO_EXTREME_1H_RET = env_float("FOMO_EXTREME_1H_RET", 9.0, min_value=0.1)
 FOMO_CHASE_VOLUME_RATIO = env_float("FOMO_CHASE_VOLUME_RATIO", 4.5, min_value=0.1)
+# HTF EMA21 Trend Quality Filter v1
+# Weekly EMA21 tek başına sinyal üretmez; long sinyal kalitesini ve risk çarpanını ayarlar.
+HTF_EMA21_FILTER_ENABLED = os.getenv("HTF_EMA21_FILTER_ENABLED", "1") == "1"
+HTF_EMA21_PERIOD = env_int("HTF_EMA21_PERIOD", 21, min_value=2)
+HTF_EMA21_KLINE_LIMIT = env_int("HTF_EMA21_KLINE_LIMIT", 80, min_value=30)
+HTF_EMA21_CACHE_TTL_SECONDS = env_int("HTF_EMA21_CACHE_TTL_SECONDS", 6 * 60 * 60, min_value=60)
+HTF_EMA21_NEAR_PCT = env_float("HTF_EMA21_NEAR_PCT", 2.0, min_value=0.1)
+HTF_EMA21_OVEREXTENDED_PCT = env_float("HTF_EMA21_OVEREXTENDED_PCT", 18.0, min_value=1.0)
+HTF_EMA21_STRONG_SCORE = env_float("HTF_EMA21_STRONG_SCORE", 75.0, min_value=0.0)
+HTF_EMA21_GOOD_SCORE = env_float("HTF_EMA21_GOOD_SCORE", 55.0, min_value=0.0)
+HTF_EMA21_WEAK_SCORE = env_float("HTF_EMA21_WEAK_SCORE", 40.0, min_value=0.0)
+# Liquidation Hunt Defense Engine v1
+# Amaç: kaldıraç temizliği / stop avı riskine yem olacak longları engellemek.
+LIQ_HUNT_DEFENSE_ENABLED = os.getenv("LIQ_HUNT_DEFENSE_ENABLED", "1") == "1"
+LIQ_HUNT_WARN_SCORE = env_float("LIQ_HUNT_WARN_SCORE", 55.0, min_value=0.0)
+LIQ_HUNT_BLOCK_SCORE = env_float("LIQ_HUNT_BLOCK_SCORE", 70.0, min_value=0.0)
+LIQ_HUNT_EXTREME_RET_15M = env_float("LIQ_HUNT_EXTREME_RET_15M", 4.0, min_value=0.1)
+LIQ_HUNT_EXTREME_RET_1H = env_float("LIQ_HUNT_EXTREME_RET_1H", 8.0, min_value=0.1)
+LIQ_HUNT_VOLUME_SPIKE = env_float("LIQ_HUNT_VOLUME_SPIKE", 3.5, min_value=0.1)
+LIQ_HUNT_SPREAD_MULTIPLIER = env_float("LIQ_HUNT_SPREAD_MULTIPLIER", 1.20, min_value=0.1)
+LIQ_HUNT_FUNDING_CROWDED = env_float("LIQ_HUNT_FUNDING_CROWDED", 0.06)
+LIQ_HUNT_FUNDING_EXTREME = env_float("LIQ_HUNT_FUNDING_EXTREME", 0.12)
+LIQ_HUNT_STOP_TOO_TIGHT_PCT = env_float("LIQ_HUNT_STOP_TOO_TIGHT_PCT", 1.20, min_value=0.1)
+LIQ_HUNT_SWEEP_RECLAIM_MAX_RISK = env_float("LIQ_HUNT_SWEEP_RECLAIM_MAX_RISK", 55.0, min_value=0.0)
+LIQ_HUNT_CONFLUENCE_PENALTY_WARN = env_float("LIQ_HUNT_CONFLUENCE_PENALTY_WARN", 4.0, min_value=0.0)
+LIQ_HUNT_CONFLUENCE_PENALTY_BLOCK = env_float("LIQ_HUNT_CONFLUENCE_PENALTY_BLOCK", 12.0, min_value=0.0)
+# Market Liquidation Cluster Radar v1
+# Gerçek heatmap sağlayıcısı yokken swing/ATR/OI-funding proxy mantığıyla
+# aşağı long-liquidation / yukarı short-liquidation kümeleri tahmin edilir.
+LIQ_CLUSTER_RADAR_ENABLED = os.getenv("LIQ_CLUSTER_RADAR_ENABLED", "1") == "1"
+LIQ_CLUSTER_MODE = os.getenv("LIQ_CLUSTER_MODE", "PROXY").upper()  # PROXY / REAL (future)
+LIQ_CLUSTER_NEAR_PCT = env_float("LIQ_CLUSTER_NEAR_PCT", 2.5, min_value=0.1)
+LIQ_CLUSTER_DOWNSIDE_SWEEP_WARN_PCT = env_float("LIQ_CLUSTER_DOWNSIDE_SWEEP_WARN_PCT", 2.0, min_value=0.1)
+LIQ_CLUSTER_UPSIDE_MAGNET_WARN_PCT = env_float("LIQ_CLUSTER_UPSIDE_MAGNET_WARN_PCT", 3.0, min_value=0.1)
+LIQ_CLUSTER_LONG_SWEEP_PENALTY = env_float("LIQ_CLUSTER_LONG_SWEEP_PENALTY", 6.0, min_value=0.0)
+LIQ_CLUSTER_SHORT_MAGNET_BONUS = env_float("LIQ_CLUSTER_SHORT_MAGNET_BONUS", 5.0, min_value=0.0)
+LIQ_CLUSTER_SWEEP_RECLAIM_BONUS = env_float("LIQ_CLUSTER_SWEEP_RECLAIM_BONUS", 7.0, min_value=0.0)
+LIQ_CLUSTER_ROUND_LEVEL_WEIGHT = env_float("LIQ_CLUSTER_ROUND_LEVEL_WEIGHT", 0.35, min_value=0.0)
+LIQ_CLUSTER_SWING_LEVEL_WEIGHT = env_float("LIQ_CLUSTER_SWING_LEVEL_WEIGHT", 0.65, min_value=0.0)
 LONG_SETUP_FORMING_FACTOR = env_float("LONG_SETUP_FORMING_FACTOR", 0.62, min_value=0.10)
 LONG_TRIGGER_READY_FACTOR = env_float("LONG_TRIGGER_READY_FACTOR", 0.88, min_value=0.10)
 LONG_CONFLUENCE_MIN_SETUP = env_float("LONG_CONFLUENCE_MIN_SETUP", 45.0, min_value=0.0)
@@ -671,6 +709,49 @@ if PAPER_ORDER_TYPE not in {"MARKET", "LIMIT_AT_ENTRY"}:
 
 MEXC_API_KEY = os.getenv("MEXC_API_KEY")
 MEXC_API_SECRET = os.getenv("MEXC_API_SECRET")
+# Account-Aware Position Sizing v1
+# Hesaptaki USDT/USDC bakiyeyi read-only okur. Emir göndermez.
+MEXC_ACCOUNT_SYNC_ENABLED = os.getenv("MEXC_ACCOUNT_SYNC_ENABLED", "0") == "1"
+MEXC_ACCOUNT_RECV_WINDOW = env_int("MEXC_ACCOUNT_RECV_WINDOW", 5000, min_value=1000)
+ACCE_ACCOUNT_EQUITY_SOURCE = os.getenv("ACCE_ACCOUNT_EQUITY_SOURCE", "AUTO").upper()  # AUTO / ENV_ONLY / MEXC_SPOT
+ACCE_ACCOUNT_SYNC_CACHE_TTL_SECONDS = env_int("ACCE_ACCOUNT_SYNC_CACHE_TTL_SECONDS", 60, min_value=5)
+ACCE_RISK_BUDGET_SOURCE = os.getenv("ACCE_RISK_BUDGET_SOURCE", "PLAN").upper()  # PLAN / FIXED
+ACCE_FIXED_RISK_PCT = env_float("ACCE_FIXED_RISK_PCT", RISK_PCT_PER_TRADE, min_value=0.0001)
+ACCE_MIN_TRADE_NOTIONAL_USD = env_float("ACCE_MIN_TRADE_NOTIONAL_USD", 10.0, min_value=0.0)
+ACCE_DEFAULT_EXCHANGE_LEVERAGE_CORE = env_float("ACCE_DEFAULT_EXCHANGE_LEVERAGE_CORE", 10.0, min_value=1.0)
+ACCE_DEFAULT_EXCHANGE_LEVERAGE_MAJOR_ALT = env_float("ACCE_DEFAULT_EXCHANGE_LEVERAGE_MAJOR_ALT", 8.0, min_value=1.0)
+ACCE_DEFAULT_EXCHANGE_LEVERAGE_HIGH_BETA = env_float("ACCE_DEFAULT_EXCHANGE_LEVERAGE_HIGH_BETA", 5.0, min_value=1.0)
+ACCE_DEFAULT_EXCHANGE_LEVERAGE_MEME = env_float("ACCE_DEFAULT_EXCHANGE_LEVERAGE_MEME", 3.0, min_value=1.0)
+ACCE_MAINT_MARGIN_CORE = env_float("ACCE_MAINT_MARGIN_CORE", 0.005, min_value=0.0)
+ACCE_MAINT_MARGIN_MAJOR_ALT = env_float("ACCE_MAINT_MARGIN_MAJOR_ALT", 0.0075, min_value=0.0)
+ACCE_MAINT_MARGIN_HIGH_BETA = env_float("ACCE_MAINT_MARGIN_HIGH_BETA", 0.010, min_value=0.0)
+ACCE_MAINT_MARGIN_MEME = env_float("ACCE_MAINT_MARGIN_MEME", 0.020, min_value=0.0)
+ACCE_MIN_LIQ_TO_STOP_RATIO = env_float("ACCE_MIN_LIQ_TO_STOP_RATIO", 3.0, min_value=1.0)
+# Liquidation-Distance-First Leverage Policy v1
+# Kaldıraç hedef değildir; liquidation distance ve stop geometry asıl karardır.
+ACCE_LIQ_DISTANCE_FIRST_ENABLED = os.getenv("ACCE_LIQ_DISTANCE_FIRST_ENABLED", "1") == "1"
+ACCE_TARGET_LIQ_TO_STOP_RATIO_CORE = env_float("ACCE_TARGET_LIQ_TO_STOP_RATIO_CORE", 3.0, min_value=1.0)
+ACCE_TARGET_LIQ_TO_STOP_RATIO_MAJOR_ALT = env_float("ACCE_TARGET_LIQ_TO_STOP_RATIO_MAJOR_ALT", 3.25, min_value=1.0)
+ACCE_TARGET_LIQ_TO_STOP_RATIO_HIGH_BETA = env_float("ACCE_TARGET_LIQ_TO_STOP_RATIO_HIGH_BETA", 3.5, min_value=1.0)
+ACCE_TARGET_LIQ_TO_STOP_RATIO_MEME = env_float("ACCE_TARGET_LIQ_TO_STOP_RATIO_MEME", 4.0, min_value=1.0)
+ACCE_LIQ_DISTANCE_HARD_BLOCK = os.getenv("ACCE_LIQ_DISTANCE_HARD_BLOCK", "1") == "1"
+ACCE_LIQ_BUFFER_EXTRA_PCT = env_float("ACCE_LIQ_BUFFER_EXTRA_PCT", 0.005, min_value=0.0)
+ACCE_MAX_EFFECTIVE_LEVERAGE_CORE = env_float("ACCE_MAX_EFFECTIVE_LEVERAGE_CORE", 2.00, min_value=0.1)
+ACCE_MAX_EFFECTIVE_LEVERAGE_MAJOR_ALT = env_float("ACCE_MAX_EFFECTIVE_LEVERAGE_MAJOR_ALT", 1.50, min_value=0.1)
+ACCE_MAX_EFFECTIVE_LEVERAGE_HIGH_BETA = env_float("ACCE_MAX_EFFECTIVE_LEVERAGE_HIGH_BETA", 1.10, min_value=0.1)
+ACCE_MAX_EFFECTIVE_LEVERAGE_MEME = env_float("ACCE_MAX_EFFECTIVE_LEVERAGE_MEME", 0.60, min_value=0.1)
+# Multi-Position Expansion Gate v1
+ACCE_MULTI_POSITION_ENABLED = os.getenv("ACCE_MULTI_POSITION_ENABLED", "1") == "1"
+ACCE_ALLOW_SECOND_WITH_SAFE_STOP = os.getenv("ACCE_ALLOW_SECOND_WITH_SAFE_STOP", "1") == "1"
+ACCE_MAX_ACTIVE_POSITIONS = env_int("ACCE_MAX_ACTIVE_POSITIONS", 4, min_value=1)
+ACCE_MAX_OPEN_RISK_POSITIONS = env_int("ACCE_MAX_OPEN_RISK_POSITIONS", 2, min_value=1)
+ACCE_REQUIRE_ALL_EXISTING_STOPS_SAFE = os.getenv("ACCE_REQUIRE_ALL_EXISTING_STOPS_SAFE", "1") == "1"
+ACCE_REQUIRE_ALL_EXISTING_LIQ_SAFE = os.getenv("ACCE_REQUIRE_ALL_EXISTING_LIQ_SAFE", "1") == "1"
+ACCE_ALLOW_UNKNOWN_EXISTING_LIQ = os.getenv("ACCE_ALLOW_UNKNOWN_EXISTING_LIQ", "1") == "1"
+ACCE_MAX_PORTFOLIO_HEAT_AFTER_NEW = env_float("ACCE_MAX_PORTFOLIO_HEAT_AFTER_NEW", ACCE_MAX_PORTFOLIO_HEAT_PCT, min_value=0.001)
+ACCE_MAX_SAME_GROUP_POSITIONS = env_int("ACCE_MAX_SAME_GROUP_POSITIONS", 2, min_value=1)
+ACCE_BLOCK_DUPLICATE_SYMBOL = os.getenv("ACCE_BLOCK_DUPLICATE_SYMBOL", "1") == "1"
+ACCE_BLOCK_NEW_IF_ANY_POSITION_WARNING = os.getenv("ACCE_BLOCK_NEW_IF_ANY_POSITION_WARNING", "1") == "1"
 
 if EXECUTION_MODE not in {"TRACKING", "PAPER", "LIVE"}:
     log.warning("EXECUTION_MODE=%r gecersiz; PAPER kullanılıyor.", EXECUTION_MODE)
@@ -1708,6 +1789,10 @@ def closed_bar_return(closes: list[float], bars: int, *, series_name: str) -> fl
     latest_closed = closes[-2]
     reference = closes[-(bars + 2)]
     return pct(latest_closed, reference)
+
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
 
 
 def ema(values: list[float], period: int) -> float:
@@ -3785,7 +3870,11 @@ def acce_portfolio_heat(state_mgr: StateManager = _STATE_MGR) -> dict:
     trades = get_trades(state_mgr)
     active = [t for t in trades.values() if isinstance(t, dict) and t.get("result") is None]
     open_risk = sum(_acce_open_risk_usd(t) for t in active)
-    equity = ACCOUNT_SIZE_USD
+    try:
+        snap = acce_account_snapshot()
+        equity = float(snap.get("equity_usd", ACCOUNT_SIZE_USD) or ACCOUNT_SIZE_USD)
+    except Exception:
+        equity = ACCOUNT_SIZE_USD
     heat = open_risk / equity if equity > 0 else 0.0
     protected = sum(
         1 for t in active
@@ -3809,6 +3898,194 @@ def _acce_has_profit_cushion(state_mgr: StateManager = _STATE_MGR) -> bool:
         if pm.get("collateral_released") or pm.get("acce_state") in {"BREAK_EVEN_PROTECTED", "PROFIT_PROTECTED", "TREND_RIDER"}:
             return True
     return False
+
+
+
+def _acce_position_state(t: dict) -> str:
+    pm = t.get("position_management") or {}
+    return str(pm.get("acce_state") or "OPEN_RISK")
+
+
+def _acce_position_stop_is_safe(t: dict) -> bool:
+    direction = str(t.get("direction") or "")
+    entry = float((t.get("position_management") or {}).get("avg_entry") or t.get("entry") or 0.0)
+    stop = float((t.get("position_management") or {}).get("managed_stop") or t.get("stop") or 0.0)
+    if entry <= 0 or stop <= 0:
+        return False
+    if direction == "LONG":
+        return True
+    return False
+
+
+def _acce_existing_liq_to_stop(t: dict) -> Optional[float]:
+    for container_key in ("acce_trade_brain", "position_sizing"):
+        container = t.get(container_key) or {}
+        if not isinstance(container, dict):
+            continue
+        value = container.get("liq_to_stop_ratio")
+        if value is None:
+            ldf = container.get("liquidation_distance_first") or {}
+            value = ldf.get("liq_to_stop_ratio")
+        try:
+            if value is not None:
+                return float(value)
+        except Exception:
+            continue
+    return None
+
+
+def _acce_position_liq_is_safe(t: dict) -> bool:
+    ratio = _acce_existing_liq_to_stop(t)
+    group = str(t.get("group") or COINS.get(t.get("symbol"), "CORE"))
+    target = _acce_target_liq_to_stop_ratio(group)
+    if ratio is None:
+        return bool(ACCE_ALLOW_UNKNOWN_EXISTING_LIQ)
+    return ratio >= target
+
+
+def _acce_position_is_protected(t: dict) -> bool:
+    state = _acce_position_state(t)
+    if state in {"BREAK_EVEN_PROTECTED", "PROFIT_PROTECTED", "TREND_RIDER"}:
+        return True
+    direction = str(t.get("direction") or "")
+    entry = float((t.get("position_management") or {}).get("avg_entry") or t.get("entry") or 0.0)
+    stop = float((t.get("position_management") or {}).get("managed_stop") or t.get("stop") or 0.0)
+    return direction == "LONG" and entry > 0 and stop >= entry
+
+
+def _acce_active_trades(state_mgr: StateManager = _STATE_MGR) -> list[dict]:
+    return [
+        t for t in get_trades(state_mgr).values()
+        if isinstance(t, dict) and t.get("result") is None
+    ]
+
+
+def acce_multi_position_expansion_gate(
+    result: dict,
+    plan: Optional[dict] = None,
+    state_mgr: StateManager = _STATE_MGR,
+) -> dict:
+    if not ACCE_MULTI_POSITION_ENABLED:
+        return {"allowed": True, "status": "DISABLED", "reason": "Multi-position gate disabled."}
+
+    symbol = result.get("symbol")
+    group = str(result.get("group") or COINS.get(symbol, "UNKNOWN"))
+    active = _acce_active_trades(state_mgr)
+    current_heat = acce_portfolio_heat(state_mgr)
+
+    details: list[str] = []
+    blockers: list[str] = []
+
+    if len(active) >= ACCE_MAX_ACTIVE_POSITIONS:
+        blockers.append(f"Max active positions reached: {len(active)} >= {ACCE_MAX_ACTIVE_POSITIONS}")
+
+    if ACCE_BLOCK_DUPLICATE_SYMBOL and symbol and any(t.get("symbol") == symbol for t in active):
+        blockers.append(f"Duplicate active symbol blocked: {symbol}")
+
+    warning_states = {"WARNING", "REDUCE_ONLY", "EXIT_READY"}
+    warning_positions = [t.get("symbol") for t in active if _acce_position_state(t) in warning_states]
+    if ACCE_BLOCK_NEW_IF_ANY_POSITION_WARNING and warning_positions:
+        blockers.append(f"Existing position warning/reduce/exit state: {', '.join(warning_positions)}")
+
+    unsafe_stop = [t.get("symbol") for t in active if not _acce_position_stop_is_safe(t)]
+    if ACCE_REQUIRE_ALL_EXISTING_STOPS_SAFE and unsafe_stop:
+        blockers.append(f"Unsafe/missing stop on active positions: {', '.join(unsafe_stop)}")
+
+    unsafe_liq = [t.get("symbol") for t in active if not _acce_position_liq_is_safe(t)]
+    if ACCE_REQUIRE_ALL_EXISTING_LIQ_SAFE and unsafe_liq:
+        blockers.append(f"Unsafe liquidation buffer on active positions: {', '.join(unsafe_liq)}")
+
+    same_group_count = sum(1 for t in active if str(t.get("group") or COINS.get(t.get("symbol"), "")) == group)
+    if same_group_count + 1 > ACCE_MAX_SAME_GROUP_POSITIONS:
+        blockers.append(f"Same group exposure too high: {group} {same_group_count + 1}>{ACCE_MAX_SAME_GROUP_POSITIONS}")
+
+    protected_count = sum(1 for t in active if _acce_position_is_protected(t))
+    open_risk_count = len(active) - protected_count
+    prospective_open_risk_count = open_risk_count + 1
+
+    if prospective_open_risk_count > ACCE_MAX_OPEN_RISK_POSITIONS:
+        blockers.append(f"Open-risk positions would exceed limit: {prospective_open_risk_count}>{ACCE_MAX_OPEN_RISK_POSITIONS}")
+
+    if active and not _acce_has_profit_cushion(state_mgr):
+        if not ACCE_ALLOW_SECOND_WITH_SAFE_STOP:
+            blockers.append("No protected profit and second-with-safe-stop mode disabled.")
+        else:
+            details.append("No protected profit yet, but safe-stop path is being evaluated.")
+
+    planned_risk_usd = 0.0
+    planned_liq_ratio = None
+    planned_liq_safety = None
+    if isinstance(plan, dict):
+        planned_risk_usd = float(plan.get("risk_amount", 0.0) or 0.0)
+        acce = plan.get("acce_trade_brain") or {}
+        planned_liq_safety = acce.get("liq_safety")
+        try:
+            planned_liq_ratio = float(acce.get("liq_to_stop_ratio"))
+        except Exception:
+            planned_liq_ratio = None
+
+        if planned_liq_safety in {"FAIL", "NO_TRADE"}:
+            blockers.append(f"New plan liquidation safety failed: {planned_liq_safety}")
+        if planned_liq_ratio is not None and planned_liq_ratio < _acce_target_liq_to_stop_ratio(group):
+            blockers.append(f"New plan Liq/Stop too low: {planned_liq_ratio:.2f} < {_acce_target_liq_to_stop_ratio(group):.2f}")
+
+        try:
+            snap = acce_account_snapshot()
+            equity = float(snap.get("equity_usd", ACCOUNT_SIZE_USD) or ACCOUNT_SIZE_USD)
+        except Exception:
+            equity = ACCOUNT_SIZE_USD
+        heat_after = (float(current_heat.get("open_risk_usd", 0.0) or 0.0) + planned_risk_usd) / equity if equity > 0 else 0.0
+        if heat_after > ACCE_MAX_PORTFOLIO_HEAT_AFTER_NEW:
+            blockers.append(f"Portfolio heat after new would exceed limit: {heat_after:.2%}>{ACCE_MAX_PORTFOLIO_HEAT_AFTER_NEW:.2%}")
+    else:
+        heat_after = float(current_heat.get("heat_pct", 0.0) or 0.0)
+
+    status = "BLOCK" if blockers else "ALLOW_FULL"
+    reason = "; ".join(blockers) if blockers else "Multi-position gate passed: safe stop/liquidation/heat conditions allow new position."
+
+    return {
+        "allowed": not blockers,
+        "status": status,
+        "reason": reason,
+        "details": details,
+        "active_positions": len(active),
+        "protected_positions": protected_count,
+        "open_risk_positions": open_risk_count,
+        "prospective_open_risk_positions": prospective_open_risk_count,
+        "current_heat_pct": current_heat.get("heat_pct"),
+        "heat_after_new_pct": round(heat_after, 6),
+        "heat_limit_pct": ACCE_MAX_PORTFOLIO_HEAT_AFTER_NEW,
+        "same_group_count_after_new": same_group_count + 1,
+        "group": group,
+        "planned_risk_usd": round(planned_risk_usd, 4),
+        "planned_liq_to_stop_ratio": planned_liq_ratio,
+        "planned_liq_safety": planned_liq_safety,
+    }
+
+
+def format_multi_position_gate_report(results: list[dict], state_mgr: StateManager = _STATE_MGR) -> list[str]:
+    candidates = [r for r in results if r.get("signal") == "LONG" and r.get("actionable", True)]
+    best = sorted(candidates, key=lambda x: float(x.get("confidence", 0) or 0), reverse=True)[0] if candidates else {}
+    gate = acce_multi_position_expansion_gate(best, None, state_mgr)
+    active = _acce_active_trades(state_mgr)
+    lines = [
+        "🧩 MULTI-POSITION GATE",
+        f"• Durum: {'🟢 ' if gate.get('allowed') else '🔴 '}{gate.get('status')}",
+        f"• Açık pozisyon: {gate.get('active_positions', 0)}",
+        f"• Korunan pozisyon: {gate.get('protected_positions', 0)}",
+        f"• Açık risk pozisyonu: {gate.get('open_risk_positions', 0)} / max {ACCE_MAX_OPEN_RISK_POSITIONS}",
+        f"• Portfolio heat: %{float(gate.get('current_heat_pct', 0) or 0)*100:.2f} / limit %{ACCE_MAX_PORTFOLIO_HEAT_AFTER_NEW*100:.2f}",
+    ]
+    if active:
+        lines.append("")
+        lines.append("Mevcut pozisyonlar")
+        for t in active[:4]:
+            ratio = _acce_existing_liq_to_stop(t)
+            ratio_txt = "unknown" if ratio is None else f"{ratio:.2f}"
+            lines.append(f"• {t.get('symbol')}: {_acce_position_state(t)} | stop {'güvenli' if _acce_position_stop_is_safe(t) else 'sorunlu'} | Liq/Stop {ratio_txt}")
+    lines.extend(["", "Karar", f"• {gate.get('reason')}"])
+    return lines
+
 
 
 def acce_trade_eligibility(result: dict, state_mgr: StateManager = _STATE_MGR) -> dict:
@@ -3841,21 +4118,35 @@ def acce_trade_eligibility(result: dict, state_mgr: StateManager = _STATE_MGR) -
     if confidence < ACCE_MIN_CONFIDENCE:
         return {"allowed": False, "reason": f"Confidence {confidence:.1f} below ACCE minimum {ACCE_MIN_CONFIDENCE:.1f}.", "checks": checks}
 
+    liq_defense = liquidation_hunt_defense(result)
+    result["liquidation_hunt_defense"] = liq_defense
+    if liq_defense.get("action") == "BLOCK":
+        return {
+            "allowed": False,
+            "reason": f"Liquidation hunt defense BLOCK: {liq_defense.get('score')} / 100",
+            "checks": checks,
+            "liquidation_hunt_defense": liq_defense,
+        }
+
     heat = acce_portfolio_heat(state_mgr)
     if not heat["allowed"]:
         return {"allowed": False, "reason": f"Portfolio heat exceeded: {heat['heat_pct']:.2%} > {ACCE_MAX_PORTFOLIO_HEAT_PCT:.2%}.", "checks": checks, "portfolio_heat": heat}
 
-    active_count = heat["active"]
-    if (
-        ACCE_NO_SECOND_POSITION_WITHOUT_PROFIT_CUSHION
-        and active_count > 0
-        and not _acce_has_profit_cushion(state_mgr)
-    ):
+    # Liquidation-distance-first policy is finalized at trade plan stage,
+    # but we also keep the gate philosophy here: tight liquidation geometry is not allowed.
+    liq_defense_existing = result.get("liquidation_hunt_defense") or {}
+    if liq_defense_existing.get("action") == "BLOCK":
+        return {"allowed": False, "reason": "Liquidation hunt defense blocked this setup.", "checks": checks, "liquidation_hunt_defense": liq_defense_existing}
+
+    multi_gate = acce_multi_position_expansion_gate(result, None, state_mgr)
+    result["multi_position_gate"] = multi_gate
+    if not multi_gate.get("allowed", True):
         return {
             "allowed": False,
-            "reason": "No protected profit, no second position.",
+            "reason": f"Multi-position gate blocked: {multi_gate.get('reason')}",
             "checks": checks,
             "portfolio_heat": heat,
+            "multi_position_gate": multi_gate,
         }
 
     checks.append(f"group={group}")
@@ -3872,10 +4163,14 @@ def acce_trade_eligibility(result: dict, state_mgr: StateManager = _STATE_MGR) -
 
 
 def acce_apply_trade_brain_to_plan(result: dict, plan: dict) -> dict:
-    """Transform legacy plan into ACCE initial stable-collateral plan.
+    """Transform legacy plan into ACCE account-aware stable-collateral plan.
 
-    The old bot's signal, execution quality, quality grade and regime remain in
-    place. This function only caps trade size/collateral behavior.
+    User's leverage mentality:
+    - Exchange leverage is a tool, not the real risk.
+    - Real risk is notional, stop distance and stable collateral allocation.
+    - Initial notional must be capped by available stable collateral.
+    - Stop is determined by market structure / plan.
+    - Position size is calculated from account equity, risk budget and stop distance.
     """
     if not ACCE_TRADE_BRAIN_ENABLED:
         return plan
@@ -3887,19 +4182,81 @@ def acce_apply_trade_brain_to_plan(result: dict, plan: dict) -> dict:
         return plan
 
     stop_pct = abs(entry - stop) / entry
-    allocated_collateral = ACCOUNT_SIZE_USD * ACCE_INITIAL_NOTIONAL_MAX_COLLATERAL_PCT
-    group_mult = _acce_group_risk_multiplier(group)
+    account = acce_account_snapshot()
+    account_equity = float(account.get("equity_usd", ACCOUNT_SIZE_USD) or ACCOUNT_SIZE_USD)
+    available_collateral = float(account.get("available_collateral_usd", account_equity) or account_equity)
 
-    # Initial position notional is capped by stable collateral mental model.
+    group_mult = _acce_group_risk_multiplier(group)
+    allocated_collateral = max(0.0, available_collateral * ACCE_INITIAL_NOTIONAL_MAX_COLLATERAL_PCT)
+
     original_notional = float(plan.get("position_notional", 0.0) or 0.0)
-    capped_notional = min(original_notional if original_notional > 0 else allocated_collateral, allocated_collateral)
-    capped_notional *= group_mult
-    capped_notional = max(0.0, capped_notional)
+
+    # Risk budget comes from existing plan unless fixed mode is selected.
+    planned_risk_pct = float(plan.get("risk_pct", RISK_PCT_PER_TRADE) or RISK_PCT_PER_TRADE)
+    if ACCE_RISK_BUDGET_SOURCE == "FIXED":
+        risk_budget_pct = ACCE_FIXED_RISK_PCT
+    else:
+        risk_budget_pct = planned_risk_pct
+
+    risk_budget_pct = clamp(risk_budget_pct * group_mult, 0.0, POSITION_SIZING_MAX_RISK_PCT)
+    risk_budget_usd = account_equity * risk_budget_pct
+
+    if ACCE_LIQ_DISTANCE_FIRST_ENABLED:
+        liq_plan = _acce_liquidation_distance_plan(
+            entry=entry,
+            stop=stop,
+            account_equity=account_equity,
+            available_collateral=allocated_collateral,
+            risk_budget_usd=risk_budget_usd,
+            group=group,
+            original_notional=original_notional,
+        )
+        capped_notional = float(liq_plan.get("final_notional", 0.0) or 0.0)
+        notional_by_risk = float(liq_plan.get("max_notional_by_risk", 0.0) or 0.0)
+        notional_by_collateral = float(liq_plan.get("max_notional_by_collateral", 0.0) or 0.0)
+        allocated_collateral = float(liq_plan.get("allocated_collateral_needed", allocated_collateral) or 0.0)
+        effective_portfolio_leverage = float(liq_plan.get("effective_portfolio_leverage", 0.0) or 0.0)
+        recommended_exchange_leverage = float(liq_plan.get("recommended_exchange_leverage", _acce_default_exchange_leverage(group)) or 1.0)
+        required_initial_margin = float(liq_plan.get("required_initial_margin_est", 0.0) or 0.0)
+        approx_liq_price = float(liq_plan.get("approx_liquidation_price", 0.0) or 0.0)
+        liq_to_stop_ratio = float(liq_plan.get("liq_to_stop_ratio", 0.0) or 0.0)
+        liq_safety = str(liq_plan.get("status", "WARN"))
+    else:
+        notional_by_risk = risk_budget_usd / stop_pct if stop_pct > 0 else 0.0
+        notional_by_collateral = allocated_collateral
+        capped_notional = min(
+            x for x in [original_notional, notional_by_risk, notional_by_collateral]
+            if x is not None and x >= 0
+        )
+        if capped_notional < ACCE_MIN_TRADE_NOTIONAL_USD:
+            capped_notional = 0.0
+        effective_portfolio_leverage = capped_notional / account_equity if account_equity > 0 else 0.0
+        recommended_exchange_leverage = _acce_default_exchange_leverage(group)
+        required_initial_margin = capped_notional / recommended_exchange_leverage if recommended_exchange_leverage > 0 else capped_notional
+        approx_liq_price = _acce_approx_long_liq_price(
+            entry=entry,
+            notional=capped_notional,
+            allocated_collateral=allocated_collateral,
+            group=group,
+        )
+        stop_distance = abs(entry - stop)
+        liq_distance = abs(entry - approx_liq_price)
+        liq_to_stop_ratio = liq_distance / stop_distance if stop_distance > 0 else 0.0
+        liq_safety = "PASS" if liq_to_stop_ratio >= ACCE_MIN_LIQ_TO_STOP_RATIO else "WARN"
+        liq_plan = {"enabled": False, "status": liq_safety}
 
     quantity = capped_notional / entry if entry > 0 else 0.0
     risk_amount = capped_notional * stop_pct
-    risk_pct = risk_amount / ACCOUNT_SIZE_USD if ACCOUNT_SIZE_USD > 0 else 0.0
+    risk_pct = risk_amount / account_equity if account_equity > 0 else 0.0
 
+    if ACCE_LIQ_DISTANCE_HARD_BLOCK and liq_safety in {"FAIL", "NO_TRADE"}:
+        capped_notional = 0.0
+        quantity = 0.0
+        risk_amount = 0.0
+        risk_pct = 0.0
+        effective_portfolio_leverage = 0.0
+
+    plan["account_size"] = account_equity
     plan["position_notional"] = capped_notional
     plan["quantity"] = quantity
     plan["risk_amount"] = risk_amount
@@ -3908,15 +4265,28 @@ def acce_apply_trade_brain_to_plan(result: dict, plan: dict) -> dict:
     ps = copy.deepcopy(plan.get("position_sizing") or {})
     ps.update({
         "acce_trade_brain": True,
+        "account_aware_sizing": True,
+        "account_source": account.get("source"),
+        "account_equity_usd": account_equity,
+        "available_collateral_usd": available_collateral,
         "original_position_notional": original_notional,
+        "notional_by_risk": notional_by_risk,
+        "notional_by_collateral": notional_by_collateral,
         "position_notional": capped_notional,
+        "risk_budget_pct": risk_budget_pct,
         "risk_amount": risk_amount,
         "risk_pct": risk_pct,
         "group_risk_multiplier": group_mult,
         "collateral_asset": ACCE_COLLATERAL_ASSET,
         "allocated_collateral_usd": allocated_collateral,
-        "effective_portfolio_leverage": capped_notional / ACCOUNT_SIZE_USD if ACCOUNT_SIZE_USD > 0 else 0.0,
-        "rule": "initial_notional_capped_by_stable_collateral",
+        "effective_portfolio_leverage": effective_portfolio_leverage,
+        "recommended_exchange_leverage": recommended_exchange_leverage,
+        "required_initial_margin_est": required_initial_margin,
+        "approx_liquidation_price": approx_liq_price,
+        "liq_to_stop_ratio": liq_to_stop_ratio,
+        "liq_safety": liq_safety,
+        "liquidation_distance_first": copy.deepcopy(liq_plan),
+        "rule": "liquidation_distance_first_position_sizing" if ACCE_LIQ_DISTANCE_FIRST_ENABLED else "account_equity_and_stable_collateral_capped_position",
     })
     plan["position_sizing"] = ps
     plan["acce_trade_brain"] = {
@@ -3924,16 +4294,29 @@ def acce_apply_trade_brain_to_plan(result: dict, plan: dict) -> dict:
         "mode": "Risk-On Collateral Recycling Long",
         "collateral_asset": ACCE_COLLATERAL_ASSET,
         "allowed_collateral": sorted(ACCE_ALLOWED_COLLATERAL),
+        "account_sync": copy.deepcopy(account),
         "long_only": ACCE_LONG_ONLY,
-        "initial_position_rule": "position_notional <= allocated_stable_collateral",
+        "initial_position_rule": "position_notional <= available_stable_collateral_allocation",
+        "account_equity_usd": account_equity,
+        "available_collateral_usd": available_collateral,
         "allocated_collateral_usd": allocated_collateral,
         "original_notional_usd": original_notional,
+        "notional_by_risk_usd": notional_by_risk,
         "final_notional_usd": capped_notional,
-        "effective_portfolio_leverage": capped_notional / ACCOUNT_SIZE_USD if ACCOUNT_SIZE_USD > 0 else 0.0,
+        "effective_portfolio_leverage": effective_portfolio_leverage,
+        "recommended_exchange_leverage": recommended_exchange_leverage,
+        "required_initial_margin_est": required_initial_margin,
+        "approx_liquidation_price": approx_liq_price,
+        "liq_to_stop_ratio": liq_to_stop_ratio,
+        "liq_safety": liq_safety,
+        "liquidation_distance_first": copy.deepcopy(liq_plan),
         "risk_amount_usd": risk_amount,
         "risk_pct": risk_pct,
+        "stop_price": stop,
+        "stop_pct": stop_pct,
         "profit_cushion_trigger_pct": ACCE_PROFIT_CUSHION_TRIGGER_PCT,
         "scale_in_rule": "No protected profit, no scale-in.",
+        "important_note": "Exchange leverage does not increase notional; it only changes margin mechanics. Real risk is capped by notional, stop and collateral.",
     }
     return plan
 
@@ -4255,6 +4638,9 @@ def format_trade_plan_block(plan: Optional[dict]) -> list[str]:
         f"Hesap: {format_money(plan['account_size'])}",
         f"İşlem Riski: %{plan['risk_pct'] * 100:.2f} = {format_money(plan['risk_amount'])}",
         format_position_sizing_brief(plan.get("position_sizing")),
+        f"Account-Aware: Equity {format_money((plan.get('acce_trade_brain') or {}).get('account_equity_usd'))} | Available {format_money((plan.get('acce_trade_brain') or {}).get('available_collateral_usd'))}",
+        f"ACCE Lev: effective {float((plan.get('acce_trade_brain') or {}).get('effective_portfolio_leverage', 0) or 0):.2f}x | suggested exchange {float((plan.get('acce_trade_brain') or {}).get('recommended_exchange_leverage', 0) or 0):.2f}x",
+        f"ACCE Liq: approx {format_price((plan.get('acce_trade_brain') or {}).get('approx_liquidation_price'))} | Liq/Stop {float((plan.get('acce_trade_brain') or {}).get('liq_to_stop_ratio', 0) or 0):.2f} | {(plan.get('acce_trade_brain') or {}).get('liq_safety', '-')}",
         format_leverage_policy_brief(plan.get("leverage_policy")),
         f"Execution Quality: {(plan.get('execution_quality') or {}).get('status', '-')} | Cost {(plan.get('execution_quality') or {}).get('estimated_entry_cost_bps', '-')} bps | Impact {(plan.get('execution_quality') or {}).get('market_impact_bps', '-')}",
         f"Önerilen Notional: {format_money(plan['position_notional'])}",
@@ -4480,6 +4866,285 @@ def append_jsonl(path: str, payload: dict) -> None:
             f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
     except OSError as e:
         log.error("%s yazılamadı: %s", path, e)
+
+
+
+# ============================================================
+# ACCOUNT-AWARE SIZING / READ-ONLY ACCOUNT SYNC v1
+# ============================================================
+
+_ACCOUNT_SNAPSHOT_CACHE: tuple[float, dict] | None = None
+
+
+def _mexc_signed_query(params: dict) -> str:
+    query = urlencode(params, doseq=True)
+    signature = hmac.new(
+        str(MEXC_API_SECRET or "").encode("utf-8"),
+        query.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{query}&signature={signature}"
+
+
+def mexc_spot_account_snapshot() -> dict:
+    """Read MEXC spot account balances with SPOT_ACCOUNT_READ permission.
+
+    This is read-only. It does not place orders.
+    If keys are missing or request fails, returns a disabled/error snapshot.
+    """
+    global _ACCOUNT_SNAPSHOT_CACHE
+
+    if not MEXC_ACCOUNT_SYNC_ENABLED or ACCE_ACCOUNT_EQUITY_SOURCE == "ENV_ONLY":
+        return {
+            "enabled": False,
+            "source": "ENV_ONLY",
+            "equity_usd": ACCOUNT_SIZE_USD,
+            "available_collateral_usd": ACCOUNT_SIZE_USD,
+            "collateral": {"USDT": {"free": ACCOUNT_SIZE_USD, "locked": 0.0}, "USDC": {"free": 0.0, "locked": 0.0}},
+            "reason": "Account sync disabled; using ACCOUNT_SIZE_USD.",
+        }
+
+    if not MEXC_API_KEY or not MEXC_API_SECRET:
+        return {
+            "enabled": False,
+            "source": "MEXC_SPOT",
+            "equity_usd": ACCOUNT_SIZE_USD,
+            "available_collateral_usd": ACCOUNT_SIZE_USD,
+            "collateral": {"USDT": {"free": ACCOUNT_SIZE_USD, "locked": 0.0}, "USDC": {"free": 0.0, "locked": 0.0}},
+            "reason": "MEXC keys missing; using ACCOUNT_SIZE_USD fallback.",
+        }
+
+    if _ACCOUNT_SNAPSHOT_CACHE and now_ts() - _ACCOUNT_SNAPSHOT_CACHE[0] < ACCE_ACCOUNT_SYNC_CACHE_TTL_SECONDS:
+        return copy.deepcopy(_ACCOUNT_SNAPSHOT_CACHE[1])
+
+    try:
+        params = {
+            "timestamp": int(time.time() * 1000),
+            "recvWindow": MEXC_ACCOUNT_RECV_WINDOW,
+        }
+        query = _mexc_signed_query(params)
+        url = f"{MEXC_SPOT_BASE}/api/v3/account?{query}"
+        headers = {"X-MEXC-APIKEY": str(MEXC_API_KEY)}
+        resp = http_get(url, headers=headers, timeout=10)
+        if not isinstance(resp, dict) or "balances" not in resp:
+            raise RuntimeError(f"unexpected account response: {str(resp)[:250]}")
+
+        collateral = {
+            "USDT": {"free": 0.0, "locked": 0.0},
+            "USDC": {"free": 0.0, "locked": 0.0},
+        }
+        for item in resp.get("balances", []):
+            asset = str(item.get("asset", "")).upper()
+            if asset in collateral:
+                collateral[asset] = {
+                    "free": float(item.get("free", 0.0) or 0.0),
+                    "locked": float(item.get("locked", 0.0) or 0.0),
+                }
+
+        free = sum(v["free"] for v in collateral.values())
+        locked = sum(v["locked"] for v in collateral.values())
+        snap = {
+            "enabled": True,
+            "source": "MEXC_SPOT",
+            "equity_usd": round(free + locked, 6),
+            "available_collateral_usd": round(free, 6),
+            "collateral": collateral,
+            "reason": "MEXC spot USDT/USDC balances synced.",
+        }
+        _ACCOUNT_SNAPSHOT_CACHE = (now_ts(), snap)
+        return copy.deepcopy(snap)
+
+    except Exception as e:
+        log.warning("MEXC account sync failed, ACCOUNT_SIZE_USD fallback kullanılacak: %s", e)
+        snap = {
+            "enabled": False,
+            "source": "FALLBACK",
+            "equity_usd": ACCOUNT_SIZE_USD,
+            "available_collateral_usd": ACCOUNT_SIZE_USD,
+            "collateral": {"USDT": {"free": ACCOUNT_SIZE_USD, "locked": 0.0}, "USDC": {"free": 0.0, "locked": 0.0}},
+            "reason": f"account sync failed: {e}",
+        }
+        _ACCOUNT_SNAPSHOT_CACHE = (now_ts(), snap)
+        return copy.deepcopy(snap)
+
+
+def acce_account_snapshot() -> dict:
+    if ACCE_ACCOUNT_EQUITY_SOURCE == "ENV_ONLY":
+        return mexc_spot_account_snapshot()
+    if ACCE_ACCOUNT_EQUITY_SOURCE in {"AUTO", "MEXC_SPOT"}:
+        return mexc_spot_account_snapshot()
+    return mexc_spot_account_snapshot()
+
+
+def _acce_default_exchange_leverage(group: str) -> float:
+    group = str(group or "").upper()
+    if group == "MEME":
+        return ACCE_DEFAULT_EXCHANGE_LEVERAGE_MEME
+    if group == "HIGH_BETA":
+        return ACCE_DEFAULT_EXCHANGE_LEVERAGE_HIGH_BETA
+    if group == "MAJOR_ALT":
+        return ACCE_DEFAULT_EXCHANGE_LEVERAGE_MAJOR_ALT
+    return ACCE_DEFAULT_EXCHANGE_LEVERAGE_CORE
+
+
+def _acce_maintenance_margin(group: str) -> float:
+    group = str(group or "").upper()
+    if group == "MEME":
+        return ACCE_MAINT_MARGIN_MEME
+    if group == "HIGH_BETA":
+        return ACCE_MAINT_MARGIN_HIGH_BETA
+    if group == "MAJOR_ALT":
+        return ACCE_MAINT_MARGIN_MAJOR_ALT
+    return ACCE_MAINT_MARGIN_CORE
+
+
+def _acce_target_liq_to_stop_ratio(group: str) -> float:
+    group = str(group or "").upper()
+    if group == "MEME":
+        return ACCE_TARGET_LIQ_TO_STOP_RATIO_MEME
+    if group == "HIGH_BETA":
+        return ACCE_TARGET_LIQ_TO_STOP_RATIO_HIGH_BETA
+    if group == "MAJOR_ALT":
+        return ACCE_TARGET_LIQ_TO_STOP_RATIO_MAJOR_ALT
+    return ACCE_TARGET_LIQ_TO_STOP_RATIO_CORE
+
+
+def _acce_max_effective_leverage(group: str) -> float:
+    group = str(group or "").upper()
+    if group == "MEME":
+        return ACCE_MAX_EFFECTIVE_LEVERAGE_MEME
+    if group == "HIGH_BETA":
+        return ACCE_MAX_EFFECTIVE_LEVERAGE_HIGH_BETA
+    if group == "MAJOR_ALT":
+        return ACCE_MAX_EFFECTIVE_LEVERAGE_MAJOR_ALT
+    return ACCE_MAX_EFFECTIVE_LEVERAGE_CORE
+
+
+def _acce_liquidation_distance_plan(
+    entry: float,
+    stop: float,
+    account_equity: float,
+    available_collateral: float,
+    risk_budget_usd: float,
+    group: str,
+    original_notional: float,
+) -> dict:
+    """Liquidation-distance-first sizing.
+
+    Order of decisions:
+    1. Stop/invalidation is fixed by market structure.
+    2. Target liquidation distance is derived from stop distance.
+    3. Minimum collateral ratio is derived from target liquidation distance.
+    4. Max notional is constrained by collateral, risk budget, and max effective leverage.
+    5. Exchange leverage is only a margin-mechanics suggestion, not the risk driver.
+    """
+    if entry <= 0 or stop <= 0 or account_equity <= 0:
+        return {
+            "enabled": ACCE_LIQ_DISTANCE_FIRST_ENABLED,
+            "status": "INVALID",
+            "reason": "entry/stop/equity invalid",
+            "final_notional": 0.0,
+        }
+
+    group = str(group or "CORE").upper()
+    stop_distance_pct = abs(entry - stop) / entry
+    target_ratio = _acce_target_liq_to_stop_ratio(group)
+    maint = _acce_maintenance_margin(group)
+
+    target_liq_distance_pct = stop_distance_pct * target_ratio + ACCE_LIQ_BUFFER_EXTRA_PCT
+    # Approx long formula:
+    # liquidation drop ~= collateral_ratio - maintenance_margin
+    required_collateral_ratio = min(0.98, max(maint + 0.01, target_liq_distance_pct + maint))
+
+    max_notional_by_collateral = available_collateral / required_collateral_ratio if required_collateral_ratio > 0 else 0.0
+    max_notional_by_risk = risk_budget_usd / stop_distance_pct if stop_distance_pct > 0 else 0.0
+    max_notional_by_effective_lev = account_equity * _acce_max_effective_leverage(group)
+
+    candidates = [
+        x for x in [
+            original_notional if original_notional > 0 else max_notional_by_collateral,
+            max_notional_by_collateral,
+            max_notional_by_risk,
+            max_notional_by_effective_lev,
+        ]
+        if x is not None and x >= 0
+    ]
+    final_notional = min(candidates) if candidates else 0.0
+
+    allocated_collateral_needed = final_notional * required_collateral_ratio
+    effective_leverage = final_notional / account_equity if account_equity > 0 else 0.0
+
+    # Recommended exchange leverage: allow enough exchange leverage to keep initial margin modest,
+    # but not as the risk driver. It must be at least notional/collateral_needed.
+    minimum_exchange_leverage_for_margin = final_notional / allocated_collateral_needed if allocated_collateral_needed > 0 else 1.0
+    default_exchange_leverage = _acce_default_exchange_leverage(group)
+    recommended_exchange_leverage = max(1.0, min(default_exchange_leverage, max(default_exchange_leverage, minimum_exchange_leverage_for_margin)))
+
+    approx_liq = _acce_approx_long_liq_price(
+        entry=entry,
+        notional=final_notional,
+        allocated_collateral=max(allocated_collateral_needed, 0.0),
+        group=group,
+    )
+    liq_distance_pct = abs(entry - approx_liq) / entry if entry > 0 else 0.0
+    liq_to_stop_ratio = liq_distance_pct / stop_distance_pct if stop_distance_pct > 0 else 0.0
+
+    status = "PASS" if liq_to_stop_ratio >= target_ratio else "FAIL"
+    if final_notional < ACCE_MIN_TRADE_NOTIONAL_USD:
+        status = "NO_TRADE"
+    reason = (
+        f"target_liq_to_stop={target_ratio:.2f}; "
+        f"required_collateral_ratio={required_collateral_ratio:.3f}; "
+        f"liq_to_stop={liq_to_stop_ratio:.2f}"
+    )
+
+    return {
+        "enabled": ACCE_LIQ_DISTANCE_FIRST_ENABLED,
+        "status": status,
+        "reason": reason,
+        "group": group,
+        "stop_distance_pct": stop_distance_pct,
+        "target_liq_to_stop_ratio": target_ratio,
+        "target_liq_distance_pct": target_liq_distance_pct,
+        "maintenance_margin": maint,
+        "required_collateral_ratio": required_collateral_ratio,
+        "max_notional_by_collateral": max_notional_by_collateral,
+        "max_notional_by_risk": max_notional_by_risk,
+        "max_notional_by_effective_leverage": max_notional_by_effective_lev,
+        "final_notional": final_notional,
+        "allocated_collateral_needed": allocated_collateral_needed,
+        "effective_portfolio_leverage": effective_leverage,
+        "recommended_exchange_leverage": recommended_exchange_leverage,
+        "required_initial_margin_est": final_notional / recommended_exchange_leverage if recommended_exchange_leverage > 0 else final_notional,
+        "approx_liquidation_price": approx_liq,
+        "liq_distance_pct": liq_distance_pct,
+        "liq_to_stop_ratio": liq_to_stop_ratio,
+    }
+
+
+def _acce_approx_long_liq_price(entry: float, notional: float, allocated_collateral: float, group: str) -> float:
+    """Approximate long liquidation price for planning only.
+
+    This is not exchange-exact. It is a conservative sanity model.
+    We still use it to avoid tight liquidation / stop geometry.
+    """
+    if entry <= 0 or notional <= 0:
+        return 0.0
+    collateral_ratio = allocated_collateral / notional
+    maint = _acce_maintenance_margin(group)
+    # Linear approximate: loss fraction until equity reaches maintenance.
+    liq_drop = max(0.0, collateral_ratio - maint)
+    return max(0.0, entry * (1.0 - liq_drop))
+
+
+def acce_account_sizing_brief(snapshot: Optional[dict] = None) -> str:
+    snap = snapshot or acce_account_snapshot()
+    return (
+        f"AccountSync: {snap.get('source', '-')} | "
+        f"Equity {format_money(snap.get('equity_usd'))} | "
+        f"Available {format_money(snap.get('available_collateral_usd'))} | "
+        f"{snap.get('reason', '-')}"
+    )
 
 
 class ExecutionAdapter:
@@ -5183,6 +5848,738 @@ def portfolio_risk_check(result: dict, state_mgr: StateManager) -> dict:
 
 
 
+
+# ============================================================
+# HTF EMA21 TREND QUALITY FILTER v1
+# ============================================================
+
+_HTF_EMA21_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _weekly_closes(symbol: str) -> list[float]:
+    """Fetch weekly closes from MEXC.
+
+    Tries common interval variants defensively. Returns empty list on failure.
+    """
+    for interval in ("1W", "1w", "W"):
+        try:
+            rows = get_klines(symbol, interval, HTF_EMA21_KLINE_LIMIT)
+            closes = [float(x[4]) for x in rows if len(x) > 4 and float(x[4]) > 0]
+            if len(closes) >= max(HTF_EMA21_PERIOD + 3, 25):
+                return closes
+        except Exception as e:
+            log.debug("%s weekly kline interval %s alınamadı: %s", symbol, interval, e)
+    return []
+
+
+def _single_weekly_ema21_context(symbol: str) -> dict:
+    if not HTF_EMA21_FILTER_ENABLED:
+        return {"enabled": False, "symbol": symbol, "state": "DISABLED", "score": 50.0}
+
+    cached = _HTF_EMA21_CACHE.get(symbol)
+    if cached and now_ts() - cached[0] < HTF_EMA21_CACHE_TTL_SECONDS:
+        return copy.deepcopy(cached[1])
+
+    closes = _weekly_closes(symbol)
+    if len(closes) < max(HTF_EMA21_PERIOD + 3, 25):
+        ctx = {
+            "enabled": True,
+            "symbol": symbol,
+            "state": "UNKNOWN",
+            "score": 50.0,
+            "reason": "weekly EMA21 için veri yetersiz",
+        }
+        _HTF_EMA21_CACHE[symbol] = (now_ts(), ctx)
+        return copy.deepcopy(ctx)
+
+    # Last candle may be the live week. Confirmed trend uses last closed week.
+    confirmed = closes[:-1] if len(closes) > HTF_EMA21_PERIOD + 3 else closes
+    live_close = closes[-1]
+    last_closed = confirmed[-1]
+    prev_closed = confirmed[-2]
+    ema_now = ema(confirmed, HTF_EMA21_PERIOD)
+    ema_prev = ema(confirmed[:-1], HTF_EMA21_PERIOD)
+    distance_pct = pct(last_closed, ema_now) if ema_now else 0.0
+    live_distance_pct = pct(live_close, ema_now) if ema_now else 0.0
+    slope_pct = pct(ema_now, ema_prev) if ema_prev else 0.0
+
+    if abs(distance_pct) <= HTF_EMA21_NEAR_PCT:
+        state = "NEAR_EMA21"
+    elif last_closed > ema_now:
+        state = "ABOVE_EMA21"
+    else:
+        state = "BELOW_EMA21"
+
+    reclaim = prev_closed <= ema_prev and last_closed > ema_now
+    breakdown = prev_closed >= ema_prev and last_closed < ema_now
+    live_reclaim_attempt = last_closed <= ema_now and live_close > ema_now
+    live_breakdown_risk = last_closed >= ema_now and live_close < ema_now
+
+    score = 50.0
+    reasons: list[str] = []
+    if state == "ABOVE_EMA21":
+        score += 18
+        reasons.append("weekly close EMA21 üstünde")
+    elif state == "BELOW_EMA21":
+        score -= 18
+        reasons.append("weekly close EMA21 altında")
+    else:
+        reasons.append("weekly close EMA21 çevresinde")
+
+    if slope_pct > 0.15:
+        score += 10
+        reasons.append("EMA21 eğimi yukarı")
+    elif slope_pct < -0.15:
+        score -= 10
+        reasons.append("EMA21 eğimi aşağı")
+    else:
+        reasons.append("EMA21 eğimi yatay")
+
+    if reclaim or live_reclaim_attempt:
+        score += 12
+        reasons.append("EMA21 reclaim / reclaim denemesi")
+    if breakdown or live_breakdown_risk:
+        score -= 12
+        reasons.append("EMA21 breakdown / breakdown riski")
+
+    if state == "ABOVE_EMA21" and distance_pct <= HTF_EMA21_OVEREXTENDED_PCT:
+        score += 5
+        reasons.append("EMA21 üstünde ama aşırı uzamamış")
+    elif distance_pct > HTF_EMA21_OVEREXTENDED_PCT:
+        score -= 5
+        reasons.append("EMA21 üstünde aşırı uzama riski")
+
+    score = clamp(score, 0.0, 100.0)
+    if score >= HTF_EMA21_STRONG_SCORE:
+        mode = "LONG_SUPPORTED"
+        risk_multiplier = 1.10
+        confluence_adjustment = 8.0
+        threshold_adjustment = -3.0
+    elif score >= HTF_EMA21_GOOD_SCORE:
+        mode = "LONG_OK"
+        risk_multiplier = 1.00
+        confluence_adjustment = 3.0
+        threshold_adjustment = 0.0
+    elif score >= HTF_EMA21_WEAK_SCORE:
+        mode = "RADAR_ONLY"
+        risk_multiplier = 0.70
+        confluence_adjustment = 0.0
+        threshold_adjustment = 5.0
+    else:
+        mode = "LONG_RESTRICTED"
+        risk_multiplier = 0.50
+        confluence_adjustment = -10.0
+        threshold_adjustment = 8.0
+
+    ctx = {
+        "enabled": True,
+        "symbol": symbol,
+        "state": state,
+        "mode": mode,
+        "score": round(score, 2),
+        "last_closed": last_closed,
+        "live_close": live_close,
+        "ema21": ema_now,
+        "distance_pct": round(distance_pct, 3),
+        "live_distance_pct": round(live_distance_pct, 3),
+        "slope_pct": round(slope_pct, 3),
+        "reclaim": bool(reclaim),
+        "breakdown": bool(breakdown),
+        "live_reclaim_attempt": bool(live_reclaim_attempt),
+        "live_breakdown_risk": bool(live_breakdown_risk),
+        "risk_multiplier": risk_multiplier,
+        "confluence_adjustment": confluence_adjustment,
+        "threshold_adjustment": threshold_adjustment,
+        "reasons": reasons,
+    }
+    _HTF_EMA21_CACHE[symbol] = (now_ts(), ctx)
+    return copy.deepcopy(ctx)
+
+
+def htf_ema21_context_for_result(result: dict) -> dict:
+    symbol = result.get("symbol", "-")
+    coin_ctx = _single_weekly_ema21_context(symbol)
+    btc_ctx = _single_weekly_ema21_context("BTCUSDT")
+
+    if not HTF_EMA21_FILTER_ENABLED:
+        return {"enabled": False, "symbol": symbol, "coin": coin_ctx, "btc": btc_ctx}
+
+    combined = float(coin_ctx.get("score", 50.0)) * 0.55 + float(btc_ctx.get("score", 50.0)) * 0.45
+    confluence_adjustment = float(coin_ctx.get("confluence_adjustment", 0.0)) + float(btc_ctx.get("confluence_adjustment", 0.0)) * 0.60
+    threshold_adjustment = float(coin_ctx.get("threshold_adjustment", 0.0)) + float(btc_ctx.get("threshold_adjustment", 0.0)) * 0.60
+    risk_multiplier = min(float(coin_ctx.get("risk_multiplier", 1.0)), float(btc_ctx.get("risk_multiplier", 1.0)))
+
+    if combined >= HTF_EMA21_STRONG_SCORE:
+        mode = "LONG_SUPPORTED"
+    elif combined >= HTF_EMA21_GOOD_SCORE:
+        mode = "LONG_OK"
+    elif combined >= HTF_EMA21_WEAK_SCORE:
+        mode = "RADAR_ONLY"
+    else:
+        mode = "LONG_RESTRICTED"
+
+    return {
+        "enabled": True,
+        "symbol": symbol,
+        "mode": mode,
+        "score": round(clamp(combined, 0.0, 100.0), 2),
+        "risk_multiplier": round(risk_multiplier, 3),
+        "confluence_adjustment": round(confluence_adjustment, 2),
+        "threshold_adjustment": round(threshold_adjustment, 2),
+        "coin": coin_ctx,
+        "btc": btc_ctx,
+        "reason": f"BTC {btc_ctx.get('state')} / {symbol} {coin_ctx.get('state')}",
+    }
+
+
+def attach_htf_ema21_context(results: list[dict]) -> None:
+    for r in results:
+        if isinstance(r, dict):
+            r["htf_ema21"] = htf_ema21_context_for_result(r)
+
+
+def _best_htf_context_result(results: list[dict]) -> Optional[dict]:
+    attach_htf_ema21_context(results)
+    candidates = [
+        r for r in results
+        if r.get("symbol") != "BTCUSDT" and (r.get("long_setup") or {}).get("state") not in {None, "NO_LONG_SETUP", "DISABLED"}
+    ]
+    if not candidates:
+        candidates = [r for r in results if r.get("symbol") != "BTCUSDT"]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda x: float((x.get("htf_ema21") or {}).get("score", 0) or 0), reverse=True)[0]
+
+
+
+
+# ============================================================
+# MARKET LIQUIDATION CLUSTER RADAR v1
+# ============================================================
+
+def _round_step_for_price(price: float) -> float:
+    if price >= 10000:
+        return 1000.0
+    if price >= 1000:
+        return 100.0
+    if price >= 100:
+        return 10.0
+    if price >= 10:
+        return 1.0
+    if price >= 1:
+        return 0.10
+    if price >= 0.1:
+        return 0.01
+    if price >= 0.01:
+        return 0.001
+    return max(price * 0.05, 0.000001)
+
+
+def _nearest_round_levels(price: float) -> tuple[float, float]:
+    if price <= 0:
+        return 0.0, 0.0
+    step = _round_step_for_price(price)
+    lower = (price // step) * step
+    upper = lower + step
+    if lower <= 0:
+        lower = price * 0.95
+    return lower, upper
+
+
+def _swing_proxy_levels(result: dict, price: float) -> tuple[float, float]:
+    """Approximate nearby swing low/high from available features.
+
+    If exact swing fields exist in result/features/components, use them.
+    Otherwise infer conservative levels from short-term returns.
+    """
+    features = result.get("features") or {}
+    components = result.get("components") or {}
+
+    low_candidates = []
+    high_candidates = []
+    for key in ("swing_low", "recent_low", "low_1h", "low_4h", "support"):
+        for container in (result, features, components):
+            if isinstance(container, dict) and key in container:
+                try:
+                    v = float(container.get(key))
+                    if v > 0:
+                        low_candidates.append(v)
+                except Exception:
+                    pass
+
+    for key in ("swing_high", "recent_high", "high_1h", "high_4h", "resistance"):
+        for container in (result, features, components):
+            if isinstance(container, dict) and key in container:
+                try:
+                    v = float(container.get(key))
+                    if v > 0:
+                        high_candidates.append(v)
+                except Exception:
+                    pass
+
+    if low_candidates and high_candidates:
+        return max([x for x in low_candidates if x < price] or low_candidates), min([x for x in high_candidates if x > price] or high_candidates)
+
+    ret_1h = abs(_extract_feature_number(result, ["ret_1h", "return_1h"], 0.0))
+    ret_15m = abs(_extract_feature_number(result, ["ret_15m", "return_15m"], 0.0))
+    proxy_band_pct = clamp(max(ret_1h, ret_15m, 1.0) / 100.0, 0.008, 0.06)
+    return price * (1 - proxy_band_pct), price * (1 + proxy_band_pct)
+
+
+def liquidation_cluster_proxy(result: dict) -> dict:
+    """Proxy liquidation cluster radar.
+
+    Without real heatmap data, we estimate likely liquidation magnets using:
+      - nearest swing low/high
+      - round levels
+      - recent momentum / volume / funding / basis
+      - relative position of upside/downside clusters
+    """
+    if not LIQ_CLUSTER_RADAR_ENABLED:
+        return {"enabled": False, "mode": "DISABLED", "symbol": result.get("symbol"), "bias": "DISABLED"}
+
+    symbol = result.get("symbol", "-")
+    group = str(result.get("group", COINS.get(symbol, "CORE")) or "CORE").upper()
+    price = float(result.get("price") or result.get("last_price") or result.get("close") or 0.0)
+    if price <= 0:
+        # fallback to trade plan entry if present
+        price = float((result.get("trade_plan") or {}).get("reference_entry") or 0.0)
+
+    if price <= 0:
+        return {"enabled": True, "mode": "PROXY", "symbol": symbol, "bias": "UNKNOWN", "reason": "price unavailable"}
+
+    swing_low, swing_high = _swing_proxy_levels(result, price)
+    round_low, round_high = _nearest_round_levels(price)
+
+    # Weighted proxy level: actual swing levels matter more than round levels.
+    lower_cluster = (
+        swing_low * LIQ_CLUSTER_SWING_LEVEL_WEIGHT
+        + round_low * LIQ_CLUSTER_ROUND_LEVEL_WEIGHT
+    ) / max(LIQ_CLUSTER_SWING_LEVEL_WEIGHT + LIQ_CLUSTER_ROUND_LEVEL_WEIGHT, 0.0001)
+
+    upper_cluster = (
+        swing_high * LIQ_CLUSTER_SWING_LEVEL_WEIGHT
+        + round_high * LIQ_CLUSTER_ROUND_LEVEL_WEIGHT
+    ) / max(LIQ_CLUSTER_SWING_LEVEL_WEIGHT + LIQ_CLUSTER_ROUND_LEVEL_WEIGHT, 0.0001)
+
+    below_pct = pct(lower_cluster, price)
+    above_pct = pct(upper_cluster, price)
+
+    ret_15m = _extract_feature_number(result, ["ret_15m", "return_15m"], 0.0)
+    ret_1h = _extract_feature_number(result, ["ret_1h", "return_1h"], 0.0)
+    volume_ratio = _extract_feature_number(result, ["volume_ratio", "vol_ratio"], 1.0)
+    funding = _extract_feature_number(result, ["funding_rate", "funding", "funding_pct"], 0.0)
+    basis = _extract_feature_number(result, ["basis_pct", "basis"], 0.0)
+    spread_bps = _extract_feature_number(result, ["spread_bps", "spread"], 0.0)
+
+    # Score likely long liquidation below:
+    # recent upward move + volume + positive funding means late longs may sit below.
+    long_liq_below_score = 0.0
+    if below_pct < 0:
+        long_liq_below_score += clamp((LIQ_CLUSTER_NEAR_PCT - abs(below_pct)) / LIQ_CLUSTER_NEAR_PCT * 35.0, 0.0, 35.0)
+    if ret_15m > 0 or ret_1h > 0:
+        long_liq_below_score += clamp(max(ret_15m * 3.0, ret_1h * 1.5), 0.0, 20.0)
+    if volume_ratio > 1.5:
+        long_liq_below_score += clamp((volume_ratio - 1.5) * 8.0, 0.0, 20.0)
+    if funding > 0:
+        long_liq_below_score += clamp(funding * 100.0, 0.0, 15.0)
+    if basis > 0.15:
+        long_liq_below_score += 5.0
+
+    # Score likely short liquidation above:
+    # nearby upside level + rising price can create squeeze magnet.
+    short_liq_above_score = 0.0
+    if above_pct > 0:
+        short_liq_above_score += clamp((LIQ_CLUSTER_NEAR_PCT - abs(above_pct)) / LIQ_CLUSTER_NEAR_PCT * 35.0, 0.0, 35.0)
+    if ret_15m > 0 or ret_1h > 0:
+        short_liq_above_score += clamp(max(ret_15m * 2.5, ret_1h * 1.25), 0.0, 20.0)
+    if volume_ratio > 1.3:
+        short_liq_above_score += clamp((volume_ratio - 1.3) * 7.0, 0.0, 20.0)
+    if funding <= 0.08:
+        short_liq_above_score += 8.0
+    if spread_bps <= float(SPREAD_LIMITS.get(group, 25)):
+        short_liq_above_score += 5.0
+
+    long_liq_below_score = clamp(long_liq_below_score, 0.0, 100.0)
+    short_liq_above_score = clamp(short_liq_above_score, 0.0, 100.0)
+
+    sweep_reclaim = (
+        ret_15m < 0
+        and ret_1h <= 0
+        and _extract_feature_number(result, ["ret_5m", "return_5m"], 0.0) > 0
+        and volume_ratio >= 1.5
+        and spread_bps <= float(SPREAD_LIMITS.get(group, 25)) * 1.2
+    )
+
+    if sweep_reclaim:
+        bias = "SWEEP_RECLAIM_RADAR"
+        action = "WAIT_TRIGGER_AFTER_RECLAIM"
+        adjustment = LIQ_CLUSTER_SWEEP_RECLAIM_BONUS
+        reason = "Downside sweep/reclaim proxy detected."
+    elif below_pct < 0 and abs(below_pct) <= LIQ_CLUSTER_DOWNSIDE_SWEEP_WARN_PCT and long_liq_below_score > short_liq_above_score:
+        bias = "DOWNSIDE_LONG_SWEEP_RISK"
+        action = "WAIT_SWEEP_RECLAIM"
+        adjustment = -LIQ_CLUSTER_LONG_SWEEP_PENALTY
+        reason = "Nearest downside long-liq proxy is close; long should wait for sweep/reclaim."
+    elif above_pct > 0 and abs(above_pct) <= LIQ_CLUSTER_UPSIDE_MAGNET_WARN_PCT and short_liq_above_score >= long_liq_below_score:
+        bias = "UPSIDE_SHORT_LIQ_MAGNET"
+        action = "LONG_RADAR_SUPPORT"
+        adjustment = LIQ_CLUSTER_SHORT_MAGNET_BONUS
+        reason = "Upside short-liq proxy is close; potential squeeze magnet."
+    else:
+        bias = "BALANCED"
+        action = "NEUTRAL"
+        adjustment = 0.0
+        reason = "No dominant nearby liquidation proxy."
+
+    return {
+        "enabled": True,
+        "mode": "PROXY",
+        "symbol": symbol,
+        "group": group,
+        "price": price,
+        "lower_cluster": round(lower_cluster, 8),
+        "upper_cluster": round(upper_cluster, 8),
+        "nearest_long_liq_below_pct": round(below_pct, 4),
+        "nearest_short_liq_above_pct": round(above_pct, 4),
+        "long_liq_below_score": round(long_liq_below_score, 2),
+        "short_liq_above_score": round(short_liq_above_score, 2),
+        "bias": bias,
+        "action": action,
+        "long_quality_adjustment": round(adjustment, 2),
+        "sweep_reclaim": bool(sweep_reclaim),
+        "reason": reason,
+    }
+
+
+def attach_liquidation_cluster_radar(results: list[dict]) -> None:
+    for r in results:
+        if isinstance(r, dict):
+            r["liquidation_cluster_radar"] = liquidation_cluster_proxy(r)
+
+
+def _best_liquidation_cluster_result(results: list[dict]) -> Optional[dict]:
+    attach_liquidation_cluster_radar(results)
+    candidates = [
+        r for r in results
+        if r.get("symbol") != "BTCUSDT"
+    ]
+    if not candidates:
+        return None
+
+    def rank(x: dict) -> float:
+        c = x.get("liquidation_cluster_radar") or {}
+        return max(float(c.get("long_liq_below_score", 0) or 0), float(c.get("short_liq_above_score", 0) or 0))
+
+    return sorted(candidates, key=rank, reverse=True)[0]
+
+
+def format_liquidation_cluster_report(results: list[dict]) -> list[str]:
+    best = _best_liquidation_cluster_result(results)
+    if not best:
+        return ["🧲 LIQUIDATION CLUSTER RADAR", "• Veri yok"]
+
+    c = best.get("liquidation_cluster_radar") or {}
+    symbol = c.get("symbol", best.get("symbol", "-"))
+    bias = c.get("bias", "-")
+    action = c.get("action", "-")
+    below = float(c.get("nearest_long_liq_below_pct", 0) or 0)
+    above = float(c.get("nearest_short_liq_above_pct", 0) or 0)
+
+    if bias == "DOWNSIDE_LONG_SWEEP_RISK":
+        yorum = "Aşağıdaki long liquidation proxy daha yakın. Long için acele etme; sweep/reclaim bekle."
+    elif bias == "UPSIDE_SHORT_LIQ_MAGNET":
+        yorum = "Yukarıdaki short liquidation proxy daha yakın. Trend ve execution uygunsa long radar desteklenebilir."
+    elif bias == "SWEEP_RECLAIM_RADAR":
+        yorum = "Temizlik sonrası reclaim ihtimali var. Long trigger güçlenebilir ama teyit beklenmeli."
+    else:
+        yorum = "Yakın likidasyon proxy dengeli; diğer sinyal kapıları belirleyici."
+
+    return [
+        "🧲 LIQUIDATION CLUSTER RADAR",
+        f"Coin: {symbol}",
+        "",
+        "Yakın kümeler:",
+        f"• Aşağı long liquidation proxy: {below:+.2f}% {'⚠️' if abs(below) <= LIQ_CLUSTER_DOWNSIDE_SWEEP_WARN_PCT else ''}",
+        f"• Yukarı short liquidation proxy: {above:+.2f}% {'🟢' if abs(above) <= LIQ_CLUSTER_UPSIDE_MAGNET_WARN_PCT else ''}",
+        "",
+        f"Bias: {bias}",
+        f"Action: {action}",
+        "",
+        "Yorum:",
+        f"• {yorum}",
+    ]
+
+
+# ============================================================
+# LIQUIDATION HUNT DEFENSE ENGINE v1
+# ============================================================
+
+def liquidation_hunt_defense(result: dict) -> dict:
+    """Detect likely long-liquidation hunt / stop-cleanout risk.
+
+    This is a defense module:
+    - It never creates a trade by itself.
+    - It can downgrade confluence.
+    - It can block a trade in ACCE gate.
+    - It can identify sweep-reclaim situations as radar-positive but still waits for trigger.
+    """
+    if not LIQ_HUNT_DEFENSE_ENABLED:
+        return {"enabled": False, "action": "DISABLED", "score": 0.0, "reasons": []}
+
+    symbol = result.get("symbol", "-")
+    group = str(result.get("group", COINS.get(symbol, "CORE")) or "CORE").upper()
+
+    ret_5m = _extract_feature_number(result, ["ret_5m", "return_5m"], 0.0)
+    ret_15m = _extract_feature_number(result, ["ret_15m", "return_15m"], 0.0)
+    ret_1h = _extract_feature_number(result, ["ret_1h", "return_1h"], 0.0)
+    volume_ratio = _extract_feature_number(result, ["volume_ratio", "vol_ratio"], 1.0)
+    spread_bps = _extract_feature_number(result, ["spread_bps", "spread"], 0.0)
+    funding = _extract_feature_number(result, ["funding_rate", "funding", "funding_pct"], 0.0)
+    basis = _extract_feature_number(result, ["basis_pct", "basis"], 0.0)
+
+    entry = float((result.get("trade_plan") or {}).get("reference_entry") or result.get("price") or result.get("last_price") or 0.0)
+    stop = float((result.get("trade_plan") or {}).get("stop_price") or 0.0)
+    stop_pct = abs(entry - stop) / entry * 100.0 if entry and stop else 0.0
+
+    late_status = str(((result.get("long_setup") or {}).get("late_entry") or {}).get("status", ""))
+    fomo_state = str((result.get("rational_fomo") or rational_fomo_score(result)).get("state", ""))
+    htf_mode = str((result.get("htf_ema21") or htf_ema21_context_for_result(result)).get("mode", ""))
+    exec_status = _safe_get(result, ["execution_quality", "status"], "-")
+
+    spread_limit = float(SPREAD_LIMITS.get(group, SPREAD_LIMITS.get("HIGH_BETA", 25))) * LIQ_HUNT_SPREAD_MULTIPLIER
+
+    score = 0.0
+    reasons: list[str] = []
+    blockers: list[str] = []
+    mitigants: list[str] = []
+
+    # Crowd/FOMO/late-entry risk.
+    if ret_15m >= LIQ_HUNT_EXTREME_RET_15M:
+        score += 14
+        reasons.append(f"15m hareket hızlı: {ret_15m:+.2f}%")
+    if ret_1h >= LIQ_HUNT_EXTREME_RET_1H:
+        score += 14
+        reasons.append(f"1h hareket hızlı: {ret_1h:+.2f}%")
+    if volume_ratio >= LIQ_HUNT_VOLUME_SPIKE:
+        score += 12
+        reasons.append(f"hacim spike yüksek: {volume_ratio:.2f}x")
+    if late_status in {"WAIT_PULLBACK", "WAIT_RETEST", "CHASE_RISK"}:
+        score += 14
+        reasons.append(f"geç giriş / retest bekleniyor: {late_status}")
+    if fomo_state == "FOMO_CHASE_RISK":
+        score += 18
+        blockers.append("FOMO_CHASE_RISK: kalabalığı kovalamak yasak")
+    elif fomo_state == "FOMO_ACCELERATING":
+        score += 9
+        reasons.append("FOMO hızlanıyor; sweep riski artıyor")
+
+    # Funding/basis crowding proxy.
+    if funding >= LIQ_HUNT_FUNDING_EXTREME:
+        score += 18
+        blockers.append(f"funding aşırı pozitif: {funding:.4f}")
+    elif funding >= LIQ_HUNT_FUNDING_CROWDED:
+        score += 10
+        reasons.append(f"funding long tarafı pahalı: {funding:.4f}")
+    if abs(basis) >= 0.35:
+        score += 8
+        reasons.append(f"basis ayrışması yüksek: {basis:+.3f}%")
+
+    # Execution / microstructure.
+    if spread_bps > spread_limit:
+        score += 12
+        reasons.append(f"spread geniş: {spread_bps:.1f}bps > limit {spread_limit:.1f}bps")
+    if exec_status in {"WARN", "BLOCKED", "BLOCK"}:
+        score += 10
+        reasons.append(f"execution kalitesi zayıf: {exec_status}")
+
+    # Stop quality / obvious stop proxy.
+    if stop_pct and stop_pct <= LIQ_HUNT_STOP_TOO_TIGHT_PCT:
+        score += 10
+        reasons.append(f"stop çok dar / avlanabilir: %{stop_pct:.2f}")
+
+    # Coin class risk.
+    if group == "MEME":
+        score += 10
+        reasons.append("MEME coin: likidasyon avı riski doğal olarak yüksek")
+    elif group == "HIGH_BETA":
+        score += 6
+        reasons.append("HIGH_BETA coin: volatilite/temizlik riski yüksek")
+
+    # HTF trend weak -> cleanout risk higher for longs.
+    if htf_mode == "LONG_RESTRICTED":
+        score += 10
+        reasons.append("HTF EMA21 long için zayıf")
+    elif htf_mode == "RADAR_ONLY":
+        score += 5
+        reasons.append("HTF trend radar-only modunda")
+
+    # Sweep reclaim proxy: short-term recovery after negative 15m/1h and volume.
+    sweep_reclaim = (
+        ret_5m > 0
+        and (ret_15m < 0 or ret_1h < 0)
+        and volume_ratio >= max(1.5, _surge_min_volume_for_group(group) * 0.8)
+        and spread_bps <= spread_limit
+    )
+    if sweep_reclaim:
+        score = max(0.0, score - 18)
+        mitigants.append("sweep sonrası reclaim ihtimali: kısa vade toparlıyor, spread normal")
+
+    score = clamp(score, 0.0, 100.0)
+
+    if sweep_reclaim and score <= LIQ_HUNT_SWEEP_RECLAIM_MAX_RISK:
+        action = "SWEEP_RECLAIM_RADAR"
+        state = "🟢 SWEEP RECLAIM"
+    elif score >= LIQ_HUNT_BLOCK_SCORE or blockers:
+        action = "BLOCK"
+        state = "🔴 BLOCK"
+    elif score >= LIQ_HUNT_WARN_SCORE:
+        action = "WARN"
+        state = "🟡 DİKKAT"
+    else:
+        action = "PASS"
+        state = "🟢 NORMAL"
+
+    return {
+        "enabled": True,
+        "symbol": symbol,
+        "group": group,
+        "score": round(score, 2),
+        "action": action,
+        "state": state,
+        "reasons": reasons,
+        "blockers": blockers,
+        "mitigants": mitigants,
+        "metrics": {
+            "ret_5m": round(ret_5m, 4),
+            "ret_15m": round(ret_15m, 4),
+            "ret_1h": round(ret_1h, 4),
+            "volume_ratio": round(volume_ratio, 3),
+            "spread_bps": round(spread_bps, 4),
+            "funding": round(funding, 6),
+            "basis_pct": round(basis, 5),
+            "stop_pct": round(stop_pct, 3),
+            "late_status": late_status,
+            "fomo_state": fomo_state,
+            "htf_mode": htf_mode,
+        },
+    }
+
+
+def attach_liquidation_hunt_defense(results: list[dict]) -> None:
+    for r in results:
+        if isinstance(r, dict):
+            r["liquidation_hunt_defense"] = liquidation_hunt_defense(r)
+
+
+def _best_liq_hunt_result(results: list[dict]) -> Optional[dict]:
+    attach_liquidation_hunt_defense(results)
+    candidates = [
+        r for r in results
+        if (r.get("long_setup") or {}).get("state") not in {None, "NO_LONG_SETUP", "DISABLED"}
+        or (r.get("volume_surge_radar") or {}).get("state") not in {None, "NO_ATTACK_RADAR", "DISABLED"}
+        or (r.get("rational_fomo") or {}).get("state") not in {None, "NO_FOMO", "DISABLED"}
+    ]
+    if not candidates:
+        candidates = [r for r in results if r.get("symbol") != "BTCUSDT"]
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda x: float((x.get("liquidation_hunt_defense") or {}).get("score", 0) or 0),
+        reverse=True,
+    )[0]
+
+
+def format_liquidation_hunt_report(results: list[dict]) -> list[str]:
+    best = _best_liq_hunt_result(results)
+    if not best:
+        return ["🛡 LIQUIDATION HUNT DEFENSE", "• Veri yok"]
+
+    d = best.get("liquidation_hunt_defense") or {}
+    symbol = d.get("symbol", best.get("symbol", "-"))
+    score = float(d.get("score", 0) or 0)
+    action = d.get("action", "-")
+    state = d.get("state", "-")
+    reasons = d.get("reasons") or []
+    blockers = d.get("blockers") or []
+    mitigants = d.get("mitigants") or []
+
+    if action == "BLOCK":
+        karar = "Trade açma. Retest / sweep / reclaim bekle. Kaldıraç artırma yok."
+    elif action == "WARN":
+        karar = "Risk yüksek; position size küçült, scale-in kapalı, daha iyi giriş bekle."
+    elif action == "SWEEP_RECLAIM_RADAR":
+        karar = "Temizlik sonrası reclaim ihtimali var; long radar güçlenebilir ama trigger bekle."
+    else:
+        karar = "Likidasyon avı riski normal; diğer kapıları izle."
+
+    lines = [
+        "🛡 LIQUIDATION HUNT DEFENSE",
+        f"• Coin: {symbol}",
+        f"• Durum: {state}",
+        f"• Risk Score: {score:.2f} / 100",
+        f"• Aksiyon sınıfı: {action}",
+        "",
+        "Neden risk var?",
+    ]
+    if blockers:
+        lines.extend([f"🔴 {x}" for x in blockers[:4]])
+    if reasons:
+        lines.extend([f"⚠️ {x}" for x in reasons[:5]])
+    if not blockers and not reasons:
+        lines.append("• Belirgin likidasyon avı riski yok.")
+
+    if mitigants:
+        lines.extend(["", "Olumlu / hafifletici unsurlar"])
+        lines.extend([f"✅ {x}" for x in mitigants[:3]])
+
+    lines.extend([
+        "",
+        "Bot kararı",
+        f"• {karar}",
+    ])
+    return lines
+
+
+def format_htf_ema21_report(results: list[dict]) -> list[str]:
+    best = _best_htf_context_result(results)
+    btc_ctx = _single_weekly_ema21_context("BTCUSDT")
+    if not best:
+        return ["📐 HAFTALIK TREND FİLTRESİ", "• Veri yok"]
+
+    htf = best.get("htf_ema21") or {}
+    coin = htf.get("coin") or {}
+    symbol = best.get("symbol", "-")
+    mode = htf.get("mode", "-")
+    score = float(htf.get("score", 0) or 0)
+
+    def state_line(ctx: dict) -> str:
+        state = ctx.get("state", "-")
+        slope = float(ctx.get("slope_pct", 0) or 0)
+        dist = float(ctx.get("distance_pct", 0) or 0)
+        return f"{state} | eğim {slope:+.2f}% | mesafe {dist:+.2f}%"
+
+    if mode == "LONG_SUPPORTED":
+        comment = "Büyük resim long tarafını destekliyor."
+    elif mode == "LONG_OK":
+        comment = "Büyük trend nötr-pozitif; trade için diğer kapılar önemli."
+    elif mode == "RADAR_ONLY":
+        comment = "Haftalık trend zayıf/nötr; sinyal radar olarak kalmalı."
+    else:
+        comment = "Haftalık trend long için zayıf; yüksek beta/meme longları kısıtlı."
+
+    return [
+        "📐 HAFTALIK TREND FİLTRESİ",
+        f"• BTC Weekly EMA21: {state_line(btc_ctx)}",
+        f"• {symbol} Weekly EMA21: {state_line(coin)}",
+        f"• HTF Trend Score: {score:.2f} / 100",
+        f"• Mod: {mode}",
+        f"• Long confluence etkisi: {float(htf.get('confluence_adjustment', 0) or 0):+.1f}",
+        f"• Risk multiplier: x{float(htf.get('risk_multiplier', 1) or 1):.2f}",
+        f"• Yorum: {comment}",
+    ]
+
 # ============================================================
 # LONG SIGNAL SENSITIVITY & QUALITY GATE v1
 # ============================================================
@@ -5242,6 +6639,39 @@ def long_confluence_score(result: dict) -> dict:
         reasons.append("exec_warn")
     elif execq.get("status") == "BLOCKED":
         reasons.append("exec_block")
+
+    # HTF EMA21 Trend Quality Filter:
+    # Weekly EMA21 never creates a signal, but adjusts quality of an existing long setup.
+    htf = htf_ema21_context_for_result(result)
+    result["htf_ema21"] = htf
+    htf_adj = float(htf.get("confluence_adjustment", 0.0) or 0.0)
+    if htf_adj:
+        score += htf_adj
+        reasons.append(f"htf_ema21_{htf_adj:+.1f}")
+
+    # Liquidation Hunt Defense:
+    # If the long looks like crowd/FOMO bait, downgrade confluence.
+    liq_defense = liquidation_hunt_defense(result)
+    result["liquidation_hunt_defense"] = liq_defense
+    if liq_defense.get("action") == "BLOCK":
+        score -= LIQ_HUNT_CONFLUENCE_PENALTY_BLOCK
+        reasons.append(f"liq_hunt_block_-{LIQ_HUNT_CONFLUENCE_PENALTY_BLOCK:.1f}")
+    elif liq_defense.get("action") == "WARN":
+        score -= LIQ_HUNT_CONFLUENCE_PENALTY_WARN
+        reasons.append(f"liq_hunt_warn_-{LIQ_HUNT_CONFLUENCE_PENALTY_WARN:.1f}")
+    elif liq_defense.get("action") == "SWEEP_RECLAIM_RADAR":
+        score += 5.0
+        reasons.append("sweep_reclaim_+5.0")
+
+    # Market Liquidation Cluster Radar:
+    # Downside long-liq cluster proximity penalizes premature longs;
+    # upside short-liq magnet or sweep-reclaim can support the radar.
+    cluster = liquidation_cluster_proxy(result)
+    result["liquidation_cluster_radar"] = cluster
+    cluster_adj = float(cluster.get("long_quality_adjustment", 0.0) or 0.0)
+    if cluster_adj:
+        score += cluster_adj
+        reasons.append(f"liq_cluster_{cluster_adj:+.1f}")
 
     # Group sensitivity: meme needs stronger confirmation for trade, but can still be setup-forming.
     if group == "MEME":
@@ -5357,8 +6787,15 @@ def apply_long_quality_gate(result: dict) -> dict:
     execq = result.get("execution_quality") or {}
     reasons: list[str] = []
 
-    if confluence < LONG_CONFLUENCE_MIN_TRADE:
-        reasons.append(f"Long confluence low: {confluence:.1f} < {LONG_CONFLUENCE_MIN_TRADE:.1f}")
+    htf = result.get("htf_ema21") or htf_ema21_context_for_result(result)
+    effective_trade_threshold = LONG_CONFLUENCE_MIN_TRADE + float(htf.get("threshold_adjustment", 0.0) or 0.0)
+    cluster = result.get("liquidation_cluster_radar") or liquidation_cluster_proxy(result)
+    if cluster.get("bias") == "DOWNSIDE_LONG_SWEEP_RISK":
+        reasons.append("Liquidation cluster radar: aşağı long liquidation proxy yakın; sweep/reclaim beklenmeli.")
+    if htf.get("mode") == "LONG_RESTRICTED":
+        reasons.append("HTF EMA21 trend long için zayıf: radar only / restricted.")
+    if confluence < effective_trade_threshold:
+        reasons.append(f"Long confluence low: {confluence:.1f} < effective threshold {effective_trade_threshold:.1f}")
 
     if late.get("status") in {"WAIT_PULLBACK", "WAIT_RETEST"}:
         reasons.append(late.get("reason", "late entry / retest wait"))
@@ -7201,6 +8638,12 @@ def open_trade(result: dict, plan: dict, state_mgr: StateManager = _STATE_MGR) -
         log.info("%s trade açılmadı: %s", result.get("symbol"), reason)
         return False
 
+    post_plan_gate = acce_multi_position_expansion_gate(result, plan, state_mgr)
+    result["multi_position_gate"] = post_plan_gate
+    if not post_plan_gate.get("allowed", True):
+        log.info("%s trade açılmadı: post-plan multi-position gate: %s", result.get("symbol"), post_plan_gate.get("reason"))
+        return False
+
     trade_id = _trade_id(result["symbol"])
     trades = get_trades(state_mgr)
 
@@ -7224,6 +8667,7 @@ def open_trade(result: dict, plan: dict, state_mgr: StateManager = _STATE_MGR) -
         "leverage_policy": copy.deepcopy(plan.get("leverage_policy", {})),
         "acce_trade_brain": copy.deepcopy(plan.get("acce_trade_brain", {})),
         "acce_trade_gate": copy.deepcopy(result.get("acce_trade_gate", {})),
+        "multi_position_gate": copy.deepcopy(result.get("multi_position_gate", {})),
         "execution_quality": copy.deepcopy(plan.get("execution_quality", {})),
         "entry_engine": copy.deepcopy(plan.get("entry_engine", {})),
         "regime_commander": copy.deepcopy(plan.get("regime_commander", {})),
@@ -8999,11 +10443,34 @@ def bot_decision_summary(results: list[dict], state_mgr: StateManager = _STATE_M
     fomo_best = _best_rational_fomo_result(results)
     if fomo_best:
         fomo = fomo_best.get("rational_fomo") or {}
+        liq = liquidation_hunt_defense(fomo_best)
+        if liq.get("action") == "BLOCK":
+            return {
+                "decision": "LIQUIDATION_HUNT_BLOCK",
+                "reason": f"{liq.get('symbol')} için likidasyon avı riski yüksek | score {float(liq.get('score', 0) or 0):.2f}. Trade açma; sweep/reclaim bekle.",
+                "trade_allowed": False,
+            }
         return {
             "decision": fomo.get("state", "FOMO_BUILDING"),
             "reason": f"{fomo.get('symbol', fomo_best.get('symbol'))} rasyonel önsezi radarında | FOMO score {float(fomo.get('score', 0) or 0):.2f}. Henüz trade değil; retest/trigger bekleniyor.",
             "trade_allowed": False,
         }
+
+    cluster_best = _best_liquidation_cluster_result(results)
+    if cluster_best:
+        cluster = cluster_best.get("liquidation_cluster_radar") or {}
+        if cluster.get("bias") == "DOWNSIDE_LONG_SWEEP_RISK":
+            return {
+                "decision": "WAIT_SWEEP_RECLAIM",
+                "reason": f"{cluster.get('symbol')} için aşağı long liquidation proxy daha yakın. Long için sweep/reclaim beklenmeli.",
+                "trade_allowed": False,
+            }
+        if cluster.get("bias") == "UPSIDE_SHORT_LIQ_MAGNET":
+            return {
+                "decision": "SHORT_LIQ_MAGNET_WATCH",
+                "reason": f"{cluster.get('symbol')} için yukarı short liquidation proxy yakın. Long radar desteklenebilir ama trigger bekleniyor.",
+                "trade_allowed": False,
+            }
 
     if open_count > 0:
         return {"decision": "MANAGE POSITIONS", "reason": "Açık pozisyonlar yönetiliyor; yeni kaliteli setup yok.", "trade_allowed": False}
@@ -9524,6 +10991,8 @@ def format_human_heartbeat(
         action_line = "Coin atak radarında; trade açma, retest/trigger ve ACCE trade iznini bekle."
     elif str(decision["decision"]).startswith("FOMO_"):
         action_line = "Rasyonel önsezi aktif; FOMO’ya kapılma, retest/trigger ve ACCE onayı bekle."
+    elif decision["decision"] == "LIQUIDATION_HUNT_BLOCK":
+        action_line = "Likidasyon avı riski yüksek; trade açma, sweep/reclaim ve yeni trigger bekle."
     elif decision["decision"] in {"WAIT", "LONG SETUP WATCH"}:
         action_line = "Bot izliyor; uygun setup oluşursa ACCE Trade Brain değerlendirecek."
     else:
@@ -9551,11 +11020,19 @@ def format_human_heartbeat(
         "",
     ]
 
+    lines.extend(format_htf_ema21_report(results))
+    lines.extend([""])
     lines.extend(format_long_radar_explanation(results))
     lines.extend([""])
     lines.extend(format_attack_radar_explanation(results))
     lines.extend([""])
     lines.extend(format_rational_fomo_warning(results))
+    lines.extend([""])
+    lines.extend(format_liquidation_hunt_report(results))
+    lines.extend([""])
+    lines.extend(format_liquidation_cluster_report(results))
+    lines.extend([""])
+    lines.extend(format_multi_position_gate_report(results, state_mgr))
 
     lines.extend([
         "",
@@ -9565,6 +11042,7 @@ def format_human_heartbeat(
         f"• Drawdown: %{dd * 100:.2f}",
         f"• Loss Streak: {loss_streak}",
         f"• Risk Modu: {rg.get('mode', '-')}",
+        f"• {acce_account_sizing_brief()}",
         "",
         "🧠 ÖĞRENME MOTORU",
         f"• Durum: {learning_status}",
@@ -9642,7 +11120,9 @@ def format_trade_open_msg(t: dict) -> str:
         "💰 RİSK",
         f"Notional: {format_money(t.get('position_notional'))}",
         f"Risk: %{float(t.get('risk_pct', 0) or 0) * 100:.2f} = {format_money(t.get('risk_amount'))}",
-        f"Collateral: {acce.get('collateral_asset', ACCE_COLLATERAL_ASSET)}",
+        f"Collateral: {acce.get('collateral_asset', ACCE_COLLATERAL_ASSET)} | Available: {format_money(acce.get('available_collateral_usd'))}",
+        f"Leverage: effective {float(acce.get('effective_portfolio_leverage', 0) or 0):.2f}x | exchange öneri {float(acce.get('recommended_exchange_leverage', 0) or 0):.2f}x",
+        f"Approx Liq: {format_price(acce.get('approx_liquidation_price'))} | Liq/Stop {float(acce.get('liq_to_stop_ratio', 0) or 0):.2f} | {acce.get('liq_safety', '-')}",
         f"ACCE State: {pm.get('acce_state', 'OPEN_RISK')}",
         "",
         "✅ GEREKÇE",

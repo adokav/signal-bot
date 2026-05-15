@@ -39,3 +39,9 @@ services:
         value: "1"
       - key: LONG_MEME_MIN_VOLUME_RATIO
         value: "1.8"
+
+# Sprint 17 additional env:
+# ACCE_MULTI_POSITION_ENABLED=1
+# ACCE_ALLOW_SECOND_WITH_SAFE_STOP=1
+# ACCE_MAX_ACTIVE_POSITIONS=4
+# ACCE_MAX_OPEN_RISK_POSITIONS=2
