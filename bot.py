@@ -246,6 +246,7 @@ TELEGRAM_COMMANDS_ENABLED = os.getenv("TELEGRAM_COMMANDS_ENABLED", "1") == "1"
 TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS = env_int(
     "TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS", 60, min_value=10
 )
+REQUIRE_TRADE_APPROVAL = os.getenv("REQUIRE_TRADE_APPROVAL", "1") == "1"
 PARAMETER_SUGGESTION_MIN_CONFIDENCE = env_float(
     "PARAMETER_SUGGESTION_MIN_CONFIDENCE", 0.45, min_value=0.0
 )
@@ -10239,6 +10240,83 @@ def _extract_command_text(update: dict) -> tuple[Optional[str], Optional[str]]:
     return str(chat_id), text
 
 
+def _pending_trade_approvals(state_mgr: StateManager) -> dict:
+    pending = state_mgr.get_meta("pending_trade_approvals", {})
+    return pending if isinstance(pending, dict) else {}
+
+
+def _save_pending_trade_approvals(state_mgr: StateManager, pending: dict) -> None:
+    state_mgr.set_meta("pending_trade_approvals", pending)
+
+
+def queue_trade_for_approval(result: dict, plan: dict, state_mgr: StateManager = _STATE_MGR) -> str:
+    pending = _pending_trade_approvals(state_mgr)
+    symbol = str(result.get("symbol") or "?")
+    approval_id = f"TRD-{symbol}-{now_ts()}"
+    pending[approval_id] = {
+        "id": approval_id,
+        "status": "PENDING",
+        "created_at": now_ts(),
+        "created_at_tr": tr_now_text(),
+        "symbol": symbol,
+        "signal": result.get("signal"),
+        "entry": float(plan.get("entry", 0) or 0),
+        "stop": float(plan.get("stop", 0) or 0),
+        "tp1": float(plan.get("tp1", 0) or 0),
+        "tp2": float(plan.get("tp2", 0) or 0),
+        "risk_amount": float(plan.get("risk_amount", 0) or 0),
+        "position_notional": float(plan.get("position_notional", 0) or 0),
+        "result": copy.deepcopy(result),
+        "plan": copy.deepcopy(plan),
+    }
+    _save_pending_trade_approvals(state_mgr, pending)
+    return approval_id
+
+
+def pending_trade_approvals_text(state_mgr: StateManager = _STATE_MGR) -> str:
+    pending = _pending_trade_approvals(state_mgr)
+    rows = [p for p in pending.values() if isinstance(p, dict) and p.get("status") == "PENDING"]
+    if not rows:
+        return "Bekleyen trade onayı yok."
+    rows.sort(key=lambda x: int(x.get("created_at") or 0), reverse=True)
+    lines = ["🕒 Bekleyen trade onayları:"]
+    for p in rows[:10]:
+        lines.append(
+            f"• {p.get('id')} | {p.get('symbol')} {p.get('signal')} | Notional {format_money(p.get('position_notional'))} | Risk {format_money(p.get('risk_amount'))}"
+        )
+    lines.append("Komut: TRADE_ACCEPT <id> / TRADE_DECLINE <id>")
+    return "\n".join(lines)
+
+
+def approve_trade_suggestion(approval_id: str, state_mgr: StateManager = _STATE_MGR) -> str:
+    pending = _pending_trade_approvals(state_mgr)
+    p = pending.get(approval_id)
+    if not isinstance(p, dict):
+        return f"{approval_id} bulunamadı."
+    if p.get("status") != "PENDING":
+        return f"{approval_id} zaten {p.get('status')} durumunda."
+    ok = open_trade(p.get("result") or {}, p.get("plan") or {}, state_mgr)
+    if not ok:
+        return f"{approval_id} onaylandı ama trade açılamadı (gate/limit)."
+    p["status"] = "APPROVED"
+    p["approved_at"] = now_ts()
+    _save_pending_trade_approvals(state_mgr, pending)
+    return f"✅ APPROVED {approval_id}"
+
+
+def decline_trade_suggestion(approval_id: str, state_mgr: StateManager = _STATE_MGR) -> str:
+    pending = _pending_trade_approvals(state_mgr)
+    p = pending.get(approval_id)
+    if not isinstance(p, dict):
+        return f"{approval_id} bulunamadı."
+    if p.get("status") != "PENDING":
+        return f"{approval_id} zaten {p.get('status')} durumunda."
+    p["status"] = "DECLINED"
+    p["declined_at"] = now_ts()
+    _save_pending_trade_approvals(state_mgr, pending)
+    return f"❌ DECLINED {approval_id}"
+
+
 def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
     """Poll Telegram commands for ACCEPT / DECLINE / PENDING.
 
@@ -10269,6 +10347,12 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
             send_message(decline_parameter_suggestion(parts[1], actor="telegram"))
         elif cmd in ("ACCEPT", "DECLINE"):
             send_message("Kullanım: ACCEPT <suggestion_id> veya DECLINE <suggestion_id>")
+        elif cmd == "TRADE_PENDING":
+            send_message(pending_trade_approvals_text(state_mgr))
+        elif cmd == "TRADE_ACCEPT" and len(parts) >= 2:
+            send_message(approve_trade_suggestion(parts[1], state_mgr))
+        elif cmd == "TRADE_DECLINE" and len(parts) >= 2:
+            send_message(decline_trade_suggestion(parts[1], state_mgr))
 
 def _process_news_cycle(state_mgr: StateManager, current_news: dict) -> dict:
     """News taraması ve alert gönderim döngüsü.
@@ -10351,7 +10435,17 @@ def _process_symbol(
 
         plan = build_trade_plan(result)
         if plan and result.get("signal") in ("LONG", "SHORT") and result.get("actionable", True):
-            open_trade(result, plan, state_mgr)
+            if REQUIRE_TRADE_APPROVAL:
+                approval_id = queue_trade_for_approval(result, plan, state_mgr)
+                send_message(
+                    f"📝 Trade önerisi onay bekliyor: {approval_id}\n"
+                    f"{result.get('symbol')} {result.get('signal')} | Entry {plan.get('entry')} | Stop {plan.get('stop')} | "
+                    f"TP1 {plan.get('tp1')} | TP2 {plan.get('tp2')}\n"
+                    f"Notional {format_money(plan.get('position_notional'))} | Risk {format_money(plan.get('risk_amount'))}\n"
+                    "Komut: TRADE_ACCEPT <id> / TRADE_DECLINE <id>"
+                )
+            else:
+                open_trade(result, plan, state_mgr)
 
         state_mgr.update_symbol(symbol, {
             "signal": result["signal"],
