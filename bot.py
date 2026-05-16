@@ -181,6 +181,7 @@ COINS: dict[str, str] = {
     "PYTHUSDT": "HIGH_BETA",
 
     "BONKUSDT": "MEME",
+    "WIFUSDT": "MEME",
     "POPCATUSDT": "MEME",
 }
 
@@ -280,6 +281,14 @@ POSITION_SIZING_MIN_EDGE_TRADES = env_int("POSITION_SIZING_MIN_EDGE_TRADES", 6, 
 POSITION_SIZING_LOOKBACK_TRADES = env_int("POSITION_SIZING_LOOKBACK_TRADES", 60, min_value=10)
 POSITION_SIZING_LOSS_STREAK_CUT_1 = env_int("POSITION_SIZING_LOSS_STREAK_CUT_1", 2, min_value=1)
 POSITION_SIZING_LOSS_STREAK_CUT_2 = env_int("POSITION_SIZING_LOSS_STREAK_CUT_2", 3, min_value=2)
+POSITION_SIZING_KELLY_ENABLED = os.getenv("POSITION_SIZING_KELLY_ENABLED", "1") == "1"
+POSITION_SIZING_KELLY_FRACTION = env_float("POSITION_SIZING_KELLY_FRACTION", 0.30, min_value=0.0)
+POSITION_SIZING_KELLY_CAP_MULTIPLIER = env_float("POSITION_SIZING_KELLY_CAP_MULTIPLIER", 1.20, min_value=0.1)
+POSITION_SIZING_RUIN_GUARD_ENABLED = os.getenv("POSITION_SIZING_RUIN_GUARD_ENABLED", "1") == "1"
+POSITION_SIZING_RUIN_GUARD_DD1_PCT = env_float("POSITION_SIZING_RUIN_GUARD_DD1_PCT", 0.12, min_value=0.01)
+POSITION_SIZING_RUIN_GUARD_DD2_PCT = env_float("POSITION_SIZING_RUIN_GUARD_DD2_PCT", 0.20, min_value=0.02)
+POSITION_SIZING_RUIN_GUARD_DD1_MULT = env_float("POSITION_SIZING_RUIN_GUARD_DD1_MULT", 0.75, min_value=0.0)
+POSITION_SIZING_RUIN_GUARD_DD2_MULT = env_float("POSITION_SIZING_RUIN_GUARD_DD2_MULT", 0.45, min_value=0.0)
 
 # Regime Commander + Entry + Strategy Simulation
 REGIME_COMMANDER_ENABLED = os.getenv("REGIME_COMMANDER_ENABLED", "1") == "1"
@@ -3106,6 +3115,41 @@ def _ps_loss_streak_multiplier(streak: int) -> float:
     return 1.0
 
 
+def _ps_ruin_guard_multiplier(equity_now: float, equity_peak: float) -> tuple[float, str]:
+    if not POSITION_SIZING_RUIN_GUARD_ENABLED or equity_peak <= 0:
+        return 1.0, "Ruin guard nötr."
+    dd = max(0.0, (equity_peak - equity_now) / max(equity_peak, 1e-9))
+    if dd >= POSITION_SIZING_RUIN_GUARD_DD2_PCT:
+        return clamp(POSITION_SIZING_RUIN_GUARD_DD2_MULT, 0.0, 1.0), f"DD %{dd*100:.2f} (seviye2)."
+    if dd >= POSITION_SIZING_RUIN_GUARD_DD1_PCT:
+        return clamp(POSITION_SIZING_RUIN_GUARD_DD1_MULT, 0.0, 1.0), f"DD %{dd*100:.2f} (seviye1)."
+    return 1.0, f"DD %{dd*100:.2f} (normal)."
+
+
+def _ps_kelly_cap_pct(closed: list[dict], fallback_pct: float) -> tuple[float, str]:
+    if not POSITION_SIZING_KELLY_ENABLED or len(closed) < max(POSITION_SIZING_MIN_EDGE_TRADES, 8):
+        return fallback_pct, "Kelly cap nötr (örneklem yetersiz/kapalı)."
+    rs: list[float] = []
+    for t in closed[-POSITION_SIZING_LOOKBACK_TRADES:]:
+        try:
+            rs.append(float(t.get("r_multiple", 0.0) or 0.0))
+        except Exception:
+            continue
+    if len(rs) < max(POSITION_SIZING_MIN_EDGE_TRADES, 8):
+        return fallback_pct, "Kelly cap nötr (R geçmişi yetersiz)."
+    wins = [x for x in rs if x > 0]
+    losses = [abs(x) for x in rs if x < 0]
+    if not wins or not losses:
+        return fallback_pct, "Kelly cap nötr (tek taraflı dağılım)."
+    p = len(wins) / len(rs)
+    q = 1.0 - p
+    b = max(statistics.mean(wins) / max(statistics.mean(losses), 1e-9), 1e-6)
+    f_star = (b * p - q) / b
+    f_frac = clamp(f_star * POSITION_SIZING_KELLY_FRACTION, 0.0, 1.0)
+    cap = max(POSITION_SIZING_MIN_RISK_PCT, min(fallback_pct, f_frac * POSITION_SIZING_KELLY_CAP_MULTIPLIER))
+    return cap, f"Kelly cap aktif: p={p:.2f}, b={b:.2f}, f*={f_star:.3f}, frac={f_frac:.3f}."
+
+
 def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManager = _STATE_MGR) -> dict:
     """Dynamic risk sizing for trade plan.
 
@@ -3144,6 +3188,8 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
 
     closed = _ps_closed_trades(state_mgr)
     loss_streak = _ps_loss_streak(closed)
+    equity_peak = float((state_mgr.get_meta("peak_equity_usd", equity_now) if state_mgr else equity_now) or equity_now)
+    ruin_mult, ruin_note = _ps_ruin_guard_multiplier(equity_now, equity_peak)
 
     symbol_edge = _ps_edge_for(closed, symbol=symbol, direction=signal)
     group_edge = _ps_edge_for(closed, group=group, direction=signal)
@@ -3172,17 +3218,19 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
     exec_quality = result.get("execution_quality") or {}
     exec_quality_mult = float(exec_quality.get("risk_multiplier", 1.0) or 1.0)
 
-    raw_multiplier = q_mult * c_mult * r_mult * edge_multiplier * ls_mult * rg_mult * corr_mult * regime_edge_mult * exec_quality_mult
+    raw_multiplier = q_mult * c_mult * r_mult * edge_multiplier * ls_mult * rg_mult * corr_mult * regime_edge_mult * exec_quality_mult * ruin_mult
 
     # Risk-off / chaos rejimlerinde pozisyon büyütmeyi kapat.
     # Not: Rejim isimleri detect_market_regime() ile birebir eşleşmeli.
     if regime_name in {"RISK_OFF_TREND_DOWN", "NEWS_CHAOS", "CHOP_RANGE"} or loss_streak >= POSITION_SIZING_LOSS_STREAK_CUT_2:
         raw_multiplier = min(raw_multiplier, 1.0)
 
+    kelly_cap_pct, kelly_note = _ps_kelly_cap_pct(closed, max_risk_cap)
+    dynamic_max_risk_cap = min(max_risk_cap, kelly_cap_pct)
     risk_pct = clamp(
         base_risk * raw_multiplier,
         POSITION_SIZING_MIN_RISK_PCT,
-        max_risk_cap,
+        dynamic_max_risk_cap,
     )
     risk_amount = equity_now * risk_pct
     position_notional = risk_amount / stop_pct if stop_pct > 0 else 0.0
@@ -3203,7 +3251,9 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         f"Regime edge çarpanı x{regime_edge_mult:.2f}",
         f"Execution quality çarpanı x{exec_quality_mult:.2f}",
         f"Loss streak {loss_streak} çarpanı x{ls_mult:.2f}",
+        f"Ruin guard çarpanı x{ruin_mult:.2f} ({ruin_note})",
         f"Capital ladder {ladder.get('label', '-')} üst risk limiti %{max_risk_cap*100:.2f}",
+        f"Dinamik üst limit (Kelly dahil) %{dynamic_max_risk_cap*100:.2f} ({kelly_note})",
         *edge_notes,
     ]
 
@@ -3214,6 +3264,7 @@ def compute_position_sizing(result: dict, stop_pct: float, state_mgr: StateManag
         "equity_used_usd": equity_now,
         "capital_ladder": copy.deepcopy(ladder),
         "max_risk_cap_pct": max_risk_cap,
+        "dynamic_max_risk_cap_pct": dynamic_max_risk_cap,
         "risk_pct": risk_pct,
         "risk_amount": risk_amount,
         "position_notional": position_notional,
