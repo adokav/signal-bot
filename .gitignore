@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Venvs
+venv/
+.venv/
+env/
+
+# Runtime state ve raporlar (bot.py modul yuklenirken bile yaratabilir)
+state.json
+adaptive_config.json
+weight_suggestions.json
+parameter_suggestions.json
+parameter_change_log.jsonl
+ai_signal_optimization_report.json
+backtest_validation_report.json
+execution_log.jsonl
+live_readiness_report.json
+paper_orders.jsonl
+paper_positions.json
+paper_execution_report.json
+position_management_log.jsonl
+regime_performance_dashboard.json
+risk_governor_log.jsonl
+risk_governor_report.json
+strategy_simulation_report.json
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
