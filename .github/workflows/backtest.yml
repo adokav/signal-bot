@@ -1,0 +1,71 @@
+name: Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Kac gun geri backtest et'
+        required: false
+        default: '7'
+        type: string
+      min_grade:
+        description: 'Min quality grade'
+        required: false
+        default: 'B'
+        type: choice
+        options:
+          - 'A+'
+          - 'A'
+          - 'B'
+          - 'C'
+          - 'D'
+      capital:
+        description: 'Baslangic kapital (USDT)'
+        required: false
+        default: '100'
+        type: string
+      symbols:
+        description: 'Semboller (virgul ile, bos = tum coinler)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run backtest
+        env:
+          RUN_HISTORICAL_REPLAY: '1'
+          HISTORICAL_REPLAY_DAYS: ${{ inputs.days }}
+          HISTORICAL_REPLAY_MIN_GRADE: ${{ inputs.min_grade }}
+          HISTORICAL_REPLAY_SYMBOLS: ${{ inputs.symbols }}
+          ACCOUNT_SIZE_USD: ${{ inputs.capital }}
+          TELEGRAM_BOT_TOKEN: ''
+          TELEGRAM_CHAT_ID: ''
+          TELEGRAM_COMMANDS_ENABLED: '0'
+          PYTHONUNBUFFERED: '1'
+        run: python bot.py
+
+      - name: Render summary
+        if: always()
+        run: python scripts/backtest_summary.py >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-report
+          path: historical_replay_report.json
+          retention-days: 14
