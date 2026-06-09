@@ -10468,9 +10468,61 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
             continue
 
         parts = text.strip().split()
-        cmd = parts[0].upper()
+        cmd = parts[0].lstrip("/").upper()
 
-        if cmd == "PENDING":
+        if cmd == "START":
+            send_message(
+                f"🤖 Signal Bot aktif (v{__version__})\n\n"
+                "Komutlar:\n"
+                "/status — anlık durum\n"
+                "/help — komut listesi\n"
+                "PENDING — bekleyen parametre önerisi\n"
+                "ACCEPT <id> — öneri kabul\n"
+                "DECLINE <id> — öneri red"
+            )
+        elif cmd == "HELP":
+            send_message(
+                "Komutlar:\n"
+                "/start — bot uyandır, özet\n"
+                "/status — anlık sağlık durumu\n"
+                "/help — bu mesaj\n"
+                "PENDING — bekleyen parametre önerisi\n"
+                "ACCEPT <id> — öneri kabul\n"
+                "DECLINE <id> — öneri red\n"
+                "TRADE_PENDING / TRADE_ACCEPT <id> / TRADE_DECLINE <id> — trade onay"
+            )
+        elif cmd == "STATUS":
+            snap = state_mgr.snapshot()
+            meta = snap.get("meta", {}) or {}
+            trades = snap.get("trades", {}) or {}
+            open_trades = sum(
+                1 for t in trades.values()
+                if isinstance(t, dict) and t.get("result") is None
+            )
+            last_scan = int(meta.get("last_successful_scan_ts", 0) or 0)
+            scan_age = (now_ts() - last_scan) if last_scan else None
+            failures = int(meta.get("consecutive_failures", 0) or 0)
+            regime_meta = meta.get("last_global_regime")
+            regime = regime_meta.get("regime") if isinstance(regime_meta, dict) else "?"
+            try:
+                pending = sum(
+                    1 for s in _suggestions_payload().get("suggestions", [])
+                    if isinstance(s, dict) and s.get("status") == "PENDING"
+                )
+            except Exception:
+                pending = 0
+            scan_text = f"{scan_age}s önce" if scan_age is not None else "henüz yok"
+            send_message(
+                f"📊 STATUS (v{__version__})\n\n"
+                f"Son başarılı scan: {scan_text}\n"
+                f"Açık trade: {open_trades}\n"
+                f"Rejim: {regime}\n"
+                f"Bekleyen öneri: {pending}\n"
+                f"Ardışık API hatası: {failures}\n"
+                f"Mode: {EXECUTION_MODE}\n"
+                f"Zaman: {tr_now_text()}"
+            )
+        elif cmd == "PENDING":
             send_message(pending_parameter_suggestions_text())
         elif cmd == "ACCEPT" and len(parts) >= 2:
             send_message(accept_parameter_suggestion(parts[1], actor="telegram"))
