@@ -1595,9 +1595,25 @@ def get_session_context() -> SessionContext:
 # Telegram mesaj boyut limiti: 4096 karakter
 TELEGRAM_MAX_LEN = 4000  # Güvenli pay
 
+# Sabit reply keyboard: text input altında daima gorulur, sik kullanilan
+# komutlar tek tikla erisilebilir. is_persistent=True ile kullanici manuel
+# kapatsa bile yeniden gosterilir.
+MAIN_KEYBOARD: dict[str, Any] = {
+    "keyboard": [
+        [{"text": "/status"}, {"text": "/help"}],
+        [{"text": "/pending"}, {"text": "/trade_pending"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
 
-def send_message(text: str) -> bool:
-    """Telegram mesaj gönder. Başarı durumunu döner."""
+
+def send_message(text: str, *, reply_markup: Optional[dict] = None) -> bool:
+    """Telegram mesaj gönder. Başarı durumunu döner.
+
+    reply_markup: Telegram reply_markup dict (klavye, inline button vb).
+    Verilmezse mesaj sade gönderilir.
+    """
     if not TOKEN or not CHAT_ID:
         log.warning("TOKEN veya CHAT_ID eksik, mesaj gönderilemedi.")
         return False
@@ -1607,6 +1623,8 @@ def send_message(text: str) -> bool:
 
     url = f"{TELEGRAM_BASE}/bot{TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": text}
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup)
 
     try:
         with _HTTP_SEMAPHORE:
@@ -10473,12 +10491,14 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
         if cmd == "START":
             send_message(
                 f"🤖 Signal Bot aktif (v{__version__})\n\n"
+                "Sabit klavye altta açıldı. İstediğin zaman tıkla.\n\n"
                 "Komutlar:\n"
                 "/status — anlık durum\n"
                 "/help — komut listesi\n"
                 "PENDING — bekleyen parametre önerisi\n"
                 "ACCEPT <id> — öneri kabul\n"
-                "DECLINE <id> — öneri red"
+                "DECLINE <id> — öneri red",
+                reply_markup=MAIN_KEYBOARD,
             )
         elif cmd == "HELP":
             send_message(
@@ -10489,7 +10509,8 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
                 "PENDING — bekleyen parametre önerisi\n"
                 "ACCEPT <id> — öneri kabul\n"
                 "DECLINE <id> — öneri red\n"
-                "TRADE_PENDING / TRADE_ACCEPT <id> / TRADE_DECLINE <id> — trade onay"
+                "TRADE_PENDING / TRADE_ACCEPT <id> / TRADE_DECLINE <id> — trade onay",
+                reply_markup=MAIN_KEYBOARD,
             )
         elif cmd == "STATUS":
             snap = state_mgr.snapshot()
@@ -11561,7 +11582,8 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
     """Ana bot döngüsü."""
     log.info("BOT BAŞLADI v%s", __version__)
     send_message(
-        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + MacroRisk + SignalBrain + ACCETradeBrain + StableCollateral + PaperExec + PM + RiskGov/CapitalGuard/RegimeEdge/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON"
+        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + MacroRisk + SignalBrain + ACCETradeBrain + StableCollateral + PaperExec + PM + RiskGov/CapitalGuard/RegimeEdge/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON",
+        reply_markup=MAIN_KEYBOARD,
     )
 
     state_mgr = _STATE_MGR
