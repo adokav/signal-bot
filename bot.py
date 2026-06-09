@@ -12109,6 +12109,29 @@ _SHUTDOWN_LOCK = threading.RLock()
 _SHUTDOWN_DONE = False
 
 
+def telegram_command_loop(
+    state_mgr: StateManager = _STATE_MGR,
+    stop_event: threading.Event = _STOP_EVENT,
+) -> None:
+    """Telegram komutlarini ana scan dongusunden bagimsiz olarak dinler.
+
+    bot_loop her SCAN_INTERVAL'da bir (default 300s) komutlari isliyor;
+    bu /start, /status gibi komutlarin cevap suresini 5dk'ya cikartiyor.
+    Bu thread her TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS'da bir polling
+    yaparak interaktif cevap suresini ~60s'ye dusurur. process_telegram_commands'in
+    kendi rate limit'i mukerrer cagiri sorununu zaten engelliyor.
+    """
+    log.info("Telegram command listener basladi (her %ss).", TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS)
+    while not stop_event.is_set():
+        try:
+            process_telegram_commands(state_mgr)
+        except Exception as e:
+            log.warning("Telegram command listener hatasi: %s", e)
+        if sleep_or_stop(TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS):
+            break
+    log.info("Telegram command listener durdu.")
+
+
 def shutdown_resources() -> None:
     global _SHUTDOWN_DONE
     with _SHUTDOWN_LOCK:
@@ -12154,6 +12177,8 @@ def main() -> None:
             pass
 
     threading.Thread(target=bot_loop, daemon=True, name="bot-loop").start()
+    if TELEGRAM_COMMANDS_ENABLED:
+        threading.Thread(target=telegram_command_loop, daemon=True, name="tg-cmds").start()
     app.run(host="0.0.0.0", port=PORT, use_reloader=False)
 
 
