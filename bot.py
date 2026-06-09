@@ -4516,6 +4516,61 @@ def acce_update_position_state(trade: dict, latest_result: dict, price: float) -
     return bool(reasons)
 
 
+def compute_entry_zone(
+    direction: str,
+    spot: float,
+    ema9: float,
+    ema21: float,
+    stop_pct: float,
+) -> tuple[float, float]:
+    """Pullback giris bolgesi.
+
+    LONG'da bolge spot'un ALTINDA olmali (geri cekilme); SHORT'da USTUNDE.
+    EMA9/EMA21 saglikli pullback bolgesi olusturamiyorsa stop_pct'e gore
+    synthetic zone uretilir. Returns: (zone_low, zone_high).
+    """
+    ema_low = min(ema9, ema21)
+    ema_high = max(ema9, ema21)
+    if direction == "LONG":
+        if ema_high < spot and ema_low > 0:
+            return ema_low, ema_high
+        return spot * (1 - stop_pct / 2), spot * (1 - stop_pct / 4)
+    if ema_low > spot:
+        return ema_low, ema_high
+    return spot * (1 + stop_pct / 4), spot * (1 + stop_pct / 2)
+
+
+def compute_stop_and_targets(
+    direction: str,
+    entry: float,
+    stop_pct: float,
+    cfg: dict,
+) -> tuple[float, float, float, float, float]:
+    """Sabit-R hedefleri: stop ve TP1/TP2/TP3.
+
+    Returns: (stop_price, risk_per_unit, tp1, tp2, tp3).
+    """
+    if direction == "LONG":
+        stop_price = entry * (1 - stop_pct)
+        risk_per_unit = entry - stop_price
+        return (
+            stop_price,
+            risk_per_unit,
+            entry + risk_per_unit * cfg["tp1_r"],
+            entry + risk_per_unit * cfg["tp2_r"],
+            entry + risk_per_unit * cfg["tp3_r"],
+        )
+    stop_price = entry * (1 + stop_pct)
+    risk_per_unit = stop_price - entry
+    return (
+        stop_price,
+        risk_per_unit,
+        entry - risk_per_unit * cfg["tp1_r"],
+        entry - risk_per_unit * cfg["tp2_r"],
+        entry - risk_per_unit * cfg["tp3_r"],
+    )
+
+
 def build_trade_plan(result: dict) -> Optional[dict]:
     """Sinyal varsa entry/stop/TP/pozisyon büyüklüğü planı üretir.
 
@@ -4567,43 +4622,10 @@ def build_trade_plan(result: dict) -> Optional[dict]:
     # Referans entry: sinyal anındaki spot.
     reference_entry = spot
 
-    if signal == "LONG":
-        # Pullback bölgesi: EMA9 ile EMA21 arası, spot'un altında olmalı.
-        ema_low = min(ema9, ema21)
-        ema_high = max(ema9, ema21)
-        if ema_high < spot and ema_low > 0:
-            # EMA'lar spot'un altında — sağlıklı pullback bölgesi
-            zone_low = ema_low
-            zone_high = ema_high
-        else:
-            # Synthetic zone: spot'un %0.5-1.0 altı
-            zone_high = spot * (1 - stop_pct / 4)
-            zone_low = spot * (1 - stop_pct / 2)
-
-        stop_price = reference_entry * (1 - stop_pct)
-        risk_per_unit = reference_entry - stop_price
-        tp1 = reference_entry + risk_per_unit * cfg["tp1_r"]
-        tp2 = reference_entry + risk_per_unit * cfg["tp2_r"]
-        tp3 = reference_entry + risk_per_unit * cfg["tp3_r"]
-
-    else:  # SHORT
-        # Pullback bölgesi: spot'un üstünde olmalı.
-        ema_low = min(ema9, ema21)
-        ema_high = max(ema9, ema21)
-        if ema_low > spot:
-            # EMA'lar spot'un üstünde — sağlıklı pullback bölgesi
-            zone_low = ema_low
-            zone_high = ema_high
-        else:
-            # Synthetic zone: spot'un %0.5-1.0 üstü
-            zone_low = spot * (1 + stop_pct / 4)
-            zone_high = spot * (1 + stop_pct / 2)
-
-        stop_price = reference_entry * (1 + stop_pct)
-        risk_per_unit = stop_price - reference_entry
-        tp1 = reference_entry - risk_per_unit * cfg["tp1_r"]
-        tp2 = reference_entry - risk_per_unit * cfg["tp2_r"]
-        tp3 = reference_entry - risk_per_unit * cfg["tp3_r"]
+    zone_low, zone_high = compute_entry_zone(signal, spot, ema9, ema21, stop_pct)
+    stop_price, risk_per_unit, tp1, tp2, tp3 = compute_stop_and_targets(
+        signal, reference_entry, stop_pct, cfg
+    )
 
     regime_info = result.get("regime") or {}
     tp_style = regime_info.get("tp_style") or (result.get("regime_commander", {}).get("strategy", {}) or {}).get("tp_style")
