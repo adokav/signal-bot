@@ -218,7 +218,7 @@ TELEGRAM_FORCE_HEARTBEAT_SECONDS = env_int("TELEGRAM_FORCE_HEARTBEAT_SECONDS", 0
 TELEGRAM_NOTIFY_TRADE_WORTHY_ONLY = os.getenv("TELEGRAM_NOTIFY_TRADE_WORTHY_ONLY", "1") == "1"
 
 TRADE_TRACKING_ENABLED = os.getenv("TRADE_TRACKING_ENABLED", "1") == "1"
-TRADE_OPEN_COOLDOWN_SECONDS = env_int("TRADE_OPEN_COOLDOWN_SECONDS", 4 * 60 * 60, min_value=0)
+TRADE_OPEN_COOLDOWN_SECONDS = env_int("TRADE_OPEN_COOLDOWN_SECONDS", 2 * 60 * 60, min_value=0)
 TRADE_ALERT_RETRY_SECONDS = env_int("TRADE_ALERT_RETRY_SECONDS", 5 * 60, min_value=30)
 
 # Feature Importance Analyzer v1
@@ -1147,21 +1147,21 @@ REGIME_STRATEGY_MATRIX: dict[str, dict[str, Any]] = {
         "allow_short": True,
         "high_beta_allowed": False,
         "risk_multiplier": 0.55,
-        "min_quality": "A+",
-        "quality_bonus": -10,
+        "min_quality": "A",
+        "quality_bonus": -3,
         "tp_style": "defensive",
-        "note": "Risk-off düşüş: long kapalı, sadece çok kaliteli short veya nakit.",
+        "note": "Risk-off düşüş: long kapalı, kaliteli A grade short veya nakit. Risk az.",
     },
     "CHOP_RANGE": {
-        "direction_bias": "SELECTIVE_ONLY",
+        "direction_bias": "TACTICAL_SCALP",
         "allow_long": True,
         "allow_short": True,
         "high_beta_allowed": False,
         "risk_multiplier": 0.45,
-        "min_quality": "A+",
-        "quality_bonus": -12,
+        "min_quality": "B",
+        "quality_bonus": -5,
         "tp_style": "quick_tp",
-        "note": "Chop/range: sinyal gürültüsü yüksek; A+ dışında işlem yok, risk düşük.",
+        "note": "Chop/range: taktiksel scalp; MA dizilimi + mum onayı ile her iki yön, kucuk risk, hizli TP.",
     },
     "NEWS_CHAOS": {
         "direction_bias": "NO_NEW_TRADE",
@@ -1197,15 +1197,15 @@ REGIME_STRATEGY_MATRIX: dict[str, dict[str, Any]] = {
         "note": "Long liquidation ihtimali: küçük short, hızlı kâr alma.",
     },
     "NEUTRAL": {
-        "direction_bias": "BALANCED",
+        "direction_bias": "BALANCED_TACTICAL",
         "allow_long": True,
         "allow_short": True,
         "high_beta_allowed": False,
         "risk_multiplier": 0.75,
-        "min_quality": "A",
-        "quality_bonus": -3,
+        "min_quality": "B",
+        "quality_bonus": 0,
         "tp_style": "standard",
-        "note": "Nötr rejim: sadece kaliteli setup, HIGH_BETA sınırlı.",
+        "note": "Nötr rejim: yön belirsiz; MA + mum onayli taktiksel trade her iki yon serbest, HIGH_BETA sinirli.",
     },
 }
 
@@ -10538,12 +10538,34 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
                 )
             except Exception:
                 pending = 0
+
+            cutoff_24h = now_ts() - 86400
+            closed_24h: list[dict] = []
+            for t in trades.values():
+                if not isinstance(t, dict) or t.get("result") is None:
+                    continue
+                closed_at = int(t.get("closed_at") or 0)
+                if closed_at >= cutoff_24h:
+                    closed_24h.append(t)
+            n_24h = len(closed_24h)
+            if n_24h > 0:
+                wins = sum(1 for t in closed_24h if trade_realized_pnl_pct(t) > 0)
+                total_pnl_pct = sum(trade_realized_pnl_pct(t) for t in closed_24h)
+                winrate_pct = (wins / n_24h) * 100
+                perf_line = (
+                    f"24h: {n_24h} trade, winrate {winrate_pct:.0f}% "
+                    f"({wins}W/{n_24h - wins}L), P&L {total_pnl_pct * 100:+.2f}%"
+                )
+            else:
+                perf_line = "24h: trade yok"
+
             scan_text = f"{scan_age}s önce" if scan_age is not None else "henüz yok"
             send_message(
                 f"📊 STATUS (v{__version__})\n\n"
                 f"Son başarılı scan: {scan_text}\n"
                 f"Açık trade: {open_trades}\n"
                 f"Rejim: {regime}\n"
+                f"{perf_line}\n"
                 f"Bekleyen öneri: {pending}\n"
                 f"Ardışık API hatası: {failures}\n"
                 f"Mode: {EXECUTION_MODE}\n"
