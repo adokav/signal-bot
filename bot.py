@@ -1608,11 +1608,15 @@ MAIN_KEYBOARD: dict[str, Any] = {
 }
 
 
-def send_message(text: str, *, reply_markup: Optional[dict] = None) -> bool:
+def send_message(text: str, *, reply_markup: Optional[dict] = None, keyboard: bool = True) -> bool:
     """Telegram mesaj gönder. Başarı durumunu döner.
 
-    reply_markup: Telegram reply_markup dict (klavye, inline button vb).
-    Verilmezse mesaj sade gönderilir.
+    keyboard: True (default) ise MAIN_KEYBOARD eklenir; her mesajda klavye
+        yenilenmesi reply keyboard'un Telegram client'ta sabit gozukmesini
+        garanti eder. Tum mesajlara eklenmesini istemedigin yerlerde
+        keyboard=False geç.
+    reply_markup: Ozel reply_markup vermek istersen kullan; verildiginde
+        MAIN_KEYBOARD'un yerine bu kullanilir.
     """
     if not TOKEN or not CHAT_ID:
         log.warning("TOKEN veya CHAT_ID eksik, mesaj gönderilemedi.")
@@ -1623,6 +1627,8 @@ def send_message(text: str, *, reply_markup: Optional[dict] = None) -> bool:
 
     url = f"{TELEGRAM_BASE}/bot{TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": text}
+    if reply_markup is None and keyboard:
+        reply_markup = MAIN_KEYBOARD
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup)
 
