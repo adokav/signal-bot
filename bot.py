@@ -172,10 +172,10 @@ GDELT_BASE = "https://api.gdeltproject.org/api/v2"
 COINS: dict[str, str] = {
     "BTCUSDT": "CORE",
     "ETHUSDT": "CORE",
-    "SOLUSDT": "CORE",
 
     "LINKUSDT": "MAJOR_ALT",
 
+    "SOLUSDT": "HIGH_BETA",
     "ONDOUSDT": "HIGH_BETA",
     "RENDERUSDT": "HIGH_BETA",
     "PYTHUSDT": "HIGH_BETA",

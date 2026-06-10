@@ -7,7 +7,7 @@ on:
       days:
         description: 'Kac gun geri backtest et'
         required: false
-        default: '7'
+        default: '14'
         type: string
       min_grade:
         description: 'Min quality grade'
@@ -59,7 +59,7 @@ jobs:
         env:
           RUN_HISTORICAL_REPLAY: '1'
           # Push event'te inputs bos kalir; varsayilan degerleri kullan.
-          HISTORICAL_REPLAY_DAYS: ${{ inputs.days || '7' }}
+          HISTORICAL_REPLAY_DAYS: ${{ inputs.days || '14' }}
           HISTORICAL_REPLAY_MIN_GRADE: ${{ inputs.min_grade || 'B' }}
           HISTORICAL_REPLAY_SYMBOLS: ${{ inputs.symbols || '' }}
           ACCOUNT_SIZE_USD: ${{ inputs.capital || '100' }}
