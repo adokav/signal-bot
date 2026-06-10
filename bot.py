@@ -11759,8 +11759,12 @@ def _hr_v(k: list) -> float:
     return float(k[5])
 
 
-def fetch_historical_klines(symbol: str, interval: str, start_ms: int, end_ms: int, limit: int = 1000) -> list[list]:
-    """MEXC spot tarihsel mum indirici. Normal bot döngüsünden bağımsızdır."""
+def fetch_historical_klines(symbol: str, interval: str, start_ms: int, end_ms: int, limit: int = 500) -> list[list]:
+    """MEXC spot tarihsel mum indirici. Normal bot döngüsünden bağımsızdır.
+
+    Limit MEXC'in default cap'i olan 500'e ayarli. Pagination cursor ile
+    devam eder, gercek data sonu ya da end_ms'e ulasinca durur.
+    """
     rows, seen, cursor = [], set(), int(start_ms)
     step = _INTERVAL_MS[interval]
     while cursor < end_ms and not _STOP_EVENT.is_set():
@@ -11779,7 +11783,7 @@ def fetch_historical_klines(symbol: str, interval: str, start_ms: int, end_ms: i
                     rows.append(r)
                     seen.add(ts)
         nxt = _hr_ts(data[-1]) + step
-        if nxt <= cursor or len(data) < limit:
+        if nxt <= cursor or nxt >= end_ms:
             break
         cursor = nxt
     return sorted(rows, key=_hr_ts)
