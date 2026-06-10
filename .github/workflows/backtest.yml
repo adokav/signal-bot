@@ -1,6 +1,7 @@
 name: Backtest
 
 on:
+  # Manuel: GitHub UI'dan Run workflow ile inputs ile tetikle
   workflow_dispatch:
     inputs:
       days:
@@ -30,6 +31,15 @@ on:
         default: ''
         type: string
 
+  # Otomatik: main'e bot.py veya backtest pipeline ilgili commit gelirse
+  # default ayarlarla (7 gun / B grade / 100 USDT) koşsun.
+  push:
+    branches: [main]
+    paths:
+      - 'bot.py'
+      - 'scripts/backtest_summary.py'
+      - '.github/workflows/backtest.yml'
+
 jobs:
   backtest:
     runs-on: ubuntu-latest
@@ -48,10 +58,11 @@ jobs:
       - name: Run backtest
         env:
           RUN_HISTORICAL_REPLAY: '1'
-          HISTORICAL_REPLAY_DAYS: ${{ inputs.days }}
-          HISTORICAL_REPLAY_MIN_GRADE: ${{ inputs.min_grade }}
-          HISTORICAL_REPLAY_SYMBOLS: ${{ inputs.symbols }}
-          ACCOUNT_SIZE_USD: ${{ inputs.capital }}
+          # Push event'te inputs bos kalir; varsayilan degerleri kullan.
+          HISTORICAL_REPLAY_DAYS: ${{ inputs.days || '7' }}
+          HISTORICAL_REPLAY_MIN_GRADE: ${{ inputs.min_grade || 'B' }}
+          HISTORICAL_REPLAY_SYMBOLS: ${{ inputs.symbols || '' }}
+          ACCOUNT_SIZE_USD: ${{ inputs.capital || '100' }}
           TELEGRAM_BOT_TOKEN: ''
           TELEGRAM_CHAT_ID: ''
           TELEGRAM_COMMANDS_ENABLED: '0'
