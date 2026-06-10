@@ -11790,7 +11790,7 @@ def fetch_historical_klines(symbol: str, interval: str, start_ms: int, end_ms: i
 
 
 def _hr_cache_key(symbols: list[str], days: int) -> str:
-    payload = {"symbols": sorted(symbols), "days": int(days), "intervals": ["5m", "15m", "60m", "4h"], "v": 1}
+    payload = {"symbols": sorted(symbols), "days": int(days), "intervals": ["5m", "15m", "60m", "4h"], "v": 2}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
@@ -11804,13 +11804,19 @@ def load_historical_replay_data(symbols: list[str], days: int) -> dict:
             return cached["data"]
 
     end_ms = int(time.time() * 1000)
-    start_ms = end_ms - int(days) * 24 * 60 * 60 * 1000
+    day_ms = 24 * 60 * 60 * 1000
+    # Yuksek-TF feature'lar rolling window gerektirir (MIN_KLINES_4H=55 bar
+    # ~9.2 gun 4h verisi). Kisa backtest pencereleri icin daha geriye uzat
+    # ki ilk 5m bar'inda bile EMA + return hesaplanabilsin.
+    interval_buffer_days = {"5m": 0, "15m": 0, "60m": 3, "4h": 14}
     out: dict[str, dict[str, list]] = {}
 
     for sym in symbols:
         out[sym] = {}
         for interval in ("5m", "15m", "60m", "4h"):
-            log.info("Replay veri indiriliyor: %s %s", sym, interval)
+            extra = interval_buffer_days.get(interval, 0)
+            start_ms = end_ms - (int(days) + extra) * day_ms
+            log.info("Replay veri indiriliyor: %s %s (gun=%d+%d)", sym, interval, days, extra)
             out[sym][interval] = fetch_historical_klines(sym, interval, start_ms, end_ms)
             log.info("Replay veri: %s %s %d bar", sym, interval, len(out[sym][interval]))
 
