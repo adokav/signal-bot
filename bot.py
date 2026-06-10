@@ -458,14 +458,14 @@ PM_CORE_SL_PCT = env_float("PM_CORE_SL_PCT", 0.020, min_value=0.001)
 PM_HIGH_BETA_SL_PCT = env_float("PM_HIGH_BETA_SL_PCT", 0.035, min_value=0.001)
 
 PM_CORE_TP1_R = env_float("PM_CORE_TP1_R", 1.0, min_value=0.1)
-PM_CORE_TP2_R = env_float("PM_CORE_TP2_R", 2.0, min_value=0.2)
-PM_CORE_TP3_R = env_float("PM_CORE_TP3_R", 3.5, min_value=0.3)
+PM_CORE_TP2_R = env_float("PM_CORE_TP2_R", 2.2, min_value=0.2)
+PM_CORE_TP3_R = env_float("PM_CORE_TP3_R", 5.0, min_value=0.3)
 PM_HIGH_BETA_TP1_R = env_float("PM_HIGH_BETA_TP1_R", 1.0, min_value=0.1)
-PM_HIGH_BETA_TP2_R = env_float("PM_HIGH_BETA_TP2_R", 2.0, min_value=0.2)
-PM_HIGH_BETA_TP3_R = env_float("PM_HIGH_BETA_TP3_R", 3.2, min_value=0.3)
+PM_HIGH_BETA_TP2_R = env_float("PM_HIGH_BETA_TP2_R", 2.2, min_value=0.2)
+PM_HIGH_BETA_TP3_R = env_float("PM_HIGH_BETA_TP3_R", 4.5, min_value=0.3)
 
-PM_TP1_CLOSE_RATIO = env_float("PM_TP1_CLOSE_RATIO", 0.50, min_value=0.0)
-PM_TP2_CLOSE_RATIO = env_float("PM_TP2_CLOSE_RATIO", 0.25, min_value=0.0)
+PM_TP1_CLOSE_RATIO = env_float("PM_TP1_CLOSE_RATIO", 0.40, min_value=0.0)
+PM_TP2_CLOSE_RATIO = env_float("PM_TP2_CLOSE_RATIO", 0.30, min_value=0.0)
 PM_CORE_MAX_HOLD_MIN = env_int("PM_CORE_MAX_HOLD_MIN", 180, min_value=5)
 PM_HIGH_BETA_MAX_HOLD_MIN = env_int("PM_HIGH_BETA_MAX_HOLD_MIN", 90, min_value=5)
 
@@ -479,12 +479,14 @@ PM_HIGH_BETA_SCALE_ADD_RATIO = env_float("PM_HIGH_BETA_SCALE_ADD_RATIO", 0.25, m
 PM_TRAIL_STEPS_CORE = [
     (1.0, 0.00),   # +1R -> stop breakeven
     (1.8, 0.75),   # +1.8R -> +0.75R lock
-    (2.8, 1.50),   # +2.8R -> +1.50R lock
+    (2.8, 1.80),   # +2.8R -> +1.80R lock (was 1.50)
+    (4.0, 3.00),   # +4.0R -> +3.00R lock (yeni: 5R TP3'e ulasamayanlar icin)
 ]
 PM_TRAIL_STEPS_HIGH_BETA = [
     (1.0, 0.00),
     (1.6, 0.60),
-    (2.5, 1.25),
+    (2.5, 1.50),   # was 1.25
+    (3.5, 2.50),   # yeni
 ]
 
 PM_CONFIG: dict[str, dict[str, Any]] = {
@@ -1157,11 +1159,11 @@ REGIME_STRATEGY_MATRIX: dict[str, dict[str, Any]] = {
         "allow_long": True,
         "allow_short": True,
         "high_beta_allowed": False,
-        "risk_multiplier": 0.45,
+        "risk_multiplier": 0.30,
         "min_quality": "B",
         "quality_bonus": -5,
         "tp_style": "quick_tp",
-        "note": "Chop/range: taktiksel scalp; MA dizilimi + mum onayı ile her iki yön, kucuk risk, hizli TP.",
+        "note": "Chop/range: taktiksel scalp; MA + mum onayli her iki yon, KUCUK risk (0.30x), hizli TP.",
     },
     "NEWS_CHAOS": {
         "direction_bias": "NO_NEW_TRADE",
@@ -1202,10 +1204,10 @@ REGIME_STRATEGY_MATRIX: dict[str, dict[str, Any]] = {
         "allow_short": True,
         "high_beta_allowed": False,
         "risk_multiplier": 0.75,
-        "min_quality": "B",
+        "min_quality": "A",
         "quality_bonus": 0,
         "tp_style": "standard",
-        "note": "Nötr rejim: yön belirsiz; MA + mum onayli taktiksel trade her iki yon serbest, HIGH_BETA sinirli.",
+        "note": "Nötr rejim: A grade ve uzeri; her iki yon serbest, HIGH_BETA sinirli.",
     },
 }
 
