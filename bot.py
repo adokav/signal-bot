@@ -161,6 +161,10 @@ def validate_env() -> None:
 
 MEXC_SPOT_BASE = "https://api.mexc.com"
 MEXC_FUTURES_BASE = "https://contract.mexc.com"
+# Historical replay icin ayri base: Binance tarihsel veri daha derin (2017+),
+# MEXC ise 5m/15m'i sadece son birkac aydir saklıyor.
+HISTORICAL_REPLAY_API_BASE = os.getenv("HISTORICAL_REPLAY_API_BASE", "https://api.binance.com")
+HISTORICAL_REPLAY_API_LIMIT = env_int("HISTORICAL_REPLAY_API_LIMIT", 1000, min_value=100)
 TELEGRAM_BASE = "https://api.telegram.org"
 NEWSAPI_BASE = "https://newsapi.org/v2"
 GDELT_BASE = "https://api.gdeltproject.org/api/v2"
@@ -11762,18 +11766,29 @@ def _hr_v(k: list) -> float:
     return float(k[5])
 
 
-def fetch_historical_klines(symbol: str, interval: str, start_ms: int, end_ms: int, limit: int = 500) -> list[list]:
-    """MEXC spot tarihsel mum indirici. Normal bot döngüsünden bağımsızdır.
+def fetch_historical_klines(symbol: str, interval: str, start_ms: int, end_ms: int, limit: Optional[int] = None) -> list[list]:
+    """Tarihsel mum indirici. Default Binance (derin tarihsel veri).
 
-    Limit MEXC'in default cap'i olan 500'e ayarli. Pagination cursor ile
-    devam eder, gercek data sonu ya da end_ms'e ulasinca durur.
+    HISTORICAL_REPLAY_API_BASE env ile override edilebilir. MEXC kullanmak
+    icin 'https://api.mexc.com' set et; ancak MEXC 5m/15m'i sadece son
+    birkac aydir saklıyor, tarihsel rejim backtest'leri icin Binance
+    onerilir.
+
+    Binance "60m" yerine "1h" kullanir; otomatik donusturulur.
     """
+    if limit is None:
+        limit = HISTORICAL_REPLAY_API_LIMIT
+    # Binance API interval naming differs: MEXC kodu "60m" gonderir,
+    # Binance "1h" bekler.
+    api_interval = interval
+    if "binance" in HISTORICAL_REPLAY_API_BASE and interval == "60m":
+        api_interval = "1h"
     rows, seen, cursor = [], set(), int(start_ms)
     step = _INTERVAL_MS[interval]
     while cursor < end_ms and not _STOP_EVENT.is_set():
         data = request_json(
-            f"{MEXC_SPOT_BASE}/api/v3/klines",
-            {"symbol": symbol, "interval": interval, "startTime": cursor, "endTime": int(end_ms), "limit": int(limit)},
+            f"{HISTORICAL_REPLAY_API_BASE}/api/v3/klines",
+            {"symbol": symbol, "interval": api_interval, "startTime": cursor, "endTime": int(end_ms), "limit": int(limit)},
             retries=3,
             timeout=20,
         )
