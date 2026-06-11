@@ -163,8 +163,8 @@ MEXC_SPOT_BASE = "https://api.mexc.com"
 MEXC_FUTURES_BASE = "https://contract.mexc.com"
 # Historical replay icin ayri base: Binance tarihsel veri daha derin (2017+),
 # MEXC ise 5m/15m'i sadece son birkac aydir saklıyor.
-HISTORICAL_REPLAY_API_BASE = os.getenv("HISTORICAL_REPLAY_API_BASE", "https://api.bybit.com")
-HISTORICAL_REPLAY_API_LIMIT = env_int("HISTORICAL_REPLAY_API_LIMIT", 1000, min_value=100)
+HISTORICAL_REPLAY_API_BASE = os.getenv("HISTORICAL_REPLAY_API_BASE", "https://api.mexc.com")
+HISTORICAL_REPLAY_API_LIMIT = env_int("HISTORICAL_REPLAY_API_LIMIT", 500, min_value=100)
 TELEGRAM_BASE = "https://api.telegram.org"
 NEWSAPI_BASE = "https://newsapi.org/v2"
 GDELT_BASE = "https://api.gdeltproject.org/api/v2"
