@@ -18,6 +18,7 @@ import copy
 import bisect
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ import re
 import statistics
 import threading
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -11767,6 +11769,99 @@ def _hr_v(k: list) -> float:
 
 
 _BYBIT_INTERVAL_MAP = {"5m": "5", "15m": "15", "60m": "60", "4h": "240"}
+_BINANCE_VISION_BASE = "https://data.binance.vision/data/spot"
+
+
+def _fetch_binance_vision_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> list[list]:
+    """Binance public data archive (data.binance.vision) – CDN tabanli, geo-block yok.
+
+    Aylik ZIP'leri indirir, CSV parse edip Binance API formatinda satirlar
+    doner. Cari ay icin daily fallback yapilir (cunku monthly ay sonunda
+    yayinlanir).
+
+    Symbol dosyada yoksa (ornegin POPCAT 2024'ten once) sessizce atlanir.
+    """
+    api_interval = "1h" if interval == "60m" else interval
+    start_dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+    end_dt = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc)
+    now_utc = datetime.now(tz=timezone.utc)
+    current_month_key = now_utc.strftime("%Y-%m")
+
+    rows: list[list] = []
+    seen: set[int] = set()
+
+    def _consume_zip(content: bytes) -> int:
+        added = 0
+        try:
+            z = zipfile.ZipFile(io.BytesIO(content))
+        except zipfile.BadZipFile:
+            return 0
+        for name in z.namelist():
+            with z.open(name) as f:
+                text = f.read().decode("utf-8", errors="ignore")
+            for raw in text.split("\n"):
+                line = raw.strip()
+                if not line or line.startswith("open_time"):
+                    continue
+                parts = line.split(",")
+                if len(parts) < 6:
+                    continue
+                try:
+                    ts = int(float(parts[0]))
+                except (TypeError, ValueError):
+                    continue
+                if ts in seen or ts < start_ms or ts > end_ms:
+                    continue
+                rows.append(parts)
+                seen.add(ts)
+                added += 1
+        return added
+
+    def _try_download(url: str) -> Optional[bytes]:
+        try:
+            r = _http_session().get(url, timeout=60)
+            if r.status_code == 200:
+                return r.content
+            if r.status_code == 404:
+                log.info("Vision archive bulunamadi (404): %s", url)
+            else:
+                log.warning("Vision archive HTTP %d: %s", r.status_code, url)
+        except Exception as e:
+            log.warning("Vision archive hata: %s — %s", url, e)
+        return None
+
+    # Aylik dosyalar (cari ay haric)
+    cur = start_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end_m = end_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    while cur <= end_m:
+        ym = cur.strftime("%Y-%m")
+        if ym != current_month_key:
+            url = f"{_BINANCE_VISION_BASE}/monthly/klines/{symbol}/{api_interval}/{symbol}-{api_interval}-{ym}.zip"
+            content = _try_download(url)
+            if content:
+                _consume_zip(content)
+        # Sonraki ay
+        if cur.month == 12:
+            cur = cur.replace(year=cur.year + 1, month=1)
+        else:
+            cur = cur.replace(month=cur.month + 1)
+
+    # Cari ay icin daily dosyalar
+    if end_dt >= now_utc.replace(day=1):
+        d_start = max(start_dt, now_utc.replace(day=1))
+        d_end = min(end_dt, now_utc)
+        day = d_start.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Cari gunden 1 onceye kadar (cari gun henuz tamamlanmamis)
+        last_day = (now_utc - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        while day <= min(d_end, last_day):
+            ymd = day.strftime("%Y-%m-%d")
+            url = f"{_BINANCE_VISION_BASE}/daily/klines/{symbol}/{api_interval}/{symbol}-{api_interval}-{ymd}.zip"
+            content = _try_download(url)
+            if content:
+                _consume_zip(content)
+            day = day + timedelta(days=1)
+
+    return sorted(rows, key=lambda r: int(float(r[0])))
 
 
 def _fetch_bybit_klines(symbol: str, interval: str, start_ms: int, end_ms: int, limit: int) -> list[list]:
@@ -11843,15 +11938,18 @@ def _fetch_binance_style_klines(symbol: str, interval: str, start_ms: int, end_m
 
 
 def fetch_historical_klines(symbol: str, interval: str, start_ms: int, end_ms: int, limit: Optional[int] = None) -> list[list]:
-    """Tarihsel mum indirici. Default Bybit (GitHub Actions'tan erisilebilir).
+    """Tarihsel mum indirici. Default MEXC (US-friendly, recent gun calisir).
 
-    HISTORICAL_REPLAY_API_BASE env ile override edilebilir:
-    - 'https://api.bybit.com' (default, derin tarihsel veri, GH Actions'tan erisim)
-    - 'https://api.binance.com' (geo-restricted! HTTP 451 GH'tan)
-    - 'https://api.mexc.com' (5m/15m sadece son birkac ay)
+    HISTORICAL_REPLAY_API_BASE env ile override:
+    - 'https://api.mexc.com' (default, ~60g 5m saklı, recent backtest icin uygun)
+    - 'https://data.binance.vision' (public CDN archive, derin tarihsel, AYLIK ZIP)
+    - 'https://api.binance.com' (HTTP 451 GH Actions'tan)
+    - 'https://api.bybit.com' (HTTP 403 CloudFront GH Actions'tan)
     """
     if limit is None:
         limit = HISTORICAL_REPLAY_API_LIMIT
+    if "binance.vision" in HISTORICAL_REPLAY_API_BASE:
+        return _fetch_binance_vision_klines(symbol, interval, start_ms, end_ms)
     if "bybit" in HISTORICAL_REPLAY_API_BASE:
         return _fetch_bybit_klines(symbol, interval, start_ms, end_ms, int(limit))
     return _fetch_binance_style_klines(symbol, interval, start_ms, end_ms, int(limit))
