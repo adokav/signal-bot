@@ -9755,7 +9755,8 @@ def load_historical_macro_data(days: int) -> dict[str, list[dict]]:
         return {}
     if MACRO_RISK_PROVIDER != "YAHOO":
         return {}
-    end_sec = int(time.time())
+    # End zamanini replay end date ile senkronize tut (tarihsel pencereler icin)
+    end_sec = _historical_replay_end_ms() // 1000
     start_sec = end_sec - int(days + 30) * 24 * 60 * 60
     out: dict[str, list[dict]] = {}
     for key, sym in MACRO_YAHOO_SYMBOLS.items():
@@ -11792,8 +11793,39 @@ def fetch_historical_klines(symbol: str, interval: str, start_ms: int, end_ms: i
 
 
 def _hr_cache_key(symbols: list[str], days: int) -> str:
-    payload = {"symbols": sorted(symbols), "days": int(days), "intervals": ["5m", "15m", "60m", "4h"], "v": 2}
+    payload = {
+        "symbols": sorted(symbols),
+        "days": int(days),
+        "intervals": ["5m", "15m", "60m", "4h"],
+        "end_date": os.getenv("HISTORICAL_REPLAY_END_DATE", "").strip() or "now",
+        "v": 3,
+    }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _historical_replay_end_ms() -> int:
+    """Replay bitis zaman damgasi (ms).
+
+    HISTORICAL_REPLAY_END_DATE env'i 'YYYY-MM-DD' formatinda set edilirse o
+    gunun bitiş anı (23:59:59 UTC) kullanilir; bos veya hatali ise simdiki zaman.
+
+    Boylece tarihsel rejim donemleri secilebilir:
+      - 2024-03-31 -> RISK_ON_TREND_UP (BTC ATH)
+      - 2022-07-31 -> RISK_OFF_TREND_DOWN (Luna/3AC sonrasi)
+      - 2023-10-31 -> CHOP_RANGE (uzun konsolidasyon)
+    """
+    end_str = os.getenv("HISTORICAL_REPLAY_END_DATE", "").strip()
+    if end_str:
+        try:
+            dt = datetime.strptime(end_str, "%Y-%m-%d").replace(
+                hour=23, minute=59, second=59, tzinfo=timezone.utc
+            )
+            ts = int(dt.timestamp() * 1000)
+            log.info("Replay end date: %s -> %d ms", end_str, ts)
+            return ts
+        except ValueError:
+            log.warning("HISTORICAL_REPLAY_END_DATE format hatali (%s), simdi kullanilacak", end_str)
+    return int(time.time() * 1000)
 
 
 def load_historical_replay_data(symbols: list[str], days: int) -> dict:
@@ -11805,7 +11837,7 @@ def load_historical_replay_data(symbols: list[str], days: int) -> dict:
             log.info("Historical replay cache kullanılıyor: %s", HISTORICAL_REPLAY_CACHE_FILE)
             return cached["data"]
 
-    end_ms = int(time.time() * 1000)
+    end_ms = _historical_replay_end_ms()
     day_ms = 24 * 60 * 60 * 1000
     # Yuksek-TF feature'lar rolling window gerektirir (MIN_KLINES_4H=55 bar
     # ~9.2 gun 4h verisi). Kisa backtest pencereleri icin daha geriye uzat

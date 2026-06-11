@@ -30,6 +30,11 @@ on:
         required: false
         default: ''
         type: string
+      end_date:
+        description: 'Backtest bitis tarihi YYYY-MM-DD (bos = bugun). Ornek: 2024-03-31 RISK_ON, 2022-07-31 RISK_OFF, 2023-10-31 CHOP'
+        required: false
+        default: ''
+        type: string
 
   # Otomatik: main'e bot.py veya backtest pipeline ilgili commit gelirse
   # default ayarlarla (7 gun / B grade / 100 USDT) koşsun.
@@ -62,6 +67,7 @@ jobs:
           HISTORICAL_REPLAY_DAYS: ${{ inputs.days || '30' }}
           HISTORICAL_REPLAY_MIN_GRADE: ${{ inputs.min_grade || 'B' }}
           HISTORICAL_REPLAY_SYMBOLS: ${{ inputs.symbols || '' }}
+          HISTORICAL_REPLAY_END_DATE: ${{ inputs.end_date || '' }}
           ACCOUNT_SIZE_USD: ${{ inputs.capital || '100' }}
           TELEGRAM_BOT_TOKEN: ''
           TELEGRAM_CHAT_ID: ''
