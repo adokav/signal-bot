@@ -35,6 +35,14 @@ on:
         required: false
         default: ''
         type: string
+      data_source:
+        description: 'Veri kaynagi: mexc (default, recent ~60g) veya vision (Binance public archive, tarihsel rejimler icin)'
+        required: false
+        default: 'mexc'
+        type: choice
+        options:
+          - 'mexc'
+          - 'vision'
 
   # Otomatik: main'e bot.py veya backtest pipeline ilgili commit gelirse
   # default ayarlarla (7 gun / B grade / 100 USDT) koşsun.
@@ -68,6 +76,9 @@ jobs:
           HISTORICAL_REPLAY_MIN_GRADE: ${{ inputs.min_grade || 'B' }}
           HISTORICAL_REPLAY_SYMBOLS: ${{ inputs.symbols || '' }}
           HISTORICAL_REPLAY_END_DATE: ${{ inputs.end_date || '' }}
+          # Data source: 'vision' = Binance public archive (tarihsel),
+          # diger = MEXC (default, recent).
+          HISTORICAL_REPLAY_API_BASE: ${{ inputs.data_source == 'vision' && 'https://data.binance.vision' || 'https://api.mexc.com' }}
           ACCOUNT_SIZE_USD: ${{ inputs.capital || '100' }}
           TELEGRAM_BOT_TOKEN: ''
           TELEGRAM_CHAT_ID: ''
