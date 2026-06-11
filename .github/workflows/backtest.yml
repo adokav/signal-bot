@@ -76,9 +76,9 @@ jobs:
           HISTORICAL_REPLAY_MIN_GRADE: ${{ inputs.min_grade || 'B' }}
           HISTORICAL_REPLAY_SYMBOLS: ${{ inputs.symbols || '' }}
           HISTORICAL_REPLAY_END_DATE: ${{ inputs.end_date || '' }}
-          # Data source: 'vision' = Binance public archive (tarihsel),
-          # diger = MEXC (default, recent).
-          HISTORICAL_REPLAY_API_BASE: ${{ inputs.data_source == 'vision' && 'https://data.binance.vision' || 'https://api.mexc.com' }}
+          # Data source auto-detect: end_date varsa veya data_source 'vision' ise
+          # Binance public archive kullan; yoksa MEXC (recent).
+          HISTORICAL_REPLAY_API_BASE: ${{ (inputs.data_source == 'vision' || inputs.end_date != '') && 'https://data.binance.vision' || 'https://api.mexc.com' }}
           ACCOUNT_SIZE_USD: ${{ inputs.capital || '100' }}
           TELEGRAM_BOT_TOKEN: ''
           TELEGRAM_CHAT_ID: ''
