@@ -163,7 +163,7 @@ MEXC_SPOT_BASE = "https://api.mexc.com"
 MEXC_FUTURES_BASE = "https://contract.mexc.com"
 # Historical replay icin ayri base: Binance tarihsel veri daha derin (2017+),
 # MEXC ise 5m/15m'i sadece son birkac aydir saklıyor.
-HISTORICAL_REPLAY_API_BASE = os.getenv("HISTORICAL_REPLAY_API_BASE", "https://api.binance.com")
+HISTORICAL_REPLAY_API_BASE = os.getenv("HISTORICAL_REPLAY_API_BASE", "https://api.bybit.com")
 HISTORICAL_REPLAY_API_LIMIT = env_int("HISTORICAL_REPLAY_API_LIMIT", 1000, min_value=100)
 TELEGRAM_BASE = "https://api.telegram.org"
 NEWSAPI_BASE = "https://newsapi.org/v2"
@@ -11766,20 +11766,55 @@ def _hr_v(k: list) -> float:
     return float(k[5])
 
 
-def fetch_historical_klines(symbol: str, interval: str, start_ms: int, end_ms: int, limit: Optional[int] = None) -> list[list]:
-    """Tarihsel mum indirici. Default Binance (derin tarihsel veri).
+_BYBIT_INTERVAL_MAP = {"5m": "5", "15m": "15", "60m": "60", "4h": "240"}
 
-    HISTORICAL_REPLAY_API_BASE env ile override edilebilir. MEXC kullanmak
-    icin 'https://api.mexc.com' set et; ancak MEXC 5m/15m'i sadece son
-    birkac aydir saklıyor, tarihsel rejim backtest'leri icin Binance
-    onerilir.
 
-    Binance "60m" yerine "1h" kullanir; otomatik donusturulur.
+def _fetch_bybit_klines(symbol: str, interval: str, start_ms: int, end_ms: int, limit: int) -> list[list]:
+    """Bybit v5 spot klines.
+
+    Bybit response yapisi: {retCode:0, result:{list:[[ts,o,h,l,c,v,turnover],...]}}.
+    List newest-first donulur, oldest-first'e cevrilir. Timestamps string olur,
+    _hr_ts helper'i zaten float() ile parse ediyor.
     """
-    if limit is None:
-        limit = HISTORICAL_REPLAY_API_LIMIT
-    # Binance API interval naming differs: MEXC kodu "60m" gonderir,
-    # Binance "1h" bekler.
+    bybit_interval = _BYBIT_INTERVAL_MAP.get(interval, interval)
+    rows, seen, cursor = [], set(), int(start_ms)
+    step = _INTERVAL_MS[interval]
+    while cursor < end_ms and not _STOP_EVENT.is_set():
+        resp = request_json(
+            f"{HISTORICAL_REPLAY_API_BASE}/v5/market/kline",
+            {
+                "category": "spot",
+                "symbol": symbol,
+                "interval": bybit_interval,
+                "start": cursor,
+                "end": int(end_ms),
+                "limit": int(limit),
+            },
+            retries=3,
+            timeout=20,
+        )
+        if not isinstance(resp, dict) or resp.get("retCode") != 0:
+            break
+        klines = (resp.get("result") or {}).get("list") or []
+        if not klines:
+            break
+        # Bybit newest-first; reverse to oldest-first
+        klines = list(reversed(klines))
+        for r in klines:
+            if isinstance(r, list) and len(r) >= 6:
+                ts = _hr_ts(r)
+                if ts not in seen and start_ms <= ts <= end_ms:
+                    rows.append(r)
+                    seen.add(ts)
+        nxt = _hr_ts(klines[-1]) + step
+        if nxt <= cursor or nxt >= end_ms:
+            break
+        cursor = nxt
+    return sorted(rows, key=_hr_ts)
+
+
+def _fetch_binance_style_klines(symbol: str, interval: str, start_ms: int, end_ms: int, limit: int) -> list[list]:
+    """Binance/MEXC v3 klines (ayni format)."""
     api_interval = interval
     if "binance" in HISTORICAL_REPLAY_API_BASE and interval == "60m":
         api_interval = "1h"
@@ -11805,6 +11840,21 @@ def fetch_historical_klines(symbol: str, interval: str, start_ms: int, end_ms: i
             break
         cursor = nxt
     return sorted(rows, key=_hr_ts)
+
+
+def fetch_historical_klines(symbol: str, interval: str, start_ms: int, end_ms: int, limit: Optional[int] = None) -> list[list]:
+    """Tarihsel mum indirici. Default Bybit (GitHub Actions'tan erisilebilir).
+
+    HISTORICAL_REPLAY_API_BASE env ile override edilebilir:
+    - 'https://api.bybit.com' (default, derin tarihsel veri, GH Actions'tan erisim)
+    - 'https://api.binance.com' (geo-restricted! HTTP 451 GH'tan)
+    - 'https://api.mexc.com' (5m/15m sadece son birkac ay)
+    """
+    if limit is None:
+        limit = HISTORICAL_REPLAY_API_LIMIT
+    if "bybit" in HISTORICAL_REPLAY_API_BASE:
+        return _fetch_bybit_klines(symbol, interval, start_ms, end_ms, int(limit))
+    return _fetch_binance_style_klines(symbol, interval, start_ms, end_ms, int(limit))
 
 
 def _hr_cache_key(symbols: list[str], days: int) -> str:
