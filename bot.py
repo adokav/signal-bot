@@ -1617,12 +1617,28 @@ TELEGRAM_MAX_LEN = 4000  # Güvenli pay
 # kapatsa bile yeniden gosterilir.
 MAIN_KEYBOARD: dict[str, Any] = {
     "keyboard": [
-        [{"text": "/status"}, {"text": "/help"}],
+        [{"text": "/status"}, {"text": "/positions"}, {"text": "/equity"}],
+        [{"text": "/report"}, {"text": "/regime"}, {"text": "/help"}],
         [{"text": "/pending"}, {"text": "/trade_pending"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
 }
+
+
+# Telegram '/' menusunde gozukecek komut listesi. _register_bot_commands ile
+# bot baslangicinda bir kez kaydedilir.
+BOT_COMMANDS: list[dict[str, str]] = [
+    {"command": "status", "description": "Anlik saglik durumu + 24h ozet"},
+    {"command": "positions", "description": "Acik pozisyonlar (entry/stop/TP/PnL)"},
+    {"command": "equity", "description": "Bakiye, gerceklesen PnL, win/loss"},
+    {"command": "report", "description": "Son 7 gun performans ozeti"},
+    {"command": "regime", "description": "Anlik rejim + macro context"},
+    {"command": "pending", "description": "Bekleyen parametre onerileri"},
+    {"command": "trade_pending", "description": "Bekleyen trade onaylari"},
+    {"command": "help", "description": "Tum komutlar"},
+    {"command": "start", "description": "Bot uyandir"},
+]
 
 
 def send_message(text: str, *, reply_markup: Optional[dict] = None, keyboard: bool = True) -> bool:
@@ -1659,6 +1675,33 @@ def send_message(text: str, *, reply_markup: Optional[dict] = None, keyboard: bo
         return True
     except requests.RequestException as e:
         log.error("Telegram gönderim hatası: %s", type(e).__name__)
+        return False
+
+
+def _register_bot_commands() -> bool:
+    """Telegram '/' menusune BOT_COMMANDS listesini kaydet.
+
+    Bot baslangicinda bir kez cagrilir. setMyCommands idempotent — ayni listeyi
+    tekrar gondermek sorun degil. Komutlar Telegram client'taki mavi '/' tusuna
+    basildiginda aciklama ile birlikte gozukur.
+    """
+    if not TOKEN:
+        return False
+    try:
+        url = f"{TELEGRAM_BASE}/bot{TOKEN}/setMyCommands"
+        with _HTTP_SEMAPHORE:
+            r = _http_session().post(
+                url,
+                data={"commands": json.dumps(BOT_COMMANDS)},
+                timeout=15,
+            )
+        if r.status_code != 200:
+            log.warning("setMyCommands HTTP %s: %s", r.status_code, r.text[:200])
+            return False
+        log.info("Telegram bot komutlari kaydedildi (%d komut).", len(BOT_COMMANDS))
+        return True
+    except requests.RequestException as e:
+        log.warning("setMyCommands hata: %s", type(e).__name__)
         return False
 
 
@@ -10528,7 +10571,11 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
             send_message(
                 "Komutlar:\n"
                 "/start — bot uyandır, özet\n"
-                "/status — anlık sağlık durumu\n"
+                "/status — anlık sağlık durumu + 24h özet\n"
+                "/positions — açık pozisyonlar (entry/stop/TP/PnL)\n"
+                "/equity — bakiye, gerçekleşen PnL, win/loss\n"
+                "/report — son 7 gün performans özeti\n"
+                "/regime — anlık rejim + macro context\n"
                 "/help — bu mesaj\n"
                 "PENDING — bekleyen parametre önerisi\n"
                 "ACCEPT <id> — öneri kabul\n"
@@ -10587,6 +10634,108 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
                 f"Bekleyen öneri: {pending}\n"
                 f"Ardışık API hatası: {failures}\n"
                 f"Mode: {EXECUTION_MODE}\n"
+                f"Zaman: {tr_now_text()}"
+            )
+        elif cmd == "POSITIONS":
+            snap = state_mgr.snapshot()
+            trades = snap.get("trades", {}) or {}
+            opens = [
+                t for t in trades.values()
+                if isinstance(t, dict) and t.get("result") is None
+            ]
+            if not opens:
+                send_message("📭 Açık pozisyon yok.")
+            else:
+                lines = [f"📂 Açık pozisyon: {len(opens)}\n"]
+                for t in opens[:10]:
+                    sym = t.get("symbol", "?")
+                    direction = t.get("direction", "?")
+                    entry = float(t.get("entry") or 0)
+                    stop = float(t.get("stop") or 0)
+                    tp1 = float(t.get("tp1") or 0)
+                    pnl_pct = trade_realized_pnl_pct(t) * 100
+                    grade = (t.get("trade_quality") or {}).get("grade", "?")
+                    lines.append(
+                        f"• {sym} {direction} [{grade}]\n"
+                        f"  Entry {entry:.6g} | Stop {stop:.6g} | TP1 {tp1:.6g}\n"
+                        f"  PnL: {pnl_pct:+.2f}%"
+                    )
+                if len(opens) > 10:
+                    lines.append(f"\n... +{len(opens) - 10} pozisyon daha")
+                send_message("\n".join(lines))
+        elif cmd == "EQUITY":
+            snap = state_mgr.snapshot()
+            trades = snap.get("trades", {}) or {}
+            closed = [
+                t for t in trades.values()
+                if isinstance(t, dict) and t.get("result") is not None
+            ]
+            opens = [
+                t for t in trades.values()
+                if isinstance(t, dict) and t.get("result") is None
+            ]
+            wins = [t for t in closed if trade_realized_pnl_pct(t) > 0]
+            losses = [t for t in closed if trade_realized_pnl_pct(t) <= 0]
+            total_pnl_pct = sum(trade_realized_pnl_pct(t) for t in closed)
+            equity = ACCOUNT_SIZE_USD * (1 + total_pnl_pct)
+            wr = (len(wins) / len(closed) * 100) if closed else 0.0
+            send_message(
+                f"💰 EQUITY\n\n"
+                f"Başlangıç: ${ACCOUNT_SIZE_USD:,.2f}\n"
+                f"Anlık: ${equity:,.2f} ({total_pnl_pct * 100:+.2f}%)\n"
+                f"Açık pozisyon: {len(opens)}\n"
+                f"Kapalı trade: {len(closed)} ({len(wins)}W/{len(losses)}L)\n"
+                f"Win rate: %{wr:.1f}\n"
+                f"Mode: {EXECUTION_MODE}"
+            )
+        elif cmd == "REPORT":
+            snap = state_mgr.snapshot()
+            trades = snap.get("trades", {}) or {}
+            cutoff_7d = now_ts() - 7 * 86400
+            closed_7d = [
+                t for t in trades.values()
+                if isinstance(t, dict) and t.get("result") is not None
+                and int(t.get("closed_at") or 0) >= cutoff_7d
+            ]
+            if not closed_7d:
+                send_message("📊 Son 7 gün trade yok.")
+            else:
+                pnls = [trade_realized_pnl_pct(t) for t in closed_7d]
+                wins = [p for p in pnls if p > 0]
+                losses = [p for p in pnls if p <= 0]
+                total = sum(pnls)
+                wr = (len(wins) / len(pnls) * 100) if pnls else 0.0
+                pf_num = sum(p for p in wins) if wins else 0
+                pf_den = abs(sum(p for p in losses)) if losses else 0
+                pf = (pf_num / pf_den) if pf_den > 0 else float("inf")
+                pf_text = f"{pf:.2f}" if pf != float("inf") else "∞"
+                avg_win = (sum(wins) / len(wins) * 100) if wins else 0.0
+                avg_loss = (sum(losses) / len(losses) * 100) if losses else 0.0
+                send_message(
+                    f"📊 REPORT (son 7 gün)\n\n"
+                    f"Trade: {len(closed_7d)} ({len(wins)}W/{len(losses)}L)\n"
+                    f"Win rate: %{wr:.1f}\n"
+                    f"Profit factor: {pf_text}\n"
+                    f"Toplam PnL: {total * 100:+.2f}%\n"
+                    f"Avg Win: {avg_win:+.2f}% | Avg Loss: {avg_loss:.2f}%"
+                )
+        elif cmd == "REGIME":
+            snap = state_mgr.snapshot()
+            meta = snap.get("meta", {}) or {}
+            regime_meta = meta.get("last_global_regime") or {}
+            macro = meta.get("last_macro_risk") or {}
+            regime = regime_meta.get("regime", "?")
+            confidence = regime_meta.get("confidence", "?")
+            diag = regime_meta.get("diagnostics") or {}
+            macro_regime = diag.get("macro_regime", "?")
+            macro_score = macro.get("macro_score", "?")
+            news = diag.get("news_state", "?")
+            send_message(
+                f"🌍 REGIME\n\n"
+                f"Rejim: {regime}\n"
+                f"Güven: {confidence}\n"
+                f"Macro: {macro_regime} (score: {macro_score})\n"
+                f"News: {news}\n"
                 f"Zaman: {tr_now_text()}"
             )
         elif cmd == "PENDING":
@@ -11627,6 +11776,7 @@ def _send_periodic_messages(
 def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
     """Ana bot döngüsü."""
     log.info("BOT BAŞLADI v%s", __version__)
+    _register_bot_commands()
     send_message(
         f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + MacroRisk + SignalBrain + ACCETradeBrain + StableCollateral + PaperExec + PM + RiskGov/CapitalGuard/RegimeEdge/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON",
         reply_markup=MAIN_KEYBOARD,
