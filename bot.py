@@ -12054,11 +12054,34 @@ def _hr_session_at(ts_ms: int) -> SessionContext:
     return _SESSION_PROFILES["US_CLOSED"]
 
 
+def _replay_baseline_spread_bps(group: str) -> float:
+    # Tipik orta-piyasa spread'i: SPREAD_LIMITS uçtaki kabul edilebilir tavandir,
+    # gercek piyasa medyani genelde ~yarisi seviyesindedir.
+    return float(SPREAD_LIMITS.get(group, SPREAD_LIMITS["CORE"])) * 0.5
+
+
+def _replay_stress_multiplier(regime: Optional[dict]) -> float:
+    # Stres rejimlerinde spread genisler. 2022-07 (Luna/3AC) gibi donemlerde
+    # altcoin spread'leri 2-3x'e cikar; CHOP da hafif genisleme yasanir.
+    if not isinstance(regime, dict):
+        return 1.0
+    name = str(regime.get("regime") or "")
+    macro = str(((regime.get("diagnostics") or {}).get("macro_regime")) or "")
+    if name == "NEWS_CHAOS" or macro == "MACRO_STRONG_RISK_OFF":
+        return 3.0
+    if name == "RISK_OFF_TREND_DOWN" or macro == "MACRO_RISK_OFF":
+        return 2.2
+    if name == "CHOP_RANGE":
+        return 1.3
+    return 1.0
+
+
 def replay_features(symbol: str, windows: dict[str, list[list]]) -> Optional[dict]:
     """Historical replay için get_features eşdeğeri.
 
     V1'de tarihsel basis/funding/order book replay edilmez; bunlar None ve
-    konservatif varsayılan spread ile temsil edilir.
+    SPREAD_LIMITS'e dayali tipik (orta-piyasa) spread ile temsil edilir. Stres
+    rejimlerinde spread sonradan run_historical_replay_backtest icinde olcekenir.
     """
     k5, k15 = windows.get("5m", []), windows.get("15m", [])
     k1h, k4h = windows.get("60m", []), windows.get("4h", [])
@@ -12073,7 +12096,7 @@ def replay_features(symbol: str, windows: dict[str, list[list]]) -> Optional[dic
     recent = v5[-(VOLUME_WINDOW + 1):-1]
     median_vol = statistics.median(recent) if recent else 0.0
     group = COINS.get(symbol, "CORE")
-    spread = PAPER_SLIPPAGE_BPS_HIGH_BETA if group in {"HIGH_BETA", "MEME"} else PAPER_SLIPPAGE_BPS_CORE
+    spread = _replay_baseline_spread_bps(group)
 
     return {
         "last": c5[-1],
@@ -12128,7 +12151,7 @@ def replay_result(symbol: str, feat: dict, btc: dict, eth: dict, session: Sessio
     return result
 
 
-def _open_replay_pos(symbol: str, result: dict, bar: list, ts: int) -> dict:
+def _open_replay_pos(symbol: str, result: dict, bar: list, ts: int, spread_bps: float) -> dict:
     direction, group = result["signal"], result["group"]
     entry = _hr_c(bar)
     stop_pct = float(TRADE_PLAN_CONFIG[group]["stop_pct"])
@@ -12146,6 +12169,7 @@ def _open_replay_pos(symbol: str, result: dict, bar: list, ts: int) -> dict:
         "bars": 0, "tp1_hit": False, "tp2_hit": False,
         "regime": (result.get("regime") or {}).get("regime"),
         "quality_grade": (result.get("trade_quality") or {}).get("grade"),
+        "spread_bps_at_open": float(spread_bps or 0.0),
     }
 
 
@@ -12157,7 +12181,10 @@ def _replay_r_at(pos: dict, price: float) -> float:
 
 def _close_replay_pos(pos: dict, price: float, ts: int, reason: str) -> dict:
     gross_r = pos["realized_r"] + pos["remaining"] * _replay_r_at(pos, price)
-    cost_pct = ((PAPER_FEE_BPS * 2) + (_paper_slippage_bps(pos["group"]) * 2)) / 10000.0
+    # Roundtrip maliyet: fee (2x) + slippage (2x) + spread (giris+cikis tam spread).
+    spread_bps = float(pos.get("spread_bps_at_open", 0.0) or 0.0)
+    cost_bps = (PAPER_FEE_BPS * 2) + (_paper_slippage_bps(pos["group"]) * 2) + spread_bps
+    cost_pct = cost_bps / 10000.0
     net_r = gross_r - cost_pct / max(pos["stop_pct"], 1e-9)
     return {
         "symbol": pos["symbol"], "group": pos["group"], "direction": pos["direction"],
@@ -12278,6 +12305,11 @@ def run_historical_replay_backtest(symbols: Optional[list[str]] = None, days: Op
         session = _hr_session_at(ts)
         macro_context = historical_macro_context_at(macro_data, ts)
         regime = detect_market_regime(features["BTCUSDT"], features["ETHUSDT"], news, macro_context)
+        # Stres rejimlerinde spread'i olcek; gercek likidite kosullarini taklit et.
+        stress = _replay_stress_multiplier(regime)
+        if stress > 1.0:
+            for feat in features.values():
+                feat["spread_bps"] = float(feat.get("spread_bps", 0.0) or 0.0) * stress
         results: dict[str, dict] = {}
         for sym in symbols:
             if sym not in features:
@@ -12306,7 +12338,8 @@ def run_historical_replay_backtest(symbols: Optional[list[str]] = None, days: Op
                 rows = data.get(sym, {}).get("5m", [])
                 idx = _hr_idx_at(index.get(sym, {}).get("5m", []), ts)
                 if idx >= 0:
-                    positions[sym] = _open_replay_pos(sym, result, rows[idx], ts)
+                    spread_at_open = float((features.get(sym) or {}).get("spread_bps", 0.0) or 0.0)
+                    positions[sym] = _open_replay_pos(sym, result, rows[idx], ts, spread_at_open)
 
     last_ts = times[-1] if times else int(time.time() * 1000)
     for sym, pos in list(positions.items()):
@@ -12327,6 +12360,8 @@ def run_historical_replay_backtest(symbols: Optional[list[str]] = None, days: Op
             "basis_funding_orderbook": "not_replayed_v1",
             "intrabar": "conservative_stop_first",
             "entry": "bar_close_after_signal",
+            "spread": "spread_limits_median_x_regime_stress_multiplier",
+            "cost_model": "fee_2x+slippage_2x+spread_roundtrip",
             "risk_pct": HISTORICAL_REPLAY_RISK_PCT,
             "min_grade": HISTORICAL_REPLAY_MIN_GRADE,
         },
