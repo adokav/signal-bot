@@ -162,15 +162,15 @@
     "loss_streak_multiplier": 1.0,
     "max_risk_cap_pct": 0.0285,
     "mode": "DEFENSIVE",
-    "multiplier": 0.416,
-    "original_position_notional": 166.32,
+    "multiplier": 0.0,
+    "original_position_notional": 100.0,
     "portfolio_correlation_multiplier": 1.0,
     "position_notional": 435.2,
     "quality_multiplier": 1.2,
     "reasons": [
       "Quality A \u00e7arpan\u0131 x1.20",
       "Confidence %72.0 \u00e7arpan\u0131 x1.05",
-      "Regime RISK_OFF_TREND_DOWN \u00e7arpan\u0131 x0.55",
+      "Regime RISK_OFF_TREND_DOWN \u00e7arpan\u0131 x0.00",
       "Risk Governor DEFENSIVE \u00e7arpan\u0131 x0.60",
       "Portfolio correlation \u00e7arpan\u0131 x1.00",
       "Regime edge \u00e7arpan\u0131 x1.00",
@@ -180,12 +180,12 @@
       "Capital ladder BUILD_100_TO_1K \u00fcst risk limiti %2.85",
       "Dinamik \u00fcst limit (Kelly dahil) %2.85 (Kelly cap n\u00f6tr (\u00f6rneklem yetersiz/kapal\u0131).)",
       "Edge verisi yetersiz; edge \u00e7arpan\u0131 n\u00f6tr.",
-      "Leverage Policy: 166.32$ \u2192 435.20$ (0.54x, risk %1.09)"
+      "Leverage Policy: 100.00$ \u2192 435.20$ (0.54x, risk %1.09)"
     ],
     "recommended_exchange_leverage": 1.0,
     "regime_edge_guard": {},
     "regime_edge_multiplier": 1.0,
-    "regime_multiplier": 0.55,
+    "regime_multiplier": 0.0,
     "risk_amount": 8.704,
     "risk_governor": {
       "allow_new_trades": true,
