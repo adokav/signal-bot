@@ -39,6 +39,26 @@ services:
         value: "1"
       - key: LONG_MEME_MIN_VOLUME_RATIO
         value: "1.8"
+      # ATR-aware position management (sprint: PM v2)
+      - key: ATR_ENABLED
+        value: "1"
+      - key: ATR_PERIOD
+        value: "14"
+      - key: STOP_ATR_MULTIPLIER
+        value: "1.5"
+      - key: STOP_ATR_CAP_MULTIPLIER
+        value: "2.5"
+      - key: TP_ADAPTIVE_ENABLED
+        value: "1"
+      # MEXC Cross Margin konservatif kaldirac tavanlari (live'da kullanilacak)
+      - key: LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE
+        value: "5"
+      - key: LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA
+        value: "3"
+      - key: LEVERAGE_POLICY_MIN_LIQ_TO_STOP
+        value: "3.0"
+      - key: LEVERAGE_POLICY_EXTRA_LIQ_BUFFER_PCT
+        value: "0.01"
 
 # Sprint 17 additional env:
 # ACCE_MULTI_POSITION_ENABLED=1
