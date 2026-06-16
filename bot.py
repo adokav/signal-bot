@@ -481,6 +481,35 @@ PM_HIGH_BETA_TP3_R = env_float("PM_HIGH_BETA_TP3_R", 4.5, min_value=0.3)
 
 PM_TP1_CLOSE_RATIO = env_float("PM_TP1_CLOSE_RATIO", 0.55, min_value=0.0)
 PM_TP2_CLOSE_RATIO = env_float("PM_TP2_CLOSE_RATIO", 0.30, min_value=0.0)
+
+# ATR-aware adaptive position management.
+# 1) Stop_pct max(base, ATR%*STOP_ATR_MULTIPLIER) with cap = base*STOP_ATR_CAP_MULTIPLIER
+# 2) Leverage tunable down by ATR/normal ratio brackets
+# 3) Partial TP ratios scale: high-vol -> harvest earlier, low-vol -> stretch
+ATR_ENABLED = os.getenv("ATR_ENABLED", "1") == "1"
+ATR_PERIOD = env_int("ATR_PERIOD", 14, min_value=3)
+STOP_ATR_MULTIPLIER = env_float("STOP_ATR_MULTIPLIER", 1.5, min_value=0.1)
+STOP_ATR_CAP_MULTIPLIER = env_float("STOP_ATR_CAP_MULTIPLIER", 2.5, min_value=1.0)
+STOP_ATR_FLOOR_FRACTION = env_float("STOP_ATR_FLOOR_FRACTION", 0.6, min_value=0.1)
+# "Normal" ATR_1h per group (yuzde). Bunun katlari leverage cezalandirir.
+ATR_NORMAL_CORE = env_float("ATR_NORMAL_CORE", 0.010, min_value=0.001)
+ATR_NORMAL_MAJOR_ALT = env_float("ATR_NORMAL_MAJOR_ALT", 0.015, min_value=0.001)
+ATR_NORMAL_HIGH_BETA = env_float("ATR_NORMAL_HIGH_BETA", 0.025, min_value=0.001)
+ATR_NORMAL_MEME = env_float("ATR_NORMAL_MEME", 0.040, min_value=0.001)
+# Vol leverage brackets: ratio=ATR/normal
+VOL_LEV_BRACKET_MILD = env_float("VOL_LEV_BRACKET_MILD", 1.5, min_value=1.0)
+VOL_LEV_BRACKET_HIGH = env_float("VOL_LEV_BRACKET_HIGH", 2.0, min_value=1.0)
+VOL_LEV_MULT_MILD = env_float("VOL_LEV_MULT_MILD", 0.85, min_value=0.1)
+VOL_LEV_MULT_HIGH = env_float("VOL_LEV_MULT_HIGH", 0.65, min_value=0.1)
+VOL_LEV_MULT_EXTREME = env_float("VOL_LEV_MULT_EXTREME", 0.45, min_value=0.1)
+# Adaptive TP ladder: vol yuksekse erken hasat, dusukse uzun ufuk
+TP_ADAPTIVE_ENABLED = os.getenv("TP_ADAPTIVE_ENABLED", "1") == "1"
+TP_HIGH_VOL_RATIO = env_float("TP_HIGH_VOL_RATIO", 1.5, min_value=1.0)
+TP_LOW_VOL_RATIO = env_float("TP_LOW_VOL_RATIO", 0.7, min_value=0.1)
+TP_HIGH_VOL_TP1_MULT = env_float("TP_HIGH_VOL_TP1_MULT", 0.80, min_value=0.1)
+TP_HIGH_VOL_TP2_MULT = env_float("TP_HIGH_VOL_TP2_MULT", 0.90, min_value=0.1)
+TP_LOW_VOL_TP1_MULT = env_float("TP_LOW_VOL_TP1_MULT", 1.20, min_value=0.1)
+TP_LOW_VOL_TP2_MULT = env_float("TP_LOW_VOL_TP2_MULT", 1.10, min_value=0.1)
 PM_CORE_MAX_HOLD_MIN = env_int("PM_CORE_MAX_HOLD_MIN", 180, min_value=5)
 PM_HIGH_BETA_MAX_HOLD_MIN = env_int("PM_HIGH_BETA_MAX_HOLD_MIN", 90, min_value=5)
 
@@ -1963,6 +1992,25 @@ def ema(values: list[float], period: int) -> float:
     return result
 
 
+def atr_pct(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float:
+    """Average True Range, current price'a normalize edilmis (yuzdesel).
+
+    Wilder TR: TR_i = max(H-L, |H-Cprev|, |L-Cprev|). ATR = ortalama(TR, period).
+    Veri yetersizse 0 doner; caller "ATR yok" olarak yorumlamali, default davranis surdurmeli.
+    """
+    n = len(closes)
+    if n < period + 1 or n != len(highs) or n != len(lows):
+        return 0.0
+    trs: list[float] = []
+    for i in range(n - period, n):
+        h, lo, c_prev = highs[i], lows[i], closes[i - 1]
+        trs.append(max(h - lo, abs(h - c_prev), abs(lo - c_prev)))
+    if not trs:
+        return 0.0
+    atr = sum(trs) / len(trs)
+    return atr / max(closes[-1], 1e-9)
+
+
 def bar(value: float, max_abs: float, width: int = 4) -> str:
     """Görsel bar gösterimi: -max_abs ile +max_abs arası."""
     if max_abs <= 0:
@@ -2540,6 +2588,14 @@ def get_features(symbol: str) -> dict:
     closes_1h = [_to_float(x[4], f"{symbol}.k1h.close") for x in k1h]
     closes_4h = [_to_float(x[4], f"{symbol}.k4h.close") for x in k4h]
     volumes_5 = [_to_float(x[5], f"{symbol}.k5.volume") for x in k5]
+    highs_5 = [_to_float(x[2], f"{symbol}.k5.high") for x in k5]
+    lows_5 = [_to_float(x[3], f"{symbol}.k5.low") for x in k5]
+    highs_15 = [_to_float(x[2], f"{symbol}.k15.high") for x in k15]
+    lows_15 = [_to_float(x[3], f"{symbol}.k15.low") for x in k15]
+    highs_1h = [_to_float(x[2], f"{symbol}.k1h.high") for x in k1h]
+    lows_1h = [_to_float(x[3], f"{symbol}.k1h.low") for x in k1h]
+    highs_4h = [_to_float(x[2], f"{symbol}.k4h.high") for x in k4h]
+    lows_4h = [_to_float(x[3], f"{symbol}.k4h.low") for x in k4h]
 
     if (
         len(closes_5) < MIN_KLINES_5M
@@ -2619,6 +2675,11 @@ def get_features(symbol: str) -> dict:
     except Exception as e:
         log.debug("%s funding rate alınamadı: %s", symbol, e)
 
+    atr5 = atr_pct(highs_5, lows_5, closes_5, ATR_PERIOD) if ATR_ENABLED else 0.0
+    atr15 = atr_pct(highs_15, lows_15, closes_15, ATR_PERIOD) if ATR_ENABLED else 0.0
+    atr1h = atr_pct(highs_1h, lows_1h, closes_1h, ATR_PERIOD) if ATR_ENABLED else 0.0
+    atr4h = atr_pct(highs_4h, lows_4h, closes_4h, ATR_PERIOD) if ATR_ENABLED else 0.0
+
     return {
         "last": last,
         "spot_price": spot_price,
@@ -2636,6 +2697,10 @@ def get_features(symbol: str) -> dict:
         "spread_bps": spread_bps,
         "order_book": order_book,
         "change_24h": change_24h,
+        "atr_pct_5m": atr5,
+        "atr_pct_15m": atr15,
+        "atr_pct_1h": atr1h,
+        "atr_pct_4h": atr4h,
     }
 
 
@@ -3879,9 +3944,10 @@ def evaluate_leverage_policy(result: dict, stop_pct: float, position_sizing: dic
     exec_mult = _lp_exec_multiplier(exec_quality)
     dashboard_mult, dashboard_reason, dashboard_info = _lp_dashboard_multiplier(result)
     rg_mult, rg_reason, rg_snapshot = _lp_risk_governor_multiplier(result)
+    vol_mult, vol_diag = _vol_leverage_multiplier(group, result.get("features") or {})
     aggressive_allowed, aggressive_reason = _lp_aggressive_gate(result, grade, confidence, exec_quality, dashboard_info)
 
-    raw_target_lev = max(LEVERAGE_POLICY_MIN_ECON_LEV, base_target * regime_mult * quality_mult * exec_mult * dashboard_mult * rg_mult)
+    raw_target_lev = max(LEVERAGE_POLICY_MIN_ECON_LEV, base_target * regime_mult * quality_mult * exec_mult * dashboard_mult * rg_mult * vol_mult)
     if not aggressive_allowed:
         raw_target_lev = min(raw_target_lev, base_target)
 
@@ -3908,6 +3974,7 @@ def evaluate_leverage_policy(result: dict, stop_pct: float, position_sizing: dic
         f"Execution multiplier x{exec_mult:.2f}",
         f"Dashboard multiplier x{dashboard_mult:.2f}: {dashboard_reason}",
         f"Risk governor multiplier x{rg_mult:.2f}: {rg_reason}",
+        f"Volatility multiplier x{vol_mult:.2f} ({vol_diag.get('band', 'n/a')})",
         aggressive_reason,
         f"Safe exchange leverage {safe_exchange_lev:.2f}x; risk-cap leverage {risk_cap_lev:.2f}x",
         f"Final economic leverage {final_lev:.2f}x; exchange leverage ≈{recommended_exchange_leverage:.2f}x; liq distance %{liq_distance*100:.2f}",
@@ -12210,6 +12277,85 @@ def _replay_baseline_spread_bps(group: str) -> float:
     return float(SPREAD_LIMITS.get(group, SPREAD_LIMITS["CORE"])) * 0.5
 
 
+_ATR_NORMAL_BY_GROUP: dict[str, float] = {
+    "CORE": ATR_NORMAL_CORE,
+    "MAJOR_ALT": ATR_NORMAL_MAJOR_ALT,
+    "HIGH_BETA": ATR_NORMAL_HIGH_BETA,
+    "MEME": ATR_NORMAL_MEME,
+}
+
+
+def _adaptive_stop_pct(group: str, features: dict) -> tuple[float, dict]:
+    """ATR-aware stop_pct. Base'i alt sinir, ATR*multiplier'i hedef yapar.
+
+    - Floor: base * STOP_ATR_FLOOR_FRACTION (asagi inmez)
+    - Cap:   base * STOP_ATR_CAP_MULTIPLIER (yukari cikmaz)
+    Boylece sakin piyasada stop daralabilir, calkantili piyasada genisler.
+    """
+    base = float(TRADE_PLAN_CONFIG.get(group, TRADE_PLAN_CONFIG["CORE"])["stop_pct"])
+    if not ATR_ENABLED:
+        return base, {"mode": "static", "base": base}
+    atr1h = float(features.get("atr_pct_1h") or 0.0)
+    if atr1h <= 0:
+        return base, {"mode": "static_fallback", "base": base, "reason": "atr_unavailable"}
+    target = atr1h * STOP_ATR_MULTIPLIER
+    floor = base * STOP_ATR_FLOOR_FRACTION
+    cap = base * STOP_ATR_CAP_MULTIPLIER
+    final = max(floor, min(target, cap))
+    return final, {
+        "mode": "atr",
+        "base": round(base, 5),
+        "atr_pct_1h": round(atr1h, 5),
+        "target": round(target, 5),
+        "final": round(final, 5),
+    }
+
+
+def _vol_leverage_multiplier(group: str, features: dict) -> tuple[float, dict]:
+    """Anlik ATR / grup-tipik ATR oranina gore leverage azaltma carpani."""
+    if not ATR_ENABLED:
+        return 1.0, {"mode": "off"}
+    atr1h = float(features.get("atr_pct_1h") or 0.0)
+    normal = _ATR_NORMAL_BY_GROUP.get(group, ATR_NORMAL_MAJOR_ALT)
+    if atr1h <= 0 or normal <= 0:
+        return 1.0, {"mode": "fallback", "reason": "atr_unavailable"}
+    ratio = atr1h / normal
+    if ratio <= 1.0:
+        mult, band = 1.0, "calm"
+    elif ratio <= VOL_LEV_BRACKET_MILD:
+        mult, band = VOL_LEV_MULT_MILD, "mild"
+    elif ratio <= VOL_LEV_BRACKET_HIGH:
+        mult, band = VOL_LEV_MULT_HIGH, "high"
+    else:
+        mult, band = VOL_LEV_MULT_EXTREME, "extreme"
+    return mult, {"mode": "atr", "ratio": round(ratio, 2), "band": band, "mult": mult}
+
+
+def _adaptive_tp_ladder(group: str, features: dict) -> dict:
+    """Vol yuksekse TP1/TP2'yi yakinlastir (erken hasat), dusukse uzat."""
+    base = dict(PM_CONFIG.get(group, PM_CONFIG["CORE"]))
+    if not TP_ADAPTIVE_ENABLED or not ATR_ENABLED:
+        return base
+    atr1h = float(features.get("atr_pct_1h") or 0.0)
+    normal = _ATR_NORMAL_BY_GROUP.get(group, ATR_NORMAL_MAJOR_ALT)
+    if atr1h <= 0 or normal <= 0:
+        return base
+    ratio = atr1h / normal
+    tp1 = float(base.get("tp1_r", 1.0))
+    tp2 = float(base.get("tp2_r", 2.0))
+    tp3 = float(base.get("tp3_r", 3.0))
+    if ratio >= TP_HIGH_VOL_RATIO:
+        tp1 *= TP_HIGH_VOL_TP1_MULT
+        tp2 *= TP_HIGH_VOL_TP2_MULT
+    elif ratio <= TP_LOW_VOL_RATIO:
+        tp1 *= TP_LOW_VOL_TP1_MULT
+        tp2 *= TP_LOW_VOL_TP2_MULT
+    base["tp1_r"] = tp1
+    base["tp2_r"] = tp2
+    base["tp3_r"] = tp3
+    return base
+
+
 def _replay_stress_multiplier(regime: Optional[dict]) -> float:
     # Stres rejimlerinde spread genisler. 2022-07 (Luna/3AC) gibi donemlerde
     # altcoin spread'leri 2-3x'e cikar; CHOP da hafif genisleme yasanir.
@@ -12242,11 +12388,20 @@ def replay_features(symbol: str, windows: dict[str, list[list]]) -> Optional[dic
 
     c5, c15 = [_hr_c(x) for x in k5], [_hr_c(x) for x in k15]
     c1h, c4h = [_hr_c(x) for x in k1h], [_hr_c(x) for x in k4h]
+    h5, l5 = [_hr_h(x) for x in k5], [_hr_l(x) for x in k5]
+    h15, l15 = [_hr_h(x) for x in k15], [_hr_l(x) for x in k15]
+    h1h, l1h = [_hr_h(x) for x in k1h], [_hr_l(x) for x in k1h]
+    h4h, l4h = [_hr_h(x) for x in k4h], [_hr_l(x) for x in k4h]
     v5 = [_hr_v(x) for x in k5]
     recent = v5[-(VOLUME_WINDOW + 1):-1]
     median_vol = statistics.median(recent) if recent else 0.0
     group = COINS.get(symbol, "CORE")
     spread = _replay_baseline_spread_bps(group)
+
+    atr5 = atr_pct(h5, l5, c5, ATR_PERIOD) if ATR_ENABLED else 0.0
+    atr15 = atr_pct(h15, l15, c15, ATR_PERIOD) if ATR_ENABLED else 0.0
+    atr1h = atr_pct(h1h, l1h, c1h, ATR_PERIOD) if ATR_ENABLED else 0.0
+    atr4h = atr_pct(h4h, l4h, c4h, ATR_PERIOD) if ATR_ENABLED else 0.0
 
     return {
         "last": c5[-1],
@@ -12265,6 +12420,10 @@ def replay_features(symbol: str, windows: dict[str, list[list]]) -> Optional[dic
         "spread_bps": spread,
         "order_book": {"available": False, "reason": "Historical replay depth unavailable."},
         "change_24h": _hr_ret(c5, 288),
+        "atr_pct_5m": atr5,
+        "atr_pct_15m": atr15,
+        "atr_pct_1h": atr1h,
+        "atr_pct_4h": atr4h,
     }
 
 
@@ -12301,25 +12460,44 @@ def replay_result(symbol: str, feat: dict, btc: dict, eth: dict, session: Sessio
     return result
 
 
-def _open_replay_pos(symbol: str, result: dict, bar: list, ts: int, spread_bps: float) -> dict:
+def _open_replay_pos(symbol: str, result: dict, bar: list, ts: int, spread_bps: float, features: Optional[dict] = None) -> dict:
     direction, group = result["signal"], result["group"]
     entry = _hr_c(bar)
-    stop_pct = float(TRADE_PLAN_CONFIG[group]["stop_pct"])
+    features = features or {}
+    stop_pct, stop_diag = _adaptive_stop_pct(group, features)
     stop = entry * (1 - stop_pct) if direction == "LONG" else entry * (1 + stop_pct)
     risk = abs(entry - stop)
     sign = 1 if direction == "LONG" else -1
+    # Replay backtest icin sabit 1R/2R/PM_CONFIG TP3'u taban kabul et,
+    # sonra TP_ADAPTIVE ile vol-aware carpan uygula.
+    tp1_r, tp2_r = 1.0, 2.0
+    tp3_r = float(PM_CONFIG.get(group, PM_CONFIG["CORE"]).get("tp3_r", 3.0))
+    if TP_ADAPTIVE_ENABLED and ATR_ENABLED:
+        atr1h = float(features.get("atr_pct_1h") or 0.0)
+        normal = _ATR_NORMAL_BY_GROUP.get(group, ATR_NORMAL_MAJOR_ALT)
+        if atr1h > 0 and normal > 0:
+            ratio = atr1h / normal
+            if ratio >= TP_HIGH_VOL_RATIO:
+                tp1_r *= TP_HIGH_VOL_TP1_MULT
+                tp2_r *= TP_HIGH_VOL_TP2_MULT
+            elif ratio <= TP_LOW_VOL_RATIO:
+                tp1_r *= TP_LOW_VOL_TP1_MULT
+                tp2_r *= TP_LOW_VOL_TP2_MULT
     return {
         "symbol": symbol, "group": group, "direction": direction,
         "entry": entry, "entry_ts": ts, "stop_pct": stop_pct,
         "stop": stop, "risk": risk,
-        "tp1": entry + sign * risk * 1.0,
-        "tp2": entry + sign * risk * 2.0,
-        "tp3": entry + sign * risk * float(PM_CONFIG[group]["tp3_r"]),
+        "tp1": entry + sign * risk * tp1_r,
+        "tp2": entry + sign * risk * tp2_r,
+        "tp3": entry + sign * risk * tp3_r,
+        "tp1_r": tp1_r, "tp2_r": tp2_r, "tp3_r": tp3_r,
         "remaining": 1.0, "realized_r": 0.0,
         "bars": 0, "tp1_hit": False, "tp2_hit": False,
         "regime": (result.get("regime") or {}).get("regime"),
         "quality_grade": (result.get("trade_quality") or {}).get("grade"),
         "spread_bps_at_open": float(spread_bps or 0.0),
+        "atr_pct_1h_at_open": float(features.get("atr_pct_1h") or 0.0),
+        "stop_mode": stop_diag.get("mode"),
     }
 
 
@@ -12488,8 +12666,9 @@ def run_historical_replay_backtest(symbols: Optional[list[str]] = None, days: Op
                 rows = data.get(sym, {}).get("5m", [])
                 idx = _hr_idx_at(index.get(sym, {}).get("5m", []), ts)
                 if idx >= 0:
-                    spread_at_open = float((features.get(sym) or {}).get("spread_bps", 0.0) or 0.0)
-                    positions[sym] = _open_replay_pos(sym, result, rows[idx], ts, spread_at_open)
+                    feat_sym = features.get(sym) or {}
+                    spread_at_open = float(feat_sym.get("spread_bps", 0.0) or 0.0)
+                    positions[sym] = _open_replay_pos(sym, result, rows[idx], ts, spread_at_open, feat_sym)
 
     last_ts = times[-1] if times else int(time.time() * 1000)
     for sym, pos in list(positions.items()):
