@@ -126,6 +126,7 @@
       "Execution multiplier x1.00",
       "Dashboard multiplier x1.00: Dashboard INSUFFICIENT: RISK_ON_TREND_UP|LONG|CORE",
       "Risk governor multiplier x1.00: Risk governor snapshot yok.",
+      "Volatility multiplier x1.00 (n/a)",
       "Agresif kald\u0131ra\u00e7 i\u00e7in A+ setup gerekli.",
       "Safe exchange leverage 5.00x; risk-cap leverage 4.00x",
       "Final economic leverage 1.50x; exchange leverage \u22481.50x; liq distance %65.67"
@@ -215,6 +216,7 @@
         "Execution multiplier x1.00",
         "Dashboard multiplier x1.00: Dashboard INSUFFICIENT: RISK_ON_TREND_UP|LONG|CORE",
         "Risk governor multiplier x1.00: Risk governor snapshot yok.",
+        "Volatility multiplier x1.00 (n/a)",
         "Agresif kald\u0131ra\u00e7 i\u00e7in A+ setup gerekli.",
         "Safe exchange leverage 5.00x; risk-cap leverage 4.00x",
         "Final economic leverage 1.50x; exchange leverage \u22481.50x; liq distance %65.67"

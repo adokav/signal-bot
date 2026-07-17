@@ -57,6 +57,7 @@
       "Execution multiplier x1.00",
       "Dashboard multiplier x1.00: Dashboard INSUFFICIENT: RISK_OFF_TREND_DOWN|SHORT|CORE",
       "Risk governor multiplier x1.00: Risk governor snapshot yok.",
+      "Volatility multiplier x1.00 (n/a)",
       "Agresif kald\u0131ra\u00e7 kapal\u0131: rejim risk-on de\u011fil.",
       "Safe exchange leverage 5.00x; risk-cap leverage 4.00x",
       "Final economic leverage 0.54x; exchange leverage \u22481.00x; liq distance %99.00"
@@ -136,6 +137,7 @@
         "Execution multiplier x1.00",
         "Dashboard multiplier x1.00: Dashboard INSUFFICIENT: RISK_OFF_TREND_DOWN|SHORT|CORE",
         "Risk governor multiplier x1.00: Risk governor snapshot yok.",
+        "Volatility multiplier x1.00 (n/a)",
         "Agresif kald\u0131ra\u00e7 kapal\u0131: rejim risk-on de\u011fil.",
         "Safe exchange leverage 5.00x; risk-cap leverage 4.00x",
         "Final economic leverage 0.54x; exchange leverage \u22481.00x; liq distance %99.00"

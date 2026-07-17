@@ -1,4 +1,37 @@
-# Signal Bot ACCE — Reporting v3
+# Signal Bot ACCE — Unified Engine v4
+
+## Tek çekirdek mimarisi
+
+Bu depo artık diğer kripto botlarının **kod yığını değil, doğrulanmış
+yeteneklerinin birleştiği tek sermaye otoritesidir**:
+
+- `signal-bot`: sinyal, rejim, risk, pozisyon planı ve tek işlem kapısı.
+- `pricemonitorx_bot`: geniş CEX evreninde erken fırsat keşfi; yalnızca ek kanıt.
+- `phenomenonx_bot`: Solana/Base DEX fenomen radarı; daima `RESEARCH_ONLY`.
+- `mm_trading`: t+1 icra, maliyet ve out-of-sample doğrulama disiplini.
+- `theassembly`: bu mimarinin dışında ve bağımsızdır; bu entegrasyonda değiştirilmez.
+
+Varsayılan işlem evreni:
+
+```text
+BTCUSDT, ETHUSDT, SOLUSDT, LINKUSDT, ONDOUSDT,
+RENDERUSDT, PYTHUSDT, BONKUSDT, POPCATUSDT
+```
+
+Geniş radar adayları bu listeyi kendiliğinden büyütemez. Unified Engine
+varsayılan olarak `SHADOW` çalışır ve hiçbir radar adayı emir yetkisi taşımaz.
+Telegram'da `/radar` komutu son CEX + DEX gölge taramasını gösterir.
+
+```text
+UNIFIED_ENGINE_ENABLED=1
+UNIFIED_ENGINE_MODE=SHADOW
+UNIFIED_CEX_RADAR_ENABLED=1
+UNIFIED_DEX_RADAR_ENABLED=1
+UNIFIED_SCAN_INTERVAL_SECONDS=1800
+```
+
+Ayrıntılı tasarım, geçiş ve geri alma kuralları:
+[`docs/UNIFIED_ENGINE.md`](docs/UNIFIED_ENGINE.md).
 
 Bu sürüm Telegram mesajlarını okunabilir karar raporu formatına çevirir.
 
@@ -251,7 +284,7 @@ gösterilir.
 
 Coin evreni güncellendi:
 ```text
-BTCUSDT, ETHUSDT, SOLUSDT, LINKUSDT, ONDOUSDT, RENDERUSDT, PYTHUSDT, BONKUSDT, WIFUSDT, POPCATUSDT
+BTCUSDT, ETHUSDT, SOLUSDT, LINKUSDT, ONDOUSDT, RENDERUSDT, PYTHUSDT, BONKUSDT, POPCATUSDT
 ```
 
 Yeni çoklu pozisyon kuralı:

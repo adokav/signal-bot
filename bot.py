@@ -42,7 +42,17 @@ from urllib.parse import quote, urlencode
 
 from urllib3.util.retry import Retry
 
-__version__ = "3.3.0-acce-trade-brain-v1"
+from acce_unified import (
+    UnifiedConfig,
+    UnifiedRadarEngine,
+    UnifiedRadarRuntime,
+    attach_snapshot_to_results,
+    build_trade_universe,
+    format_snapshot_brief,
+)
+from acce_unified.validation import ValidationPolicy, evaluate_promotion
+
+__version__ = "4.0.0-acce-unified-shadow"
 
 # ============================================================
 # LOGGING
@@ -175,30 +185,48 @@ GDELT_BASE = "https://api.gdeltproject.org/api/v2"
 # COIN UNIVERSE
 # ============================================================
 
-COINS: dict[str, str] = {
-    "BTCUSDT": "CORE",
-    "ETHUSDT": "CORE",
+# Tek sermaye evreni. PriceMonitorX/PhenomenonX geniş evren adayları bu
+# sözlüğü kendiliğinden büyütemez; yalnızca gölge radar kanıtı üretir.
+COINS: dict[str, str] = build_trade_universe()
 
-    "AVAXUSDT": "MAJOR_ALT",
-    "LDOUSDT": "MAJOR_ALT",
-    "LQTYUSDT": "MAJOR_ALT",
-    "QNTUSDT": "MAJOR_ALT",
+UNIFIED_CONFIG = UnifiedConfig.from_env()
+UNIFIED_VALIDATION_POLICY = ValidationPolicy(
+    min_total_trades=env_int("UNIFIED_VALIDATION_MIN_TOTAL_TRADES", 40, min_value=10),
+    min_oos_trades=env_int("UNIFIED_VALIDATION_MIN_OOS_TRADES", 16, min_value=5),
+    oos_fraction=min(0.90, env_float("UNIFIED_VALIDATION_OOS_FRACTION", 0.40, min_value=0.10)),
+    min_profit_factor=env_float("UNIFIED_VALIDATION_MIN_PROFIT_FACTOR", 1.20, min_value=0.0),
+    min_expectancy_r=env_float("UNIFIED_VALIDATION_MIN_EXPECTANCY_R", 0.05),
+    max_drawdown_r=env_float("UNIFIED_VALIDATION_MAX_DRAWDOWN_R", 6.0, min_value=0.1),
+)
+_UNIFIED_RUNTIME: Optional[UnifiedRadarRuntime] = None
+_UNIFIED_RUNTIME_LOCK = threading.RLock()
 
-    "SOLUSDT": "HIGH_BETA",
-    "ONDOUSDT": "HIGH_BETA",
-    "RENDERUSDT": "HIGH_BETA",
-    "PYTHUSDT": "HIGH_BETA",
-    "WLDUSDT": "HIGH_BETA",
-    "PENDLEUSDT": "HIGH_BETA",
-    "TAOUSDT": "HIGH_BETA",
-    "ETHFIUSDT": "HIGH_BETA",
 
-    "BONKUSDT": "MEME",
-    "WIFUSDT": "MEME",
-    "POPCATUSDT": "MEME",
-    "FARTCOINUSDT": "MEME",
-    "FLOKIUSDT": "MEME",
-}
+def _get_unified_runtime() -> Optional[UnifiedRadarRuntime]:
+    global _UNIFIED_RUNTIME
+    if not UNIFIED_CONFIG.enabled:
+        return None
+    with _UNIFIED_RUNTIME_LOCK:
+        if _UNIFIED_RUNTIME is None:
+            _UNIFIED_RUNTIME = UnifiedRadarRuntime(
+                UnifiedRadarEngine(UNIFIED_CONFIG, COINS)
+            )
+        return _UNIFIED_RUNTIME
+
+
+def _tick_unified_radar(results: list[dict], state_mgr: "StateManager") -> Optional[dict]:
+    runtime = _get_unified_runtime()
+    if runtime is None:
+        return None
+    snapshot = runtime.tick()
+    if snapshot is None:
+        return state_mgr.get_meta("unified_radar_snapshot")
+    attach_snapshot_to_results(results, snapshot)
+    payload = snapshot.to_dict()
+    previous = state_mgr.get_meta("unified_radar_snapshot") or {}
+    if previous.get("generated_at") != payload.get("generated_at"):
+        state_mgr.set_meta("unified_radar_snapshot", payload)
+    return payload
 
 # ============================================================
 # TIMING CONFIG (saniye cinsinden)
@@ -1647,8 +1675,9 @@ TELEGRAM_MAX_LEN = 4000  # Güvenli pay
 MAIN_KEYBOARD: dict[str, Any] = {
     "keyboard": [
         [{"text": "/status"}, {"text": "/positions"}, {"text": "/equity"}],
-        [{"text": "/report"}, {"text": "/regime"}, {"text": "/help"}],
+        [{"text": "/report"}, {"text": "/regime"}, {"text": "/radar"}],
         [{"text": "/pending"}, {"text": "/trade_pending"}],
+        [{"text": "/help"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -1663,6 +1692,7 @@ BOT_COMMANDS: list[dict[str, str]] = [
     {"command": "equity", "description": "Bakiye, gerceklesen PnL, win/loss"},
     {"command": "report", "description": "Son 7 gun performans ozeti"},
     {"command": "regime", "description": "Anlik rejim + macro context"},
+    {"command": "radar", "description": "CEX + DEX golge firsat radari"},
     {"command": "pending", "description": "Bekleyen parametre onerileri"},
     {"command": "trade_pending", "description": "Bekleyen trade onaylari"},
     {"command": "help", "description": "Tum komutlar"},
@@ -8218,6 +8248,51 @@ def _dashboard_rows(trades: list[dict]) -> list[dict]:
     return rows
 
 
+def unified_validation_report(state_mgr: StateManager = _STATE_MGR) -> dict:
+    """Out-of-sample promotion report for the imported radar capabilities.
+
+    Missing R values are skipped rather than guessed. Passing this gate only
+    recommends ADVISORY mode; it never enables execution.
+    """
+
+    closed = _rg_closed_trades(state_mgr)
+    r_values: list[float] = []
+    closed_with_r = 0
+    for trade in closed:
+        values = _dashboard_trade_values(trade)
+        r_multiple = values.get("r_multiple")
+        if r_multiple is None:
+            continue
+        closed_with_r += 1
+        radar = trade.get("unified_radar") or {}
+        if isinstance(radar, dict) and isinstance(radar.get("candidate"), dict):
+            r_values.append(float(r_multiple))
+    report = evaluate_promotion(r_values, UNIFIED_VALIDATION_POLICY)
+    report.update({
+        "source_closed_trades": len(closed),
+        "closed_trades_with_r": closed_with_r,
+        "eligible_r_trades": len(r_values),
+        "skipped_without_r": max(0, len(closed) - closed_with_r),
+        "skipped_without_radar_confluence": max(0, closed_with_r - len(r_values)),
+        "execution_authority": False,
+    })
+    return report
+
+
+def format_unified_validation_brief(state_mgr: StateManager = _STATE_MGR) -> str:
+    report = unified_validation_report(state_mgr)
+    oos = report.get("out_of_sample") or {}
+    pf = oos.get("profit_factor")
+    expectancy = oos.get("expectancy_r")
+    pf_text = f"{float(pf):.2f}" if isinstance(pf, (int, float)) else "N/A"
+    exp_text = f"{float(expectancy):+.3f}R" if isinstance(expectancy, (int, float)) else "N/A"
+    return (
+        f"Unified OOS: {report.get('decision', 'KEEP_SHADOW')} | "
+        f"örnek {report.get('eligible_r_trades', 0)}/{UNIFIED_VALIDATION_POLICY.min_total_trades} | "
+        f"OOS PF {pf_text} | Exp {exp_text} | emir yetkisi YOK"
+    )
+
+
 def _dashboard_metrics(rows: list[dict]) -> dict:
     if not rows:
         return {
@@ -9026,6 +9101,7 @@ def open_trade(result: dict, plan: dict, state_mgr: StateManager = _STATE_MGR) -
         "session": copy.deepcopy(result.get("session_context", {})),
         "news_context": copy.deepcopy(result.get("news_context", {})),
         "raw": copy.deepcopy(result.get("raw", {})),
+        "unified_radar": copy.deepcopy(result.get("unified_radar", {})),
         "open_price": float((result.get("features") or {}).get("last", plan["reference_entry"])),
         "open_spread_bps": float((result.get("features") or {}).get("spread_bps", 0) or 0),
         "open_alert_sent": False,
@@ -10628,6 +10704,7 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
                 "Sabit klavye altta açıldı. İstediğin zaman tıkla.\n\n"
                 "Komutlar:\n"
                 "/status — anlık durum\n"
+                "/radar — birleşik gölge radar\n"
                 "/help — komut listesi\n"
                 "PENDING — bekleyen parametre önerisi\n"
                 "ACCEPT <id> — öneri kabul\n"
@@ -10643,6 +10720,7 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
                 "/equity — bakiye, gerçekleşen PnL, win/loss\n"
                 "/report — son 7 gün performans özeti\n"
                 "/regime — anlık rejim + macro context\n"
+                "/radar — PriceMonitorX CEX + PhenomenonX DEX gölge radarı\n"
                 "/help — bu mesaj\n"
                 "PENDING — bekleyen parametre önerisi\n"
                 "ACCEPT <id> — öneri kabul\n"
@@ -10805,6 +10883,15 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
                 f"News: {news}\n"
                 f"Zaman: {tr_now_text()}"
             )
+        elif cmd == "RADAR":
+            snapshot = state_mgr.get_meta("unified_radar_snapshot")
+            send_message(
+                "🧭 UNIFIED RADAR\n\n"
+                f"{format_snapshot_brief(snapshot)}\n\n"
+                f"{format_unified_validation_brief(state_mgr)}\n\n"
+                "CEX adayları yalnızca ACCE çekirdeğine ek kanıt sağlar. "
+                "DEX adayları araştırma amaçlıdır ve emir yetkisi yoktur."
+            )
         elif cmd == "PENDING":
             send_message(pending_parameter_suggestions_text())
         elif cmd == "ACCEPT" and len(parts) >= 2:
@@ -10885,6 +10972,12 @@ def _process_symbol(
         result["risk_governor"] = risk_governor_allows_trade(result, state_mgr)
         result = annotate_long_setup_state(result, state_mgr)
         result = apply_trade_filters(result)
+
+        # Attach completed shadow evidence before trade tracking so its
+        # predictive value can later be measured out-of-sample. This helper is
+        # tested not to mutate signal, score or actionable fields.
+        if _UNIFIED_RUNTIME is not None:
+            attach_snapshot_to_results([result], _UNIFIED_RUNTIME.latest())
 
         # Noise-free mode:
         # - Standalone signal detail messages are suppressed
@@ -11633,6 +11726,7 @@ def format_human_heartbeat(
         f"• Macro Risk: {macro_txt}",
         f"• Seans: {session_ctx.session}",
         f"• Haber: {news_ctx.get('category', 'N/A')} | {news_ctx.get('note', '-')}",
+        f"• {format_snapshot_brief(state_mgr.get_meta('unified_radar_snapshot'))}",
         "",
         "📈 TRADE DURUMU",
         f"• Açık pozisyon: {open_count}",
@@ -11672,6 +11766,7 @@ def format_human_heartbeat(
         f"• Weight Learning: {wl_status}",
         f"• ML Gate: {ml_status}",
         f"• AI Optimization: {ai_txt}",
+        f"• {format_unified_validation_brief(state_mgr)}",
         "",
         "⚠️ UYARILAR",
     ])
@@ -11698,6 +11793,7 @@ def format_debug_heartbeat(state_mgr: StateManager, results: list[dict], pending
         f"{format_weight_learning_brief(state_mgr)}\n"
         f"{format_regime_strategy_brief(results)}\n"
         f"{format_macro_risk_brief(state_mgr)}\n"
+        f"{format_snapshot_brief(state_mgr.get_meta('unified_radar_snapshot'))}\n"
         f"{format_execution_quality_brief(results)}\n"
         f"{format_strategy_simulation_brief(state_mgr)}\n"
         f"{format_paper_execution_brief(state_mgr)}\n"
@@ -11710,6 +11806,7 @@ def format_debug_heartbeat(state_mgr: StateManager, results: list[dict], pending
         f"{format_live_readiness_brief(state_mgr)}\n"
         f"{format_ai_optimization_brief(state_mgr)}\n"
         f"{format_ml_validation_brief(state_mgr)}\n"
+        f"{format_unified_validation_brief(state_mgr)}\n"
         f"PS: base %{POSITION_SIZING_BASE_RISK_PCT*100:.2f} | clamp %{POSITION_SIZING_MIN_RISK_PCT*100:.2f}-%{POSITION_SIZING_MAX_RISK_PCT*100:.2f}\n"
         f"{format_backtest_validation_brief()}\n"
         f"Pending suggestions: {pending_count}"
@@ -11845,7 +11942,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
     log.info("BOT BAŞLADI v%s", __version__)
     _register_bot_commands()
     send_message(
-        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + MacroRisk + SignalBrain + ACCETradeBrain + StableCollateral + PaperExec + PM + RiskGov/CapitalGuard/RegimeEdge/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON",
+        f"BOT BAŞLADI 🚀 v{__version__} — Regime-first + MacroRisk + SignalBrain + ACCETradeBrain + UnifiedRadar({UNIFIED_CONFIG.mode}) + StableCollateral + PaperExec + PM + RiskGov/CapitalGuard/RegimeEdge/PortfolioCorr/AIOpt aktif. Mode={EXECUTION_MODE}, Paper={PAPER_EXECUTION_ENABLED}, LiveReadyGuard=ON",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -11870,6 +11967,10 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
             macro_context = fetch_macro_risk_context()
             state_mgr.set_meta("last_macro_risk", macro_context)
             state_mgr.save()
+
+            # Geniş evren taraması ana karar döngüsünü bloklamadan arka planda
+            # çalışır. Bu ilk tick işi başlatır; sonuç aşağıda toplanır.
+            _tick_unified_radar([], state_mgr)
 
             # BTC ve ETH features (referans, başarısızsa tur atla)
             try:
@@ -11927,6 +12028,10 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
                 if result:
                     results.append(result)
 
+            # Sadece açıklayıcı metadata eklenir; signal/actionable ve ACCE
+            # trade gate alanlarına dokunulmaz.
+            _tick_unified_radar(results, state_mgr)
+
             results_by_symbol = {r["symbol"]: r for r in results}
             ml_validation_learning_cycle(results_by_symbol, state_mgr)
             reconcile_paper_execution(results_by_symbol, state_mgr)
@@ -11937,6 +12042,7 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
             # Persist oversight reports each scan for dashboards / live-readiness review.
             risk_governor_snapshot(state_mgr, global_regime)
             regime_performance_dashboard(state_mgr)
+            state_mgr.set_meta("unified_validation_report", unified_validation_report(state_mgr))
             live_readiness_report(state_mgr)
 
             _send_periodic_messages(state_mgr, results, session_ctx, news_context)
@@ -11976,6 +12082,10 @@ _INTERVAL_MS = {"5m": 300000, "15m": 900000, "60m": 3600000, "4h": 14400000}
 
 def _hr_ts(k: list) -> int:
     return int(float(k[0]))
+
+
+def _hr_o(k: list) -> float:
+    return float(k[1])
 
 
 def _hr_h(k: list) -> float:
@@ -12251,6 +12361,22 @@ def _hr_idx_at(times: list[int], ts: int) -> int:
     return bisect.bisect_right(times, ts) - 1
 
 
+def _hr_closed_idx_at(times: list[int], decision_bar_open_ts: int, interval: str) -> int:
+    """Latest candle fully closed when the current 5m decision bar closes.
+
+    Historical rows are keyed by *open* time. Using ``_hr_idx_at(times, ts)``
+    for 15m/1h/4h therefore exposed the full OHLC of a still-open higher-timeframe
+    candle. The decision is evaluated at the current 5m close, so a candle is
+    usable only when ``open_time + interval <= decision_time``.
+    """
+
+    if interval not in _INTERVAL_MS:
+        raise ValueError(f"Desteklenmeyen replay interval: {interval}")
+    decision_time = int(decision_bar_open_ts) + _INTERVAL_MS["5m"]
+    latest_closed_open = decision_time - _INTERVAL_MS[interval]
+    return bisect.bisect_right(times, latest_closed_open) - 1
+
+
 def _hr_ret(closes: list[float], bars: int) -> float:
     return pct(closes[-1], closes[-(bars + 1)]) if len(closes) >= bars + 1 else 0.0
 
@@ -12460,9 +12586,18 @@ def replay_result(symbol: str, feat: dict, btc: dict, eth: dict, session: Sessio
     return result
 
 
-def _open_replay_pos(symbol: str, result: dict, bar: list, ts: int, spread_bps: float, features: Optional[dict] = None) -> dict:
+def _open_replay_pos(
+    symbol: str,
+    result: dict,
+    bar: list,
+    ts: int,
+    spread_bps: float,
+    features: Optional[dict] = None,
+    *,
+    entry_price: Optional[float] = None,
+) -> dict:
     direction, group = result["signal"], result["group"]
-    entry = _hr_c(bar)
+    entry = float(entry_price if entry_price is not None else _hr_c(bar))
     features = features or {}
     stop_pct, stop_diag = _adaptive_stop_pct(group, features)
     stop = entry * (1 - stop_pct) if direction == "LONG" else entry * (1 + stop_pct)
@@ -12607,17 +12742,36 @@ def run_historical_replay_backtest(symbols: Optional[list[str]] = None, days: Op
         times = times[-HISTORICAL_REPLAY_MAX_BARS:]
 
     positions: dict[str, dict] = {}
+    pending_entries: dict[str, dict] = {}
     trades: list[dict] = []
     raw_seen = blocked_seen = 0
     news = default_news_context()
 
     for ts in times:
+        # t kapanışında üretilen sinyal ancak t+1 açılışında uygulanır. Böylece
+        # aynı kapanış fiyatından kusursuz fill varsayımı ve sinyal/işlem zaman
+        # çakışması ortadan kalkar.
+        for sym, pending in list(pending_entries.items()):
+            rows = data.get(sym, {}).get("5m", [])
+            idx = _hr_idx_at(index.get(sym, {}).get("5m", []), ts)
+            if sym not in positions and idx >= 0:
+                positions[sym] = _open_replay_pos(
+                    sym,
+                    pending["result"],
+                    rows[idx],
+                    ts,
+                    float(pending.get("spread_bps") or 0.0),
+                    pending.get("features") or {},
+                    entry_price=_hr_o(rows[idx]),
+                )
+            pending_entries.pop(sym, None)
+
         features: dict[str, dict] = {}
         for sym in sorted(set(symbols) | {"BTCUSDT", "ETHUSDT"}):
             windows, ok = {}, True
             for interval in ("5m", "15m", "60m", "4h"):
                 rows = data.get(sym, {}).get(interval, [])
-                idx = _hr_idx_at(index.get(sym, {}).get(interval, []), ts)
+                idx = _hr_closed_idx_at(index.get(sym, {}).get(interval, []), ts, interval)
                 if idx < 0:
                     ok = False
                     break
@@ -12647,6 +12801,7 @@ def run_historical_replay_backtest(symbols: Optional[list[str]] = None, days: Op
             raw_seen += int(result.get("raw_signal") in ("LONG", "SHORT"))
             blocked_seen += int(result.get("blocked_signal") in ("LONG", "SHORT"))
 
+        closed_this_bar: set[str] = set()
         for sym, pos in list(positions.items()):
             rows = data.get(sym, {}).get("5m", [])
             idx = _hr_idx_at(index.get(sym, {}).get("5m", []), ts)
@@ -12656,19 +12811,23 @@ def run_historical_replay_backtest(symbols: Optional[list[str]] = None, days: Op
             if closed:
                 trades.append(closed)
                 positions.pop(sym, None)
+                closed_this_bar.add(sym)
             else:
                 positions[sym] = updated
 
         for sym, result in results.items():
-            if sym in positions:
+            if sym in positions or sym in closed_this_bar:
+                pending_entries.pop(sym, None)
                 continue
             if result.get("signal") in ("LONG", "SHORT") and result.get("actionable"):
-                rows = data.get(sym, {}).get("5m", [])
-                idx = _hr_idx_at(index.get(sym, {}).get("5m", []), ts)
-                if idx >= 0:
-                    feat_sym = features.get(sym) or {}
-                    spread_at_open = float(feat_sym.get("spread_bps", 0.0) or 0.0)
-                    positions[sym] = _open_replay_pos(sym, result, rows[idx], ts, spread_at_open, feat_sym)
+                feat_sym = copy.deepcopy(features.get(sym) or {})
+                pending_entries[sym] = {
+                    "result": copy.deepcopy(result),
+                    "features": feat_sym,
+                    "spread_bps": float(feat_sym.get("spread_bps", 0.0) or 0.0),
+                }
+            else:
+                pending_entries.pop(sym, None)
 
     last_ts = times[-1] if times else int(time.time() * 1000)
     for sym, pos in list(positions.items()):
@@ -12680,7 +12839,7 @@ def run_historical_replay_backtest(symbols: Optional[list[str]] = None, days: Op
     report = {
         "version": __version__,
         "created_at": tr_now_text(),
-        "mode": "historical_replay_v1",
+        "mode": "historical_replay_v2_closed_bars",
         "symbols": symbols,
         "days": days,
         "assumptions": {
@@ -12688,7 +12847,8 @@ def run_historical_replay_backtest(symbols: Optional[list[str]] = None, days: Op
             "macro": "daily_yahoo_macro_context_if_available_otherwise_neutral",
             "basis_funding_orderbook": "not_replayed_v1",
             "intrabar": "conservative_stop_first",
-            "entry": "bar_close_after_signal",
+            "features": "only_fully_closed_candles_at_decision_time",
+            "entry": "next_5m_bar_open_after_signal",
             "spread": "spread_limits_median_x_regime_stress_multiplier",
             "cost_model": "fee_2x+slippage_2x+spread_roundtrip",
             "risk_pct": HISTORICAL_REPLAY_RISK_PCT,
@@ -12702,6 +12862,7 @@ def run_historical_replay_backtest(symbols: Optional[list[str]] = None, days: Op
             "raw_signals_seen": raw_seen,
             "blocked_signals_seen": blocked_seen,
             "closed_trades": len(trades),
+            "pending_unfilled_at_end": len(pending_entries),
         },
         "summary": _replay_metrics(trades),
         "by_symbol": _replay_by(trades, "symbol"),
@@ -12777,6 +12938,11 @@ def shutdown_resources() -> None:
         try:
             _FEATURE_EXECUTOR.shutdown(wait=False, cancel_futures=True)
             _SYMBOL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        try:
+            if _UNIFIED_RUNTIME is not None:
+                _UNIFIED_RUNTIME.close()
         except Exception:
             pass
         close_http_sessions()
