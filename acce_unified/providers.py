@@ -268,7 +268,21 @@ class MexcNewListingProvider:
         except Exception as exc:
             ticker = {}
             log.warning("MEXC Spot ticker teyidi alınamadı: %s", exc)
-        additions = self._new_pairs_from_snapshot(set(exchange)) if exchange else []
+        # Persist only pairs that are actually open for Spot trading. A symbol
+        # may appear in exchangeInfo before launch with trading disabled; if it
+        # were snapshotted at that point, the later NOT_OPEN -> OPEN transition
+        # would disappear from the set diff exactly when it becomes actionable
+        # market data.
+        open_spot_pairs = {
+            pair
+            for pair, info in exchange.items()
+            if _boolish(info.get("isSpotTradingAllowed"), True)
+        }
+        additions = (
+            self._new_pairs_from_snapshot(open_spot_pairs)
+            if exchange
+            else []
+        )
 
         discovered: list[tuple[str, str, int, str]] = []
         seen_symbols: set[str] = set()

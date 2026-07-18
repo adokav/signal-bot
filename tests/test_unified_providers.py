@@ -179,3 +179,43 @@ def test_listing_provider_prioritizes_exchange_diff_before_candidate_cap(tmp_pat
     assert [(row.pair, row.discovery_source) for row in rows] == [
         ("NEWUSDT", "EXCHANGE_DIFF")
     ]
+
+
+class SpotTransitionSession(ListingSession):
+    def __init__(self):
+        self.spot_open = False
+
+    def get(self, url, params=None, timeout=15):
+        if "announcement.test" in url:
+            return FakeResponse([], content_type="text/html", text="<html>blocked</html>")
+        if url.endswith("/exchangeInfo"):
+            return FakeResponse({
+                "symbols": [
+                    {"symbol": "BTCUSDT", "isSpotTradingAllowed": True},
+                    {"symbol": "NEWUSDT", "isSpotTradingAllowed": self.spot_open},
+                ]
+            })
+        return super().get(url, params=params, timeout=timeout)
+
+
+def test_listing_provider_surfaces_not_open_to_open_transition(tmp_path):
+    seen_file = tmp_path / "seen.json"
+    seen_file.write_text(json.dumps(["BTCUSDT"]), encoding="utf-8")
+    session = SpotTransitionSession()
+    provider = MexcNewListingProvider(
+        base_url="https://mexc.test",
+        announcement_endpoints=("https://announcement.test",),
+        seen_file=str(seen_file),
+    )
+    provider.session = session
+
+    assert provider.fetch_listings() == []
+    assert set(json.loads(seen_file.read_text("utf-8"))) == {"BTCUSDT"}
+
+    session.spot_open = True
+    rows = provider.fetch_listings()
+
+    assert [(row.pair, row.spot_status, row.discovery_source) for row in rows] == [
+        ("NEWUSDT", "OPEN", "EXCHANGE_DIFF")
+    ]
+    assert set(json.loads(seen_file.read_text("utf-8"))) == {"BTCUSDT", "NEWUSDT"}
