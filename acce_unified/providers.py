@@ -282,6 +282,7 @@ class MexcNewListingProvider:
         # complementary. Batch listing headlines sometimes keep symbols only
         # in the article body, so a parseable headline must not suppress a new
         # Spot pair found in the same scan.
+        exchange_discoveries: list[tuple[str, str, int, str]] = []
         for pair in additions:
             if not pair.endswith("USDT") or len(pair) <= 4:
                 continue
@@ -289,7 +290,7 @@ class MexcNewListingProvider:
             if symbol in seen_symbols:
                 continue
             seen_symbols.add(symbol)
-            discovered.append(
+            exchange_discoveries.append(
                 (
                     symbol,
                     f"MEXC Spot API'de yeni görülen {pair}",
@@ -297,6 +298,10 @@ class MexcNewListingProvider:
                     "EXCHANGE_DIFF",
                 )
             )
+        # A newly appeared Spot pair is more time-sensitive than older titles
+        # still present on the announcement page. Put unseen API additions
+        # first so max_candidates trimming cannot discard the fallback signal.
+        discovered = [*exchange_discoveries, *discovered]
 
         if titles and not discovered:
             raise RuntimeError("MEXC listing başlığı bulundu fakat sembol ayrıştırılamadı")

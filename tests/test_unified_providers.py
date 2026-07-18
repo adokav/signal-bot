@@ -161,3 +161,21 @@ def test_listing_provider_merges_announcement_and_exchange_diff(tmp_path):
     assert set(by_pair) == {"NOVAUSDT", "NEWUSDT"}
     assert by_pair["NOVAUSDT"].discovery_source == "ANNOUNCEMENT"
     assert by_pair["NEWUSDT"].discovery_source == "EXCHANGE_DIFF"
+
+
+def test_listing_provider_prioritizes_exchange_diff_before_candidate_cap(tmp_path):
+    seen_file = tmp_path / "seen.json"
+    seen_file.write_text(json.dumps(["BTCUSDT"]), encoding="utf-8")
+    provider = MexcNewListingProvider(
+        base_url="https://mexc.test",
+        announcement_endpoints=("https://announcement.test",),
+        seen_file=str(seen_file),
+        max_candidates=1,
+    )
+    provider.session = MixedDiscoverySession()
+
+    rows = provider.fetch_listings()
+
+    assert [(row.pair, row.discovery_source) for row in rows] == [
+        ("NEWUSDT", "EXCHANGE_DIFF")
+    ]
