@@ -63,8 +63,16 @@ class ListingSession:
         if url.endswith("/exchangeInfo"):
             return FakeResponse({
                 "symbols": [
-                    {"symbol": "BTCUSDT", "isSpotTradingAllowed": True},
-                    {"symbol": "NEWUSDT", "isSpotTradingAllowed": True},
+                    {
+                        "symbol": "BTCUSDT",
+                        "status": "1",
+                        "isSpotTradingAllowed": True,
+                    },
+                    {
+                        "symbol": "NEWUSDT",
+                        "status": "1",
+                        "isSpotTradingAllowed": False,
+                    },
                 ]
             })
         if url.endswith("/ticker/24hr"):
@@ -183,7 +191,7 @@ def test_listing_provider_prioritizes_exchange_diff_before_candidate_cap(tmp_pat
 
 class SpotTransitionSession(ListingSession):
     def __init__(self):
-        self.spot_open = False
+        self.market_status = "2"
 
     def get(self, url, params=None, timeout=15):
         if "announcement.test" in url:
@@ -191,14 +199,22 @@ class SpotTransitionSession(ListingSession):
         if url.endswith("/exchangeInfo"):
             return FakeResponse({
                 "symbols": [
-                    {"symbol": "BTCUSDT", "isSpotTradingAllowed": True},
-                    {"symbol": "NEWUSDT", "isSpotTradingAllowed": self.spot_open},
+                    {
+                        "symbol": "BTCUSDT",
+                        "status": "1",
+                        "isSpotTradingAllowed": True,
+                    },
+                    {
+                        "symbol": "NEWUSDT",
+                        "status": self.market_status,
+                        "isSpotTradingAllowed": False,
+                    },
                 ]
             })
         return super().get(url, params=params, timeout=timeout)
 
 
-def test_listing_provider_surfaces_not_open_to_open_transition(tmp_path):
+def test_listing_provider_surfaces_market_status_transition(tmp_path):
     seen_file = tmp_path / "seen.json"
     seen_file.write_text(json.dumps(["BTCUSDT"]), encoding="utf-8")
     session = SpotTransitionSession()
@@ -212,10 +228,51 @@ def test_listing_provider_surfaces_not_open_to_open_transition(tmp_path):
     assert provider.fetch_listings() == []
     assert set(json.loads(seen_file.read_text("utf-8"))) == {"BTCUSDT"}
 
-    session.spot_open = True
+    session.market_status = "1"
     rows = provider.fetch_listings()
 
     assert [(row.pair, row.spot_status, row.discovery_source) for row in rows] == [
         ("NEWUSDT", "OPEN", "EXCHANGE_DIFF")
     ]
     assert set(json.loads(seen_file.read_text("utf-8"))) == {"BTCUSDT", "NEWUSDT"}
+
+
+class ApiPermissionTransitionSession(ListingSession):
+    def __init__(self):
+        self.api_trading_allowed = False
+
+    def get(self, url, params=None, timeout=15):
+        if url.endswith("/exchangeInfo"):
+            return FakeResponse({
+                "symbols": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "status": "1",
+                        "isSpotTradingAllowed": True,
+                    },
+                    {
+                        "symbol": "NEWUSDT",
+                        "status": "1",
+                        "isSpotTradingAllowed": self.api_trading_allowed,
+                    },
+                ]
+            })
+        return super().get(url, params=params, timeout=timeout)
+
+
+def test_listing_provider_ignores_api_permission_transition(tmp_path):
+    seen_file = tmp_path / "seen.json"
+    session = ApiPermissionTransitionSession()
+    provider = MexcNewListingProvider(
+        base_url="https://mexc.test",
+        announcement_endpoints=("https://announcement.test",),
+        seen_file=str(seen_file),
+    )
+    provider.session = session
+
+    assert provider.fetch_listings() == []
+    assert set(json.loads(seen_file.read_text("utf-8"))) == {"BTCUSDT", "NEWUSDT"}
+
+    session.api_trading_allowed = True
+
+    assert provider.fetch_listings() == []
