@@ -2917,9 +2917,17 @@ def score_funding(funding_rate: Optional[float], f: dict) -> float:
 # SIGNAL ENGINE
 # ============================================================
 
-def veto_signal(symbol: str, f: dict, btc: dict, eth: dict) -> Optional[str]:
+def veto_signal(
+    symbol: str,
+    f: dict,
+    btc: dict,
+    eth: dict,
+    group_override: Optional[str] = None,
+) -> Optional[str]:
     """None döner = veto yok. String döner = veto sebebi."""
-    group = COINS[symbol]
+    group = str(group_override or COINS.get(symbol) or "HIGH_BETA").upper()
+    if group not in SPREAD_LIMITS:
+        group = "HIGH_BETA"
     p = SCORE_PARAMS["veto"]
 
     if f["spread_bps"] > SPREAD_LIMITS[group]:
@@ -3001,12 +3009,18 @@ def weighted_signal(
     session_context: SessionContext,
     news_context: dict,
     macro_context: Optional[dict] = None,
+    group_override: Optional[str] = None,
 ) -> dict:
-    group = COINS[symbol]
+    # An open position must remain monitorable after an operator removes its
+    # symbol from TRADE_UNIVERSE.  The stored position group preserves the
+    # original signal thresholds without granting the symbol entry authority.
+    group = str(group_override or COINS.get(symbol) or "HIGH_BETA").upper()
+    if group not in WEIGHTS:
+        group = "HIGH_BETA"
     base_weights = WEIGHTS[group]
     weights = normalize_weights_if_basis_missing(base_weights, features)
 
-    veto = veto_signal(symbol, features, btc, eth)
+    veto = veto_signal(symbol, features, btc, eth, group)
 
     macro_mult = session_context.macro_multiplier
     micro_mult = session_context.micro_multiplier
@@ -8934,6 +8948,32 @@ def active_trade_exists(symbol: str, state_mgr: StateManager = _STATE_MGR) -> bo
     return False
 
 
+_TRACKABLE_USDT_SYMBOL = re.compile(r"^[A-Z0-9]{2,40}USDT$")
+
+
+def _legacy_open_position_groups(
+    state_mgr: StateManager = _STATE_MGR,
+) -> dict[str, str]:
+    """Return removed-universe symbols that still have an open position.
+
+    These symbols are read-only lifecycle members: they remain in the market
+    data/signal pass until every tracked position is closed, but they never
+    become eligible for a new entry merely because they are being monitored.
+    """
+    groups: dict[str, str] = {}
+    for trade in get_trades(state_mgr).values():
+        if not isinstance(trade, dict) or trade.get("result") is not None:
+            continue
+        symbol = str(trade.get("symbol") or "").strip().upper()
+        if symbol in COINS or not _TRACKABLE_USDT_SYMBOL.fullmatch(symbol):
+            continue
+        group = str(trade.get("group") or "HIGH_BETA").strip().upper()
+        if group not in WEIGHTS:
+            group = "HIGH_BETA"
+        groups.setdefault(symbol, group)
+    return dict(sorted(groups.items()))
+
+
 def _trade_id(symbol: str) -> str:
     return f"{symbol}_{now_ts()}_{random.randint(1000, 9999)}"
 
@@ -8945,6 +8985,12 @@ def can_open_new_trade(result: dict, state_mgr: StateManager) -> tuple[bool, str
         return False, "LONG/SHORT sinyali yok."
     if not result.get("actionable", True):
         return False, "Sinyal actionable değil."
+    symbol = str(result.get("symbol") or "").strip().upper()
+    if symbol not in COINS:
+        return False, (
+            "Sembol onaylı işlem evreninde değil; yalnızca mevcut pozisyon "
+            "kapanana kadar izlenebilir."
+        )
 
     acce = acce_trade_eligibility(result, state_mgr)
     result["acce_trade_gate"] = acce
@@ -10941,6 +10987,37 @@ def _process_news_cycle(state_mgr: StateManager, current_news: dict) -> dict:
     return new_news
 
 
+def _maybe_start_tracked_trade(
+    result: dict,
+    state_mgr: StateManager,
+    *,
+    allow_new_entries: bool,
+) -> None:
+    """Queue/open a trade only for the operator-approved capital universe."""
+    if not allow_new_entries:
+        result["entry_universe"] = {
+            "allowed": False,
+            "reason": "LEGACY_POSITION_MONITORING_ONLY",
+        }
+        return
+
+    result["entry_universe"] = {"allowed": True, "reason": "APPROVED_TRADE_UNIVERSE"}
+    plan = build_trade_plan(result)
+    if not plan or result.get("signal") not in ("LONG", "SHORT") or not result.get("actionable", True):
+        return
+    if REQUIRE_TRADE_APPROVAL:
+        approval_id = queue_trade_for_approval(result, plan, state_mgr)
+        send_message(
+            f"📝 Trade önerisi onay bekliyor: {approval_id}\n"
+            f"{result.get('symbol')} {result.get('signal')} | Entry {plan.get('entry')} | Stop {plan.get('stop')} | "
+            f"TP1 {plan.get('tp1')} | TP2 {plan.get('tp2')}\n"
+            f"Notional {format_money(plan.get('position_notional'))} | Risk {format_money(plan.get('risk_amount'))}\n"
+            "Komut: TRADE_ACCEPT <id> / TRADE_DECLINE <id>"
+        )
+    else:
+        open_trade(result, plan, state_mgr)
+
+
 def _process_symbol(
     symbol: str,
     features: dict,
@@ -10951,14 +11028,30 @@ def _process_symbol(
     state_mgr: StateManager,
     global_regime: Optional[dict] = None,
     macro_context: Optional[dict] = None,
+    *,
+    allow_new_entries: bool = True,
+    group_override: Optional[str] = None,
 ) -> Optional[dict]:
-    """Tek coin için sinyal üretip gerekirse alert gönderir."""
+    """Tek coin için sinyal üretip pozisyon yaşam döngüsünü günceller.
+
+    ``allow_new_entries=False`` kaldırılmış bir semboldeki mevcut pozisyonun
+    stop/TP ve sinyal-değişimi takibini sürdürürken yeni işlem üretimini keser.
+    """
     try:
         # Regime-first architecture: global regime is computed once per scan from BTC/ETH
         # before individual symbols are processed. The regime then modifies signal/score
         # before quality, entry and portfolio filters run.
         regime = global_regime or detect_market_regime(btc, eth, news_ctx, macro_context)
-        result = weighted_signal(symbol, features, btc, eth, session_ctx, news_ctx, macro_context)
+        result = weighted_signal(
+            symbol,
+            features,
+            btc,
+            eth,
+            session_ctx,
+            news_ctx,
+            macro_context,
+            group_override=group_override,
+        )
         result["regime"] = regime
         result = apply_regime_first_scoring(result, regime)
         result["ai_optimization"] = ai_signal_optimization(result, state_mgr)
@@ -10986,25 +11079,17 @@ def _process_symbol(
         pending = None
         last_alert_ts = old.get("last_alert_ts", 0) if old else 0
 
-        if SEND_MOVEMENT_ALERTS:
+        if allow_new_entries and SEND_MOVEMENT_ALERTS:
             movement_reasons = detect_movement_alert(symbol, result)
             if movement_reasons and not should_movement_alert_cooldown(state_mgr, symbol):
                 if send_message(format_movement_alert(symbol, result, movement_reasons)):
                     mark_movement_alert_sent(state_mgr, symbol)
 
-        plan = build_trade_plan(result)
-        if plan and result.get("signal") in ("LONG", "SHORT") and result.get("actionable", True):
-            if REQUIRE_TRADE_APPROVAL:
-                approval_id = queue_trade_for_approval(result, plan, state_mgr)
-                send_message(
-                    f"📝 Trade önerisi onay bekliyor: {approval_id}\n"
-                    f"{result.get('symbol')} {result.get('signal')} | Entry {plan.get('entry')} | Stop {plan.get('stop')} | "
-                    f"TP1 {plan.get('tp1')} | TP2 {plan.get('tp2')}\n"
-                    f"Notional {format_money(plan.get('position_notional'))} | Risk {format_money(plan.get('risk_amount'))}\n"
-                    "Komut: TRADE_ACCEPT <id> / TRADE_DECLINE <id>"
-                )
-            else:
-                open_trade(result, plan, state_mgr)
+        _maybe_start_tracked_trade(
+            result,
+            state_mgr,
+            allow_new_entries=allow_new_entries,
+        )
 
         state_mgr.update_symbol(symbol, {
             "signal": result["signal"],
@@ -11030,6 +11115,8 @@ def _process_symbol(
             "long_setup_state": (result.get("long_setup") or {}).get("state"),
             "long_confluence_score": ((result.get("long_setup") or {}).get("confluence") or {}).get("score"),
             "long_late_entry_status": ((result.get("long_setup") or {}).get("late_entry") or {}).get("status"),
+            "entry_universe_allowed": allow_new_entries,
+            "monitoring_only": not allow_new_entries,
             "last_alert_ts": last_alert_ts,
             "pending_alert_type": pending,
             "updated_at": now_ts(),
@@ -11992,11 +12079,16 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
             consecutive_failures = 0
             state_mgr.set_meta("consecutive_failures", 0)
 
-            # Diğer coinleri paralel çek (BTC/ETH zaten var).
+            # Diğer coinleri paralel çek (BTC/ETH zaten var). İşlem evreninden
+            # çıkarılmış olsa bile açık pozisyonu bulunan semboller kapanana
+            # kadar lifecycle-only taramaya eklenir.
             # Her coin için get_features kendi içinde 5 endpointi paralel çekiyor;
             # coinler arası paralelizm scan turunu dramatik kısaltır.
             features_cache: dict[str, dict] = {"BTCUSDT": btc, "ETHUSDT": eth}
-            other_symbols = [s for s in COINS if s not in features_cache]
+            legacy_position_groups = _legacy_open_position_groups(state_mgr)
+            scan_symbol_groups = dict(COINS)
+            scan_symbol_groups.update(legacy_position_groups)
+            other_symbols = [s for s in scan_symbol_groups if s not in features_cache]
 
             if other_symbols:
                 future_to_symbol = {
@@ -12028,16 +12120,42 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
                 if result:
                     results.append(result)
 
+            # Legacy açık pozisyon sonuçları yalnızca yaşam döngüsü tüketicilerine
+            # gider. Radar, heartbeat, ML sanal giriş ve yeni trade üretimine girmez.
+            monitoring_results: list[dict] = []
+            for symbol, group in legacy_position_groups.items():
+                features = features_cache.get(symbol)
+                if features is None:
+                    continue
+                result = _process_symbol(
+                    symbol,
+                    features,
+                    btc,
+                    eth,
+                    session_ctx,
+                    news_context,
+                    state_mgr,
+                    global_regime,
+                    macro_context,
+                    allow_new_entries=False,
+                    group_override=group,
+                )
+                if result:
+                    monitoring_results.append(result)
+
             # Sadece açıklayıcı metadata eklenir; signal/actionable ve ACCE
             # trade gate alanlarına dokunulmaz.
             _tick_unified_radar(results, state_mgr)
 
-            results_by_symbol = {r["symbol"]: r for r in results}
-            ml_validation_learning_cycle(results_by_symbol, state_mgr)
-            reconcile_paper_execution(results_by_symbol, state_mgr)
-            update_trades(results_by_symbol, state_mgr)
-            close_trades_on_signal_changes(results_by_symbol, state_mgr)
-            risk_governor_manage_open_trades(results_by_symbol, state_mgr)
+            approved_results_by_symbol = {r["symbol"]: r for r in results}
+            lifecycle_results_by_symbol = {
+                r["symbol"]: r for r in [*results, *monitoring_results]
+            }
+            ml_validation_learning_cycle(approved_results_by_symbol, state_mgr)
+            reconcile_paper_execution(lifecycle_results_by_symbol, state_mgr)
+            update_trades(lifecycle_results_by_symbol, state_mgr)
+            close_trades_on_signal_changes(lifecycle_results_by_symbol, state_mgr)
+            risk_governor_manage_open_trades(lifecycle_results_by_symbol, state_mgr)
             retry_pending_trade_alerts(state_mgr)
             # Persist oversight reports each scan for dashboards / live-readiness review.
             risk_governor_snapshot(state_mgr, global_regime)

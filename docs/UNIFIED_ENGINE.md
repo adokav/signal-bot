@@ -43,6 +43,10 @@ Mevcut market features ─> Signal Brain ─> Risk/ACCE gates ──────
    kanıtlamadığı için yüksek skorda dahi `RESEARCH_ONLY` kalır.
 6. Unified tarama tek worker'da, ana trade döngüsünün dışında çalışır. Tam servis
    kesintisi son iyi snapshot'ı silmez.
+7. Evren değiştirildiğinde çıkarılmış bir sembolde açık pozisyon varsa bot o
+   sembolü kapanana kadar `MONITORING_ONLY` izler. Stop/TP, mark-to-market,
+   paper reconciliation ve sinyal-değişimi çıkışı sürer; yeni giriş ve onay
+   kuyruğu kesin olarak kapalı kalır.
 
 ## Varsayılan çalışma modu
 
