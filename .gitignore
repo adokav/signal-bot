@@ -25,6 +25,7 @@ live_readiness_report.json
 paper_orders.jsonl
 paper_positions.json
 paper_execution_report.json
+mexc_seen_symbols.json
 position_management_log.jsonl
 regime_performance_dashboard.json
 risk_governor_log.jsonl

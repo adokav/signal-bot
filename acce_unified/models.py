@@ -16,6 +16,20 @@ class CexTicker:
 
 
 @dataclass(frozen=True)
+class MexcListing:
+    symbol: str
+    pair: str
+    title: str
+    rank: int
+    spot_status: str
+    last_price: float
+    change_pct: float
+    quote_volume: float
+    volume_acceleration: float
+    discovery_source: str = "ANNOUNCEMENT"
+
+
+@dataclass(frozen=True)
 class RadarCandidate:
     source: str
     key: str
@@ -37,7 +51,7 @@ class RadarSnapshot:
     generated_at: int
     mode: str
     cex_candidates: tuple[RadarCandidate, ...] = ()
-    dex_candidates: tuple[RadarCandidate, ...] = ()
+    listing_candidates: tuple[RadarCandidate, ...] = ()
     errors: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -45,7 +59,7 @@ class RadarSnapshot:
             "generated_at": self.generated_at,
             "mode": self.mode,
             "cex_candidates": [item.to_dict() for item in self.cex_candidates],
-            "dex_candidates": [item.to_dict() for item in self.dex_candidates],
+            "listing_candidates": [item.to_dict() for item in self.listing_candidates],
             "errors": list(self.errors),
             "can_authorize_trade": False,
         }

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from acce_unified.providers import MexcPublicProvider
+import json
+
+from acce_unified.providers import MexcNewListingProvider, MexcPublicProvider
 
 
 class FakeResponse:
@@ -52,3 +54,128 @@ def test_cex_provider_falls_back_and_labels_venue():
     assert len(provider.session.calls) == 2
     assert rows[0].symbol == "BTCUSDT"
     assert rows[0].venue == "BINANCE"
+
+
+class ListingSession:
+    def get(self, url, params=None, timeout=15):
+        if "announcement.test" in url:
+            return FakeResponse([], content_type="text/html", text="<html>blocked</html>")
+        if url.endswith("/exchangeInfo"):
+            return FakeResponse({
+                "symbols": [
+                    {"symbol": "BTCUSDT", "isSpotTradingAllowed": True},
+                    {"symbol": "NEWUSDT", "isSpotTradingAllowed": True},
+                ]
+            })
+        if url.endswith("/ticker/24hr"):
+            return FakeResponse([
+                {
+                    "symbol": "NEWUSDT",
+                    "lastPrice": "0.25",
+                    "priceChangePercent": "12",
+                    "quoteVolume": "15000000",
+                }
+            ])
+        if url.endswith("/klines"):
+            volumes = [10, 10, 10, 10, 10, 10, 20, 999]
+            return FakeResponse([
+                [index, 0, 0, 0, 0, volume, 0, volume]
+                for index, volume in enumerate(volumes)
+            ])
+        raise AssertionError(f"unexpected URL: {url}")
+
+
+def test_listing_provider_uses_persisted_mexc_exchange_diff_fallback(tmp_path):
+    seen_file = tmp_path / "seen.json"
+    seen_file.write_text(json.dumps(["BTCUSDT"]), encoding="utf-8")
+    provider = MexcNewListingProvider(
+        base_url="https://mexc.test",
+        announcement_endpoints=("https://announcement.test",),
+        seen_file=str(seen_file),
+    )
+    provider.session = ListingSession()
+
+    rows = provider.fetch_listings()
+
+    assert len(rows) == 1
+    assert rows[0].pair == "NEWUSDT"
+    assert rows[0].discovery_source == "EXCHANGE_DIFF"
+    assert rows[0].volume_acceleration == 2.0
+    assert set(json.loads(seen_file.read_text("utf-8"))) == {"BTCUSDT", "NEWUSDT"}
+
+
+class AnnouncementOnlySession:
+    def get(self, url, params=None, timeout=15):
+        if "announcement.test" in url:
+            return FakeResponse(
+                [],
+                content_type="text/html",
+                text='<script>{"title":"First in Market: JIMOTHY Now Live on MEXC Meme+"}</script>',
+            )
+        return FakeResponse(
+            ValueError("not json"),
+            content_type="text/html",
+            text="<html>Site Unavailable</html>",
+        )
+
+
+def test_listing_provider_keeps_official_announcement_when_spot_api_is_blocked(tmp_path):
+    provider = MexcNewListingProvider(
+        base_url="https://mexc.test",
+        announcement_endpoints=("https://announcement.test",),
+        seen_file=str(tmp_path / "seen.json"),
+    )
+    provider.session = AnnouncementOnlySession()
+
+    rows = provider.fetch_listings()
+
+    assert [(row.pair, row.spot_status, row.discovery_source) for row in rows] == [
+        ("JIMOTHYUSDT", "UNKNOWN", "ANNOUNCEMENT")
+    ]
+
+
+class MixedDiscoverySession(ListingSession):
+    def get(self, url, params=None, timeout=15):
+        if "announcement.test" in url:
+            return FakeResponse(
+                [],
+                content_type="text/html",
+                text='<script>{"title":"MEXC Will List Nova Protocol (NOVA)"}</script>',
+            )
+        return super().get(url, params=params, timeout=timeout)
+
+
+def test_listing_provider_merges_announcement_and_exchange_diff(tmp_path):
+    seen_file = tmp_path / "seen.json"
+    seen_file.write_text(json.dumps(["BTCUSDT"]), encoding="utf-8")
+    provider = MexcNewListingProvider(
+        base_url="https://mexc.test",
+        announcement_endpoints=("https://announcement.test",),
+        seen_file=str(seen_file),
+    )
+    provider.session = MixedDiscoverySession()
+
+    rows = provider.fetch_listings()
+    by_pair = {row.pair: row for row in rows}
+
+    assert set(by_pair) == {"NOVAUSDT", "NEWUSDT"}
+    assert by_pair["NOVAUSDT"].discovery_source == "ANNOUNCEMENT"
+    assert by_pair["NEWUSDT"].discovery_source == "EXCHANGE_DIFF"
+
+
+def test_listing_provider_prioritizes_exchange_diff_before_candidate_cap(tmp_path):
+    seen_file = tmp_path / "seen.json"
+    seen_file.write_text(json.dumps(["BTCUSDT"]), encoding="utf-8")
+    provider = MexcNewListingProvider(
+        base_url="https://mexc.test",
+        announcement_endpoints=("https://announcement.test",),
+        seen_file=str(seen_file),
+        max_candidates=1,
+    )
+    provider.session = MixedDiscoverySession()
+
+    rows = provider.fetch_listings()
+
+    assert [(row.pair, row.discovery_source) for row in rows] == [
+        ("NEWUSDT", "EXCHANGE_DIFF")
+    ]

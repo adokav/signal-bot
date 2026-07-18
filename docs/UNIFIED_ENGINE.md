@@ -9,7 +9,7 @@ olarak çalıştırılmaz; yalnızca aşağıdaki sınırlandırılmış yetenek
 |---|---|---|---|
 | `signal-bot` | Rejim, sinyal, risk, ACCE gate, plan, paper execution | Tek çekirdek | Yalnızca mevcut ACCE kapıları üzerinden |
 | `pricemonitorx_bot` | Likidite tabanlı geniş CEX keşfi, geç-pump cezası | `CORE_CONFLUENCE` veya `DISCOVERY_ONLY` | Yok |
-| `phenomenonx_bot` | Solana/Base genç havuz ve ivme skoru | `RESEARCH_ONLY` | Yok |
+| `phenomenonx_bot` | MEXC New Listings, Spot teyidi, hacim ve tamamlanmış saat ivmesi | `DISCOVERY_ONLY` / `CORE_CONFLUENCE` | Yok |
 | `mm_trading` | t+1 icra, maliyet farkındalığı, OOS ölçüm yaklaşımı | Doğrulama kapısı | Yok |
 | `theassembly` | Hiçbir şey taşınmadı | Bağımsız ürün | Kapsam dışı |
 
@@ -24,10 +24,10 @@ Bu tasarım yalnızca saf skorlayıcıları ve doğrulama kurallarını taşır.
 sağlayıcıları read-only'dir; radar hatası ana sinyal döngüsünü durdurmaz.
 
 ```text
-MEXC public tickers ──> PriceMonitorX CEX scorer ──┐
-                                                   ├─> SHADOW SNAPSHOT ─> ACCE raporu
-DexScreener ─────────> PhenomenonX DEX scorer ─────┘          │
-                                                              └─X─> emir
+MEXC public tickers ──> PriceMonitorX CEX scorer ───────┐
+                                                        ├─> SHADOW SNAPSHOT ─> ACCE raporu
+MEXC New Listings ───> PhenomenonX listing scorer ──────┘          │
+MEXC exchangeInfo ───> announcement-block fallback ─────┘          └─X─> emir
 
 Mevcut market features ─> Signal Brain ─> Risk/ACCE gates ───────> paper plan
 ```
@@ -39,8 +39,9 @@ Mevcut market features ─> Signal Brain ─> Risk/ACCE gates ──────
 3. `attach_snapshot_to_results` yalnızca `unified_radar` metadata'sı ekler;
    `signal`, `score` ve `actionable` alanlarını değiştirmez.
 4. Sermaye evreni yalnızca `TRADE_UNIVERSE` ile operatör tarafından değiştirilir.
-5. DEX verisi kontrat yetkileri, honeypot/tax, LP lock ve holder yoğunluğunu
-   kanıtlamadığı için yüksek skorda dahi `RESEARCH_ONLY` kalır.
+5. Yeni listeleme adayı yüksek skorda dahi işlem evrenini büyütemez. Spot teyidi,
+   hacim ve tamamlanmış saat ivmesi yalnızca keşif kanıtıdır; `CROWDED` ilk
+   pump adayları Top listeye alınmaz.
 6. Unified tarama tek worker'da, ana trade döngüsünün dışında çalışır. Tam servis
    kesintisi son iyi snapshot'ı silmez.
 7. Evren değiştirildiğinde çıkarılmış bir sembolde açık pozisyon varsa bot o
@@ -54,14 +55,14 @@ Mevcut market features ─> Signal Brain ─> Risk/ACCE gates ──────
 UNIFIED_ENGINE_ENABLED=1
 UNIFIED_ENGINE_MODE=SHADOW       # SHADOW veya ADVISORY; LIVE kabul edilmez
 UNIFIED_CEX_RADAR_ENABLED=1
-UNIFIED_DEX_RADAR_ENABLED=1
-UNIFIED_SCAN_INTERVAL_SECONDS=1800
+UNIFIED_LISTING_RADAR_ENABLED=1
+UNIFIED_SCAN_INTERVAL_SECONDS=600
 UNIFIED_CEX_TOP_N=12
 UNIFIED_CEX_MIN_QUOTE_VOLUME=500000
-UNIFIED_DEX_TOP_N=8
-UNIFIED_DEX_MIN_LIQUIDITY=35000
-UNIFIED_DEX_MIN_H1_TRANSACTIONS=24
-UNIFIED_DEX_MAX_AGE_HOURS=1080
+UNIFIED_LISTING_TOP_N=5
+UNIFIED_LISTING_MIN_SCORE=52
+UNIFIED_LISTING_MAX_CANDIDATES=20
+UNIFIED_LISTING_SEEN_FILE=mexc_seen_symbols.json
 UNIFIED_VALIDATION_MIN_TOTAL_TRADES=40
 UNIFIED_VALIDATION_MIN_OOS_TRADES=16
 UNIFIED_VALIDATION_OOS_FRACTION=0.40
@@ -108,7 +109,8 @@ yeni mod etiketi `historical_replay_v2_closed_bars`tır.
 ## Yayına alma ve geri alma
 
 1. Önce tüm birim/karakterizasyon testlerini çalıştır.
-2. En az bir tam tarama boyunca `SHADOW` snapshot ve `/radar` çıktısını gözle.
+2. En az bir tam tarama boyunca `SHADOW` snapshot, `/radar` ve `/listings`
+   çıktısını gözle.
 3. Paper modda OOS terfi kapısını tamamla.
 4. Donör depoları ancak ana PR birleştirilip üretim doğrulandıktan sonra
    arşivle. `theassembly` arşivlenmez ve değiştirilmez.

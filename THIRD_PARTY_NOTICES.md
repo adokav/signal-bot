@@ -26,6 +26,7 @@ under the MIT License:
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
 
-The DEX scoring model was adapted from the sibling repository
-`adokav/phenomenonx_bot`; the out-of-sample validation discipline was adapted
-from `adokav/mm_trading`. All three source repositories are owned by `adokav`.
+The MEXC New Listings discovery and scoring model was adapted from the sibling
+repository `adokav/phenomenonx_bot`; the out-of-sample validation discipline
+was adapted from `adokav/mm_trading`. All three source repositories are owned
+by `adokav`.

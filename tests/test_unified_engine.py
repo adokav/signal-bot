@@ -10,23 +10,23 @@ class FakeCex:
         return [CexTicker("BTCUSDT", 100_000, 5.0, 2_000_000_000)]
 
 
-class BrokenDex:
-    def fetch_pairs(self):
+class BrokenListing:
+    def fetch_listings(self):
         raise TimeoutError("fixture timeout")
 
 
 def test_provider_failure_is_isolated_and_core_metadata_is_non_authoritative():
-    cfg = UnifiedConfig(cex_enabled=True, dex_enabled=True, cex_top_n=3)
+    cfg = UnifiedConfig(cex_enabled=True, listing_enabled=True, cex_top_n=3)
     engine = UnifiedRadarEngine(
         cfg,
         DEFAULT_TRADE_UNIVERSE,
         cex_provider=FakeCex(),
-        dex_provider=BrokenDex(),
+        listing_provider=BrokenListing(),
     )
     snapshot = engine.scan_once(now=1_700_000_000)
     assert snapshot.cex_candidates
-    assert snapshot.dex_candidates == ()
-    assert snapshot.errors == ("DEX:TimeoutError",)
+    assert snapshot.listing_candidates == ()
+    assert snapshot.errors == ("LISTING:TimeoutError",)
 
     results = [{"symbol": "BTCUSDT", "signal": "LONG", "actionable": True, "score": 1.5}]
     before = dict(results[0])
@@ -38,13 +38,15 @@ def test_provider_failure_is_isolated_and_core_metadata_is_non_authoritative():
 
 
 def test_snapshot_serialization_has_global_execution_invariant():
-    cfg = UnifiedConfig(cex_enabled=True, dex_enabled=False)
+    cfg = UnifiedConfig(cex_enabled=True, listing_enabled=False)
     snapshot = UnifiedRadarEngine(
         cfg,
         DEFAULT_TRADE_UNIVERSE,
         cex_provider=FakeCex(),
-        dex_provider=BrokenDex(),
+        listing_provider=BrokenListing(),
     ).scan_once(now=1_700_000_000)
     payload = snapshot.to_dict()
     assert payload["can_authorize_trade"] is False
     assert payload["mode"] == "SHADOW"
+    assert "listing_candidates" in payload
+    assert "dex_candidates" not in payload
