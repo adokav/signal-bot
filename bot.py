@@ -48,11 +48,12 @@ from acce_unified import (
     UnifiedRadarRuntime,
     attach_snapshot_to_results,
     build_trade_universe,
+    format_listing_report,
     format_snapshot_brief,
 )
 from acce_unified.validation import ValidationPolicy, evaluate_promotion
 
-__version__ = "4.0.0-acce-unified-shadow"
+__version__ = "4.1.0-acce-mexc-listing"
 
 # ============================================================
 # LOGGING
@@ -1669,34 +1670,51 @@ def get_session_context() -> SessionContext:
 # Telegram mesaj boyut limiti: 4096 karakter
 TELEGRAM_MAX_LEN = 4000  # Güvenli pay
 
-# Sabit reply keyboard: text input altında daima gorulur, sik kullanilan
-# komutlar tek tikla erisilebilir. is_persistent=True ile kullanici manuel
-# kapatsa bile yeniden gosterilir.
+# Sabit reply keyboard bir "komuta merkezi" olarak düzenlenir: önce risk ve
+# pozisyon, sonra keşif, ardından bağlam ve onay. Kullanıcıya slash komutları
+# yerine okunabilir etiketler gösterilir; alias tablosu bunları mevcut komut
+# işleyicisine güvenli biçimde bağlar.
+KEYBOARD_COMMAND_ALIASES: dict[str, str] = {
+    "🧠 Durum": "STATUS",
+    "📂 Pozisyonlar": "POSITIONS",
+    "🆕 Yeni Liste": "LISTINGS",
+    "🧭 Fırsat Radarı": "RADAR",
+    "🌍 Rejim": "REGIME",
+    "💰 Portföy": "EQUITY",
+    "✅ Onay Merkezi": "APPROVALS",
+    "📊 7G Rapor": "REPORT",
+    "ℹ️ Yardım": "HELP",
+}
+
+KEYBOARD_ROWS: tuple[tuple[str, ...], ...] = (
+    ("🧠 Durum", "📂 Pozisyonlar"),
+    ("🆕 Yeni Liste", "🧭 Fırsat Radarı"),
+    ("🌍 Rejim", "💰 Portföy"),
+    ("✅ Onay Merkezi", "📊 7G Rapor"),
+    ("ℹ️ Yardım",),
+)
+
 MAIN_KEYBOARD: dict[str, Any] = {
-    "keyboard": [
-        [{"text": "/status"}, {"text": "/positions"}, {"text": "/equity"}],
-        [{"text": "/report"}, {"text": "/regime"}, {"text": "/radar"}],
-        [{"text": "/pending"}, {"text": "/trade_pending"}],
-        [{"text": "/help"}],
-    ],
+    "keyboard": [[{"text": label} for label in row] for row in KEYBOARD_ROWS],
     "resize_keyboard": True,
     "is_persistent": True,
+    "input_field_placeholder": "Komuta dokun veya mesaj yaz…",
 }
 
 
 # Telegram '/' menusunde gozukecek komut listesi. _register_bot_commands ile
 # bot baslangicinda bir kez kaydedilir.
 BOT_COMMANDS: list[dict[str, str]] = [
-    {"command": "status", "description": "Anlik saglik durumu + 24h ozet"},
-    {"command": "positions", "description": "Acik pozisyonlar (entry/stop/TP/PnL)"},
-    {"command": "equity", "description": "Bakiye, gerceklesen PnL, win/loss"},
-    {"command": "report", "description": "Son 7 gun performans ozeti"},
-    {"command": "regime", "description": "Anlik rejim + macro context"},
-    {"command": "radar", "description": "CEX + DEX golge firsat radari"},
-    {"command": "pending", "description": "Bekleyen parametre onerileri"},
-    {"command": "trade_pending", "description": "Bekleyen trade onaylari"},
-    {"command": "help", "description": "Tum komutlar"},
-    {"command": "start", "description": "Bot uyandir"},
+    {"command": "status", "description": "Anlık sağlık ve 24 saatlik durum"},
+    {"command": "positions", "description": "Açık pozisyonlar, stop, TP ve PnL"},
+    {"command": "listings", "description": "PhenomenonX MEXC yeni listelemeleri"},
+    {"command": "radar", "description": "PriceMonitorX + MEXC yeni liste radarı"},
+    {"command": "regime", "description": "Piyasa rejimi ve makro bağlam"},
+    {"command": "equity", "description": "Portföy, gerçekleşen PnL ve başarı"},
+    {"command": "approvals", "description": "Trade ve parametre onay merkezi"},
+    {"command": "report", "description": "Son 7 günlük performans özeti"},
+    {"command": "help", "description": "Komutlar ve kullanım"},
+    {"command": "start", "description": "Botu uyandır ve klavyeyi aç"},
 ]
 
 
@@ -10645,6 +10663,16 @@ def _extract_command_text(update: dict) -> tuple[Optional[str], Optional[str]]:
     return str(chat_id), text
 
 
+def _resolve_telegram_command(text: str) -> str:
+    """Map a persistent keyboard label or slash command to one command name."""
+    normalized = " ".join(str(text or "").strip().split())
+    alias = KEYBOARD_COMMAND_ALIASES.get(normalized)
+    if alias:
+        return alias
+    first = normalized.split(maxsplit=1)[0] if normalized else ""
+    return first.lstrip("/").upper()
+
+
 def _pending_trade_approvals(state_mgr: StateManager) -> dict:
     pending = state_mgr.get_meta("pending_trade_approvals", {})
     return pending if isinstance(pending, dict) else {}
@@ -10742,19 +10770,15 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
             continue
 
         parts = text.strip().split()
-        cmd = parts[0].lstrip("/").upper()
+        cmd = _resolve_telegram_command(text)
 
         if cmd == "START":
             send_message(
                 f"🤖 Signal Bot aktif (v{__version__})\n\n"
                 "Sabit klavye altta açıldı. İstediğin zaman tıkla.\n\n"
-                "Komutlar:\n"
-                "/status — anlık durum\n"
-                "/radar — birleşik gölge radar\n"
-                "/help — komut listesi\n"
-                "PENDING — bekleyen parametre önerisi\n"
-                "ACCEPT <id> — öneri kabul\n"
-                "DECLINE <id> — öneri red",
+                "Önce Durum/Pozisyonlar ile riski gör; ardından Yeni Liste veya "
+                "Fırsat Radarı ile keşfe geç. Onay Merkezi hiçbir işlemi senden "
+                "habersiz ilerletmez.",
                 reply_markup=MAIN_KEYBOARD,
             )
         elif cmd == "HELP":
@@ -10763,12 +10787,14 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
                 "/start — bot uyandır, özet\n"
                 "/status — anlık sağlık durumu + 24h özet\n"
                 "/positions — açık pozisyonlar (entry/stop/TP/PnL)\n"
+                "/listings — PhenomenonX MEXC yeni listeleme Top 3\n"
+                "/radar — PriceMonitorX piyasa + PhenomenonX MEXC radarı\n"
                 "/equity — bakiye, gerçekleşen PnL, win/loss\n"
                 "/report — son 7 gün performans özeti\n"
                 "/regime — anlık rejim + macro context\n"
-                "/radar — PriceMonitorX CEX + PhenomenonX DEX gölge radarı\n"
+                "/approvals — trade ve parametre onay merkezi\n"
                 "/help — bu mesaj\n"
-                "PENDING — bekleyen parametre önerisi\n"
+                "/pending — bekleyen parametre önerisi\n"
                 "ACCEPT <id> — öneri kabul\n"
                 "DECLINE <id> — öneri red\n"
                 "TRADE_PENDING / TRADE_ACCEPT <id> / TRADE_DECLINE <id> — trade onay",
@@ -10935,8 +10961,19 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
                 "🧭 UNIFIED RADAR\n\n"
                 f"{format_snapshot_brief(snapshot)}\n\n"
                 f"{format_unified_validation_brief(state_mgr)}\n\n"
-                "CEX adayları yalnızca ACCE çekirdeğine ek kanıt sağlar. "
-                "DEX adayları araştırma amaçlıdır ve emir yetkisi yoktur."
+                "PriceMonitorX geniş MEXC piyasa hareketini; PhenomenonX yalnız "
+                "MEXC yeni listelemelerini izler. İkisi de tek başına emir veremez."
+            )
+        elif cmd in {"LISTINGS", "MEXC", "NEW_LISTINGS"}:
+            snapshot = state_mgr.get_meta("unified_radar_snapshot")
+            send_message(format_listing_report(snapshot, limit=3))
+        elif cmd == "APPROVALS":
+            send_message(
+                "✅ ONAY MERKEZİ\n\n"
+                "TRADE ONAYLARI\n"
+                f"{pending_trade_approvals_text(state_mgr)}\n\n"
+                "PARAMETRE ÖNERİLERİ\n"
+                f"{pending_parameter_suggestions_text()}"
             )
         elif cmd == "PENDING":
             send_message(pending_parameter_suggestions_text())

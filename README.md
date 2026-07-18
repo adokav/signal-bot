@@ -7,7 +7,8 @@ yeteneklerinin birleştiği tek sermaye otoritesidir**:
 
 - `signal-bot`: sinyal, rejim, risk, pozisyon planı ve tek işlem kapısı.
 - `pricemonitorx_bot`: geniş CEX evreninde erken fırsat keşfi; yalnızca ek kanıt.
-- `phenomenonx_bot`: Solana/Base DEX fenomen radarı; daima `RESEARCH_ONLY`.
+- `phenomenonx_bot`: MEXC resmî New Listings + Spot teyit radarı; yeni coinleri
+  otomatik işlem evrenine eklemez.
 - `mm_trading`: t+1 icra, maliyet ve out-of-sample doğrulama disiplini.
 - `theassembly`: bu mimarinin dışında ve bağımsızdır; bu entegrasyonda değiştirilmez.
 
@@ -20,15 +21,36 @@ RENDERUSDT, PYTHUSDT, BONKUSDT, POPCATUSDT
 
 Geniş radar adayları bu listeyi kendiliğinden büyütemez. Unified Engine
 varsayılan olarak `SHADOW` çalışır ve hiçbir radar adayı emir yetkisi taşımaz.
-Telegram'da `/radar` komutu son CEX + DEX gölge taramasını gösterir.
+Telegram'da `/radar` komutu PriceMonitorX piyasa radarı ile PhenomenonX MEXC
+yeni listeleme radarını birlikte; `/listings` ise yeni listeleme Top 3'ünü
+ayrıntılı gösterir.
 
 ```text
 UNIFIED_ENGINE_ENABLED=1
 UNIFIED_ENGINE_MODE=SHADOW
 UNIFIED_CEX_RADAR_ENABLED=1
-UNIFIED_DEX_RADAR_ENABLED=1
-UNIFIED_SCAN_INTERVAL_SECONDS=1800
+UNIFIED_LISTING_RADAR_ENABLED=1
+UNIFIED_SCAN_INTERVAL_SECONDS=600
+UNIFIED_LISTING_TOP_N=5
+UNIFIED_LISTING_MIN_SCORE=52
+UNIFIED_LISTING_MAX_CANDIDATES=20
+UNIFIED_LISTING_SEEN_FILE=mexc_seen_symbols.json
 ```
+
+## Telegram komuta merkezi
+
+Sabit klavye riskten keşfe doğru sıralanır:
+
+```text
+🧠 Durum          | 📂 Pozisyonlar
+🆕 Yeni Liste     | 🧭 Fırsat Radarı
+🌍 Rejim          | 💰 Portföy
+✅ Onay Merkezi   | 📊 7G Rapor
+ℹ️ Yardım
+```
+
+Butonlar okunabilir etiket gönderir; slash komutları (`/status`, `/listings`,
+`/approvals` vb.) aynı şekilde çalışmaya devam eder.
 
 Ayrıntılı tasarım, geçiş ve geri alma kuralları:
 [`docs/UNIFIED_ENGINE.md`](docs/UNIFIED_ENGINE.md).
