@@ -28,12 +28,17 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _boolish(value: Any, default: bool = True) -> bool:
-    if value is None:
+def _mexc_market_is_online(value: Any, default: bool = True) -> bool:
+    """Interpret MEXC's market status without conflating it with API access.
+
+    MEXC documents ``1`` as online, ``2`` as paused, and ``3`` as offline.
+    Some exchangeInfo responses have also used the textual ``ENABLED`` form.
+    A missing status keeps the provider backward compatible, while an unknown
+    explicit value is treated conservatively as not open.
+    """
+    if value is None or not str(value).strip():
         return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return str(value).strip().upper() in {"1", "ENABLED", "ONLINE", "TRADING"}
 
 
 def _session(user_agent: str) -> requests.Session:
@@ -268,7 +273,21 @@ class MexcNewListingProvider:
         except Exception as exc:
             ticker = {}
             log.warning("MEXC Spot ticker teyidi alınamadı: %s", exc)
-        additions = self._new_pairs_from_snapshot(set(exchange)) if exchange else []
+        # Persist only pairs whose MEXC market is online. ``isSpotTradingAllowed``
+        # describes API-order permission and can remain false for an already
+        # listed market, so it must not drive listing discovery. A symbol may
+        # appear in exchangeInfo while its market is paused/offline; excluding
+        # it preserves the later market-status -> online transition.
+        open_spot_pairs = {
+            pair
+            for pair, info in exchange.items()
+            if _mexc_market_is_online(info.get("status"), True)
+        }
+        additions = (
+            self._new_pairs_from_snapshot(open_spot_pairs)
+            if exchange
+            else []
+        )
 
         discovered: list[tuple[str, str, int, str]] = []
         seen_symbols: set[str] = set()
@@ -316,7 +335,7 @@ class MexcNewListingProvider:
             if info:
                 spot_status = (
                     "OPEN"
-                    if _boolish(info.get("isSpotTradingAllowed"), True)
+                    if _mexc_market_is_online(info.get("status"), True)
                     else "NOT_OPEN"
                 )
             else:
