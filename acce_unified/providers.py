@@ -278,15 +278,28 @@ class MexcNewListingProvider:
                     seen_symbols.add(symbol)
                     discovered.append((symbol, title, rank, "ANNOUNCEMENT"))
 
+        # Announcement headlines and the authoritative exchangeInfo diff are
+        # complementary. Batch listing headlines sometimes keep symbols only
+        # in the article body, so a parseable headline must not suppress a new
+        # Spot pair found in the same scan.
+        for pair in additions:
+            if not pair.endswith("USDT") or len(pair) <= 4:
+                continue
+            symbol = pair[:-4]
+            if symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+            discovered.append(
+                (
+                    symbol,
+                    f"MEXC Spot API'de yeni görülen {pair}",
+                    0,
+                    "EXCHANGE_DIFF",
+                )
+            )
+
         if titles and not discovered:
             raise RuntimeError("MEXC listing başlığı bulundu fakat sembol ayrıştırılamadı")
-
-        if not discovered:
-            discovered = [
-                (pair[:-4], f"MEXC Spot API'de yeni görülen {pair}", 0, "EXCHANGE_DIFF")
-                for pair in additions
-                if pair.endswith("USDT") and len(pair) > 4
-            ]
         if not discovered and not exchange:
             raise RuntimeError("MEXC duyuru ve Spot API kaynakları birlikte kullanılamıyor")
 

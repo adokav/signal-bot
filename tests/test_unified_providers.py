@@ -132,3 +132,32 @@ def test_listing_provider_keeps_official_announcement_when_spot_api_is_blocked(t
     assert [(row.pair, row.spot_status, row.discovery_source) for row in rows] == [
         ("JIMOTHYUSDT", "UNKNOWN", "ANNOUNCEMENT")
     ]
+
+
+class MixedDiscoverySession(ListingSession):
+    def get(self, url, params=None, timeout=15):
+        if "announcement.test" in url:
+            return FakeResponse(
+                [],
+                content_type="text/html",
+                text='<script>{"title":"MEXC Will List Nova Protocol (NOVA)"}</script>',
+            )
+        return super().get(url, params=params, timeout=timeout)
+
+
+def test_listing_provider_merges_announcement_and_exchange_diff(tmp_path):
+    seen_file = tmp_path / "seen.json"
+    seen_file.write_text(json.dumps(["BTCUSDT"]), encoding="utf-8")
+    provider = MexcNewListingProvider(
+        base_url="https://mexc.test",
+        announcement_endpoints=("https://announcement.test",),
+        seen_file=str(seen_file),
+    )
+    provider.session = MixedDiscoverySession()
+
+    rows = provider.fetch_listings()
+    by_pair = {row.pair: row for row in rows}
+
+    assert set(by_pair) == {"NOVAUSDT", "NEWUSDT"}
+    assert by_pair["NOVAUSDT"].discovery_source == "ANNOUNCEMENT"
+    assert by_pair["NEWUSDT"].discovery_source == "EXCHANGE_DIFF"

@@ -53,7 +53,7 @@ from acce_unified import (
 )
 from acce_unified.validation import ValidationPolicy, evaluate_promotion
 
-__version__ = "4.1.0-acce-mexc-listing"
+__version__ = "4.2.0-acce-command-center"
 
 # ============================================================
 # LOGGING
@@ -290,7 +290,7 @@ ADAPTIVE_CONFIG_FILE = os.getenv("ADAPTIVE_CONFIG_FILE", "adaptive_config.json")
 PARAMETER_CHANGE_LOG_FILE = os.getenv("PARAMETER_CHANGE_LOG_FILE", "parameter_change_log.jsonl")
 TELEGRAM_COMMANDS_ENABLED = os.getenv("TELEGRAM_COMMANDS_ENABLED", "1") == "1"
 TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS = env_int(
-    "TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS", 60, min_value=10
+    "TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS", 5, min_value=2
 )
 REQUIRE_TRADE_APPROVAL = os.getenv("REQUIRE_TRADE_APPROVAL", "1") == "1"
 PARAMETER_SUGGESTION_MIN_CONFIDENCE = env_float(
@@ -1670,36 +1670,74 @@ def get_session_context() -> SessionContext:
 # Telegram mesaj boyut limiti: 4096 karakter
 TELEGRAM_MAX_LEN = 4000  # Güvenli pay
 
-# Sabit reply keyboard bir "komuta merkezi" olarak düzenlenir: önce risk ve
-# pozisyon, sonra keşif, ardından bağlam ve onay. Kullanıcıya slash komutları
-# yerine okunabilir etiketler gösterilir; alias tablosu bunları mevcut komut
-# işleyicisine güvenli biçimde bağlar.
-KEYBOARD_COMMAND_ALIASES: dict[str, str] = {
+# Telefonda taşmayan üç satırlık ana menü; daha seyrek kullanılan raporlar
+# ikinci ekrana alınır. Reply keyboard etiketleri mesaj olarak gittiği için
+# kısa ve insanca okunur tutulur. Eski etiketler ile slash komutları geriye
+# dönük desteklenir.
+def _keyboard_alias_key(text: str) -> str:
+    return " ".join(str(text or "").replace("\ufe0f", "").strip().split()).casefold()
+
+
+_KEYBOARD_COMMAND_LABELS: dict[str, str] = {
+    # Command Center v2
+    "📊 Durum": "STATUS",
+    "📂 Pozisyon": "POSITIONS",
+    "🆕 MEXC": "LISTINGS",
+    "🧭 Radar": "RADAR",
+    "✅ Onaylar": "APPROVALS",
+    "☰ Diğer": "MORE",
+    "🌍 Rejim": "REGIME",
+    "💰 Portföy": "EQUITY",
+    "📈 7 Gün": "REPORT",
+    "ℹ️ Yardım": "HELP",
+    "⬅️ Ana Menü": "MAIN_MENU",
+    # Command Center v1 — eski Telegram klavyesi açık kalan istemciler için.
     "🧠 Durum": "STATUS",
     "📂 Pozisyonlar": "POSITIONS",
     "🆕 Yeni Liste": "LISTINGS",
     "🧭 Fırsat Radarı": "RADAR",
-    "🌍 Rejim": "REGIME",
-    "💰 Portföy": "EQUITY",
     "✅ Onay Merkezi": "APPROVALS",
     "📊 7G Rapor": "REPORT",
-    "ℹ️ Yardım": "HELP",
+}
+KEYBOARD_COMMAND_ALIASES: dict[str, str] = {
+    _keyboard_alias_key(label): command
+    for label, command in _KEYBOARD_COMMAND_LABELS.items()
 }
 
 KEYBOARD_ROWS: tuple[tuple[str, ...], ...] = (
-    ("🧠 Durum", "📂 Pozisyonlar"),
-    ("🆕 Yeni Liste", "🧭 Fırsat Radarı"),
+    ("📊 Durum", "📂 Pozisyon"),
+    ("🆕 MEXC", "🧭 Radar"),
+    ("✅ Onaylar", "☰ Diğer"),
+)
+MORE_KEYBOARD_ROWS: tuple[tuple[str, ...], ...] = (
     ("🌍 Rejim", "💰 Portföy"),
-    ("✅ Onay Merkezi", "📊 7G Rapor"),
-    ("ℹ️ Yardım",),
+    ("📈 7 Gün", "ℹ️ Yardım"),
+    ("⬅️ Ana Menü",),
 )
 
-MAIN_KEYBOARD: dict[str, Any] = {
-    "keyboard": [[{"text": label} for label in row] for row in KEYBOARD_ROWS],
-    "resize_keyboard": True,
-    "is_persistent": True,
-    "input_field_placeholder": "Komuta dokun veya mesaj yaz…",
-}
+
+def _reply_keyboard(
+    rows: tuple[tuple[str, ...], ...],
+    *,
+    placeholder: str,
+) -> dict[str, Any]:
+    return {
+        "keyboard": [[{"text": label} for label in row] for row in rows],
+        "resize_keyboard": True,
+        "is_persistent": True,
+        "one_time_keyboard": False,
+        "input_field_placeholder": placeholder,
+    }
+
+
+MAIN_KEYBOARD = _reply_keyboard(
+    KEYBOARD_ROWS,
+    placeholder="Komut seç…",
+)
+MORE_KEYBOARD = _reply_keyboard(
+    MORE_KEYBOARD_ROWS,
+    placeholder="Ek araç seç…",
+)
 
 
 # Telegram '/' menusunde gozukecek komut listesi. _register_bot_commands ile
@@ -1713,6 +1751,7 @@ BOT_COMMANDS: list[dict[str, str]] = [
     {"command": "equity", "description": "Portföy, gerçekleşen PnL ve başarı"},
     {"command": "approvals", "description": "Trade ve parametre onay merkezi"},
     {"command": "report", "description": "Son 7 günlük performans özeti"},
+    {"command": "menu", "description": "Ana komuta menüsünü göster"},
     {"command": "help", "description": "Komutlar ve kullanım"},
     {"command": "start", "description": "Botu uyandır ve klavyeyi aç"},
 ]
@@ -10666,7 +10705,7 @@ def _extract_command_text(update: dict) -> tuple[Optional[str], Optional[str]]:
 def _resolve_telegram_command(text: str) -> str:
     """Map a persistent keyboard label or slash command to one command name."""
     normalized = " ".join(str(text or "").strip().split())
-    alias = KEYBOARD_COMMAND_ALIASES.get(normalized)
+    alias = KEYBOARD_COMMAND_ALIASES.get(_keyboard_alias_key(normalized))
     if alias:
         return alias
     first = normalized.split(maxsplit=1)[0] if normalized else ""
@@ -10750,7 +10789,26 @@ def decline_trade_suggestion(approval_id: str, state_mgr: StateManager = _STATE_
     return f"❌ DECLINED {approval_id}"
 
 
+_TELEGRAM_COMMAND_LOCK = threading.Lock()
+
+
 def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
+    """Serialize Telegram polling and turn unexpected failures into feedback."""
+    if not _TELEGRAM_COMMAND_LOCK.acquire(blocking=False):
+        return
+    try:
+        _process_telegram_commands_locked(state_mgr)
+    except Exception as exc:
+        log.exception("Telegram komutu işlenemedi: %s", exc)
+        send_message(
+            "⚠️ Komut işlenirken geçici bir hata oluştu. "
+            "Lütfen birkaç saniye sonra tekrar deneyin."
+        )
+    finally:
+        _TELEGRAM_COMMAND_LOCK.release()
+
+
+def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> None:
     """Poll Telegram commands for ACCEPT / DECLINE / PENDING.
 
     Simple polling is enough for Render-style long-running bot deployments.
@@ -10775,11 +10833,20 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
         if cmd == "START":
             send_message(
                 f"🤖 Signal Bot aktif (v{__version__})\n\n"
-                "Sabit klavye altta açıldı. İstediğin zaman tıkla.\n\n"
-                "Önce Durum/Pozisyonlar ile riski gör; ardından Yeni Liste veya "
-                "Fırsat Radarı ile keşfe geç. Onay Merkezi hiçbir işlemi senden "
-                "habersiz ilerletmez.",
+                "Üç satırlık komuta merkezi hazır. Önce Durum/Pozisyon ile "
+                "riski gör; ardından MEXC veya Radar ile keşfe geç. Ek raporlar "
+                "Diğer menüsünde. Onaylar hiçbir işlemi senden habersiz ilerletmez.",
                 reply_markup=MAIN_KEYBOARD,
+            )
+        elif cmd in {"MAIN_MENU", "MENU"}:
+            send_message(
+                "🏠 Ana komuta menüsü açıldı.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+        elif cmd in {"MORE", "MORE_MENU"}:
+            send_message(
+                "☰ Ek araçlar — seçimden sonra ana menü otomatik geri gelir.",
+                reply_markup=MORE_KEYBOARD,
             )
         elif cmd == "HELP":
             send_message(
@@ -10793,6 +10860,7 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
                 "/report — son 7 gün performans özeti\n"
                 "/regime — anlık rejim + macro context\n"
                 "/approvals — trade ve parametre onay merkezi\n"
+                "/menu — ana komuta menüsünü yeniden aç\n"
                 "/help — bu mesaj\n"
                 "/pending — bekleyen parametre önerisi\n"
                 "ACCEPT <id> — öneri kabul\n"
@@ -13064,8 +13132,8 @@ def telegram_command_loop(
     bot_loop her SCAN_INTERVAL'da bir (default 300s) komutlari isliyor;
     bu /start, /status gibi komutlarin cevap suresini 5dk'ya cikartiyor.
     Bu thread her TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS'da bir polling
-    yaparak interaktif cevap suresini ~60s'ye dusurur. process_telegram_commands'in
-    kendi rate limit'i mukerrer cagiri sorununu zaten engelliyor.
+    yaparak interaktif cevap suresini varsayılan olarak ~5s'ye düşürür.
+    process_telegram_commands kilidi ana döngüyle çakışan poll'u engeller.
     """
     log.info("Telegram command listener basladi (her %ss).", TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS)
     while not stop_event.is_set():

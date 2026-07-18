@@ -39,18 +39,19 @@ UNIFIED_LISTING_SEEN_FILE=mexc_seen_symbols.json
 
 ## Telegram komuta merkezi
 
-Sabit klavye riskten keşfe doğru sıralanır:
+Ana klavye telefonda taşmayan üç satırlık bir komuta merkezidir:
 
 ```text
-🧠 Durum          | 📂 Pozisyonlar
-🆕 Yeni Liste     | 🧭 Fırsat Radarı
-🌍 Rejim          | 💰 Portföy
-✅ Onay Merkezi   | 📊 7G Rapor
-ℹ️ Yardım
+📊 Durum      | 📂 Pozisyon
+🆕 MEXC       | 🧭 Radar
+✅ Onaylar     | ☰ Diğer
 ```
 
-Butonlar okunabilir etiket gönderir; slash komutları (`/status`, `/listings`,
-`/approvals` vb.) aynı şekilde çalışmaya devam eder.
+`Diğer` menüsü Rejim, Portföy, 7 Gün ve Yardım araçlarını açar; seçimden sonra
+ana menü geri gelir. Butonlar okunabilir etiket gönderir; eski klavye etiketleri
+ve slash komutları (`/status`, `/listings`, `/approvals`, `/menu` vb.) aynı
+şekilde çalışmaya devam eder. Komut dinleyicisi varsayılan olarak beş saniyede
+bir kontrol edilir (`TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS=5`).
 
 Ayrıntılı tasarım, geçiş ve geri alma kuralları:
 [`docs/UNIFIED_ENGINE.md`](docs/UNIFIED_ENGINE.md).
