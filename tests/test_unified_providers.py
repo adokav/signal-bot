@@ -112,6 +112,25 @@ def test_listing_provider_uses_persisted_mexc_exchange_diff_fallback(tmp_path):
     assert set(json.loads(seen_file.read_text("utf-8"))) == {"BTCUSDT", "NEWUSDT"}
 
 
+def test_new_listing_is_rechecked_after_one_time_exchange_diff(tmp_path):
+    seen_file = tmp_path / "seen.json"
+    seen_file.write_text(json.dumps(["BTCUSDT"]), encoding="utf-8")
+    provider = MexcNewListingProvider(
+        base_url="https://mexc.test",
+        announcement_endpoints=("https://announcement.test",),
+        seen_file=str(seen_file),
+    )
+    provider.session = ListingSession()
+
+    first = provider.fetch_listings()
+    second = provider.fetch_listings()
+
+    assert [row.pair for row in first] == ["NEWUSDT"]
+    assert [row.pair for row in second] == ["NEWUSDT"]
+    catalog = json.loads((tmp_path / "mexc_listing_candidates.json").read_text("utf-8"))
+    assert catalog["NEWUSDT"]["first_seen_at"] > 0
+
+
 class AnnouncementOnlySession:
     def get(self, url, params=None, timeout=15):
         if "announcement.test" in url:
@@ -276,3 +295,49 @@ def test_listing_provider_ignores_api_permission_transition(tmp_path):
     session.api_trading_allowed = True
 
     assert provider.fetch_listings() == []
+
+
+class ManualWatchSession(ListingSession):
+    def __init__(self):
+        self.kline_params = []
+
+    def get(self, url, params=None, timeout=15):
+        if url.endswith("/exchangeInfo"):
+            return FakeResponse({
+                "symbols": [
+                    {"symbol": "BTCUSDT", "status": "1"},
+                    {"symbol": "OLDUSDT", "status": "1"},
+                ]
+            })
+        if url.endswith("/ticker/24hr"):
+            return FakeResponse([
+                {
+                    "symbol": "OLDUSDT",
+                    "lastPrice": "1.0",
+                    "priceChangePercent": "4",
+                    "quoteVolume": "3000000",
+                    "bidPrice": "0.999",
+                    "askPrice": "1.001",
+                }
+            ])
+        if url.endswith("/klines"):
+            self.kline_params.append(params)
+        return super().get(url, params=params, timeout=timeout)
+
+
+def test_manual_watch_is_scanned_without_a_fresh_listing_event(tmp_path):
+    seen_file = tmp_path / "seen.json"
+    seen_file.write_text(json.dumps(["BTCUSDT", "OLDUSDT"]), encoding="utf-8")
+    session = ManualWatchSession()
+    provider = MexcNewListingProvider(
+        base_url="https://mexc.test",
+        announcement_endpoints=("https://announcement.test",),
+        seen_file=str(seen_file),
+    )
+    provider.session = session
+    provider.set_watched_pairs(["OLDUSDT"])
+
+    rows = provider.fetch_listings()
+
+    assert [(row.pair, row.manually_watched) for row in rows] == [("OLDUSDT", True)]
+    assert session.kline_params[0]["interval"] == "5m"

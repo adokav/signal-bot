@@ -10,7 +10,7 @@ from typing import Any
 
 from .cex import rank_cex_tickers
 from .config import UnifiedConfig
-from .listings import rank_mexc_listings
+from .listings import partition_mexc_listings
 from .models import RadarSnapshot
 from .providers import MexcNewListingProvider, MexcPublicProvider
 
@@ -35,13 +35,21 @@ class UnifiedRadarEngine:
         self.listing_provider = listing_provider or MexcNewListingProvider(
             timeout=config.request_timeout_seconds,
             seen_file=config.listing_seen_file,
+            candidate_file=config.listing_candidate_file,
+            candidate_ttl_hours=config.listing_candidate_ttl_hours,
             max_candidates=config.listing_max_candidates,
         )
+
+    def set_watched_pairs(self, pairs: list[str] | tuple[str, ...] | set[str]) -> None:
+        setter = getattr(self.listing_provider, "set_watched_pairs", None)
+        if callable(setter):
+            setter(pairs)
 
     def scan_once(self, *, now: int | None = None) -> RadarSnapshot:
         timestamp = int(now if now is not None else time.time())
         cex_candidates = []
         listing_candidates = []
+        listing_filtered_candidates = []
         errors: list[str] = []
         if self.config.cex_enabled:
             try:
@@ -56,7 +64,7 @@ class UnifiedRadarEngine:
                 log.warning("Unified CEX radar failed: %s", exc)
         if self.config.listing_enabled:
             try:
-                listing_candidates = rank_mexc_listings(
+                listing_candidates, listing_filtered_candidates = partition_mexc_listings(
                     self.listing_provider.fetch_listings(),
                     trade_universe=self.trade_universe,
                     top_n=self.config.listing_top_n,
@@ -70,6 +78,7 @@ class UnifiedRadarEngine:
             mode=self.config.mode,
             cex_candidates=tuple(cex_candidates),
             listing_candidates=tuple(listing_candidates),
+            listing_filtered_candidates=tuple(listing_filtered_candidates),
             errors=tuple(errors),
         )
 
@@ -101,6 +110,7 @@ class UnifiedRadarRuntime:
                         or not completed.errors
                         or completed.cex_candidates
                         or completed.listing_candidates
+                        or completed.listing_filtered_candidates
                     ):
                         self._latest = completed
                 except Exception as exc:  # defensive; scan_once isolates provider failures
@@ -120,6 +130,9 @@ class UnifiedRadarRuntime:
         with self._lock:
             return self._latest
 
+    def set_watched_pairs(self, pairs: list[str] | tuple[str, ...] | set[str]) -> None:
+        self.engine.set_watched_pairs(pairs)
+
     def close(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
@@ -131,7 +144,11 @@ def attach_snapshot_to_results(results: list[dict], snapshot: RadarSnapshot | No
         return
     by_symbol = {candidate.symbol: candidate for candidate in snapshot.cex_candidates}
     listings_by_symbol = {
-        candidate.symbol: candidate for candidate in snapshot.listing_candidates
+        candidate.symbol: candidate
+        for candidate in (
+            *snapshot.listing_filtered_candidates,
+            *snapshot.listing_candidates,
+        )
     }
     for result in results:
         symbol = str(result.get("symbol") or "").upper()
@@ -160,12 +177,14 @@ def format_snapshot_brief(snapshot: RadarSnapshot | dict | None) -> str:
     data = snapshot.to_dict() if isinstance(snapshot, RadarSnapshot) else snapshot
     cex = (data.get("cex_candidates") or [None])[0]
     listing = (data.get("listing_candidates") or [None])[0]
+    filtered_count = len(data.get("listing_filtered_candidates") or [])
     errors = data.get("errors") or []
     error_text = f" | hata: {', '.join(errors)}" if errors else ""
     return (
         f"Unified Radar [{data.get('mode', 'SHADOW')}]: "
         f"PriceMonitorX {_candidate_line(cex)} | "
         f"PhenomenonX/MEXC Yeni {_candidate_line(listing)}"
+        f" | filtrede {filtered_count}"
         f" | trade yetkisi: YOK{error_text}"
     )
 
@@ -182,6 +201,16 @@ def _money(value: Any) -> str:
     if number >= 1_000:
         return f"${number / 1_000:.0f}K"
     return f"${number:.0f}"
+
+
+def _stage_label(stage: Any) -> str:
+    return {
+        "HOT": "🔥 Güçlü",
+        "BUILDING": "📈 Isınıyor",
+        "WATCH": "👀 İzle",
+        "WEAK": "⚪ Zayıf",
+        "CROWDED": "⛔ Geç kalınmış",
+    }.get(str(stage or "").upper(), str(stage or "-"))
 
 
 def format_listing_report(
@@ -226,9 +255,9 @@ def format_listing_report(
             change, acceleration, price = 0.0, 0.0, 0.0
         lines.extend(
             [
-                f"{index}. {item.get('symbol', '?')} — {int(item.get('score', 0))}/100 · {item.get('stage', '-')}",
+                f"{index}. {item.get('symbol', '?')} — {int(item.get('score', 0))}/100 · {_stage_label(item.get('stage'))}",
                 f"   {status} | 24s hacim {_money(metadata.get('quote_volume'))} | değişim %{change:+.1f}",
-                f"   Hacim ivmesi {acceleration:.1f}x | fiyat {price:g}",
+                f"   5dk hacim ivmesi {acceleration:.1f}x | fiyat {price:g}",
             ]
         )
         if reasons:
@@ -240,4 +269,40 @@ def format_listing_report(
             lines.append(f"   Duyuru: {title[:160]}")
         lines.append("")
     lines.append("Erken keşif radarıdır; yeni coin otomatik olarak işlem evrenine alınmaz.")
+    return "\n".join(lines)
+
+
+def format_filtered_listing_report(
+    snapshot: RadarSnapshot | dict | None,
+    *,
+    limit: int = 5,
+) -> str:
+    """Explain candidates hidden by the quality/chase filter."""
+    if snapshot is None:
+        return "🟡 MEXC — FİLTREDEKİLER\n\nİlk tarama henüz tamamlanmadı."
+    data = snapshot.to_dict() if isinstance(snapshot, RadarSnapshot) else snapshot
+    rows = data.get("listing_filtered_candidates") or []
+    if not rows:
+        return "🟡 MEXC — FİLTREDEKİLER\n\nŞu an filtrede bekleyen aday yok."
+
+    lines = [
+        "🟡 MEXC — FİLTREDEKİLER",
+        "Elendi diye kaybolmaz; istersen tek dokunuşla sürekli takibe alınır.",
+        "",
+    ]
+    for index, item in enumerate(rows[: max(1, limit)], 1):
+        metadata = item.get("metadata") or {}
+        filter_reasons = metadata.get("filter_reasons") or []
+        risks = item.get("risk_flags") or []
+        lines.extend(
+            [
+                f"{index}. {item.get('symbol', '?')} — {int(item.get('score', 0))}/100 · {_stage_label(item.get('stage'))}",
+                "   Filtre: " + " · ".join(str(value) for value in filter_reasons[:2]),
+                f"   24s hacim {_money(metadata.get('quote_volume'))} | 5dk ivme {float(metadata.get('volume_acceleration') or 0):.1f}x",
+            ]
+        )
+        if risks:
+            lines.append("   ⚠️ " + " · ".join(str(value) for value in risks[:2]))
+        lines.append("")
+    lines.append("Aşağıdaki 👀 butonları yalnız izleme başlatır; emir vermez.")
     return "\n".join(lines)

@@ -9,7 +9,7 @@ olarak çalıştırılmaz; yalnızca aşağıdaki sınırlandırılmış yetenek
 |---|---|---|---|
 | `signal-bot` | Rejim, sinyal, risk, ACCE gate, plan, paper execution | Tek çekirdek | Yalnızca mevcut ACCE kapıları üzerinden |
 | `pricemonitorx_bot` | Likidite tabanlı geniş CEX keşfi, geç-pump cezası | `CORE_CONFLUENCE` veya `DISCOVERY_ONLY` | Yok |
-| `phenomenonx_bot` | MEXC New Listings, Spot teyidi, hacim ve tamamlanmış saat ivmesi | `DISCOVERY_ONLY` / `CORE_CONFLUENCE` | Yok |
+| `phenomenonx_bot` | MEXC New Listings, Spot teyidi, hacim ve tamamlanmış 5dk ivmesi | `DISCOVERY_ONLY` / `CORE_CONFLUENCE` | Yok |
 | `mm_trading` | t+1 icra, maliyet farkındalığı, OOS ölçüm yaklaşımı | Doğrulama kapısı | Yok |
 | `theassembly` | Hiçbir şey taşınmadı | Bağımsız ürün | Kapsam dışı |
 
@@ -40,8 +40,9 @@ Mevcut market features ─> Signal Brain ─> Risk/ACCE gates ──────
    `signal`, `score` ve `actionable` alanlarını değiştirmez.
 4. Sermaye evreni yalnızca `TRADE_UNIVERSE` ile operatör tarafından değiştirilir.
 5. Yeni listeleme adayı yüksek skorda dahi işlem evrenini büyütemez. Spot teyidi,
-   hacim ve tamamlanmış saat ivmesi yalnızca keşif kanıtıdır; `CROWDED` ilk
-   pump adayları Top listeye alınmaz.
+   hacim, makas ve tamamlanmış 5dk ivmesi yalnızca keşif kanıtıdır; `CROWDED`
+   ilk pump adayları Top listeye alınmaz fakat gerekçesiyle filtre görünümünde
+   kalır.
 6. Unified tarama tek worker'da, ana trade döngüsünün dışında çalışır. Tam servis
    kesintisi son iyi snapshot'ı silmez.
 7. Evren değiştirildiğinde çıkarılmış bir sembolde açık pozisyon varsa bot o
@@ -56,13 +57,15 @@ UNIFIED_ENGINE_ENABLED=1
 UNIFIED_ENGINE_MODE=SHADOW       # SHADOW veya ADVISORY; LIVE kabul edilmez
 UNIFIED_CEX_RADAR_ENABLED=1
 UNIFIED_LISTING_RADAR_ENABLED=1
-UNIFIED_SCAN_INTERVAL_SECONDS=600
+UNIFIED_SCAN_INTERVAL_SECONDS=120
 UNIFIED_CEX_TOP_N=12
 UNIFIED_CEX_MIN_QUOTE_VOLUME=500000
 UNIFIED_LISTING_TOP_N=5
 UNIFIED_LISTING_MIN_SCORE=52
 UNIFIED_LISTING_MAX_CANDIDATES=20
 UNIFIED_LISTING_SEEN_FILE=mexc_seen_symbols.json
+UNIFIED_LISTING_CANDIDATE_FILE=mexc_listing_candidates.json
+UNIFIED_LISTING_CANDIDATE_TTL_HOURS=72
 UNIFIED_VALIDATION_MIN_TOTAL_TRADES=40
 UNIFIED_VALIDATION_MIN_OOS_TRADES=16
 UNIFIED_VALIDATION_OOS_FRACTION=0.40
@@ -78,6 +81,20 @@ TRADE_UNIVERSE=BTCUSDT:CORE,ETHUSDT:CORE,SOLUSDT:HIGH_BETA
 ```
 
 Geçersiz veya boş override, incelenmiş dokuz varlıklı varsayılana geri döner.
+
+## MEXC fırsat hunisi
+
+PhenomenonX her gözlemi önce puanlar, sonra iki görünüm üretir:
+
+- `listing_candidates`: kalite eşiğini geçen ve ilk pump'ı aşırı uzamamış adaylar;
+- `listing_filtered_candidates`: eşik altında veya `CROWDED` olan adaylar ve
+  bunların açık filtre gerekçeleri.
+
+Yeni adaylar 72 saatlik katalogda yeniden puanlanır. Telegram'daki `👀` eylemi
+adayı manuel takip listesine alır ve süre sınırını kaldırır. Aday filtreden
+geçtiğinde veya `BUILDING/HOT` aşamasına yükseldiğinde yalnızca takip alarmı
+üretilir. Bu üç durumun hiçbiri `TRADE_UNIVERSE` değerini veya emir yetkisini
+değiştirmez.
 
 ## Doğrulama ve terfi
 

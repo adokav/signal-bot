@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import statistics
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
@@ -152,6 +155,8 @@ class MexcNewListingProvider:
         base_url: str = "https://api.mexc.com",
         announcement_endpoints: tuple[str, ...] | None = None,
         seen_file: str = "mexc_seen_symbols.json",
+        candidate_file: str | None = None,
+        candidate_ttl_hours: int = 72,
         max_candidates: int = 20,
     ):
         self.timeout = timeout
@@ -160,8 +165,31 @@ class MexcNewListingProvider:
             announcement_endpoints or self.DEFAULT_ANNOUNCEMENT_ENDPOINTS
         )
         self.seen_file = Path(seen_file)
+        self.candidate_file = (
+            Path(candidate_file)
+            if candidate_file
+            else self.seen_file.with_name("mexc_listing_candidates.json")
+        )
+        self.candidate_ttl_seconds = max(1, candidate_ttl_hours) * 60 * 60
         self.max_candidates = max(1, max_candidates)
         self.session = _session("SignalBot-PhenomenonX-MEXC/3.0")
+        self._watch_lock = threading.RLock()
+        self._watched_pairs: set[str] = set()
+
+    def set_watched_pairs(self, pairs: Any) -> None:
+        normalized = {
+            str(pair or "").strip().upper().replace("/", "")
+            for pair in (pairs or [])
+        }
+        with self._watch_lock:
+            self._watched_pairs = {
+                pair for pair in normalized
+                if pair.endswith("USDT") and 6 <= len(pair) <= 44
+            }
+
+    def _watched_pairs_snapshot(self) -> set[str]:
+        with self._watch_lock:
+            return set(self._watched_pairs)
 
     def _get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
         response = self.session.get(
@@ -218,11 +246,11 @@ class MexcNewListingProvider:
         }
 
     def volume_acceleration(self, pair: str) -> float:
-        """Use only completed hourly candles; the last row may still be open."""
+        """Detect early volume expansion from completed five-minute candles."""
         try:
             rows = self._get_json(
                 "/api/v3/klines",
-                {"symbol": pair, "interval": "60m", "limit": 8},
+                {"symbol": pair, "interval": "5m", "limit": 13},
             ) or []
             if len(rows) < 5:
                 return 0.0
@@ -233,7 +261,7 @@ class MexcNewListingProvider:
             completed = volumes[:-1]
             latest = completed[-1]
             baseline_rows = completed[:-1]
-            baseline = sum(baseline_rows) / max(len(baseline_rows), 1)
+            baseline = statistics.median(baseline_rows) if baseline_rows else 0.0
             return latest / max(baseline, 1.0)
         except Exception:
             log.warning("MEXC listing kline alınamadı: %s", pair, exc_info=True)
@@ -261,7 +289,116 @@ class MexcNewListingProvider:
             return []
         return sorted(current - previous)
 
+    def _load_candidate_catalog(self) -> dict[str, dict[str, Any]]:
+        try:
+            payload = json.loads(self.candidate_file.read_text("utf-8"))
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        catalog: dict[str, dict[str, Any]] = {}
+        for pair, row in payload.items():
+            normalized = str(pair or "").upper()
+            if (
+                normalized.endswith("USDT")
+                and isinstance(row, dict)
+                and isinstance(row.get("first_seen_at"), int)
+            ):
+                catalog[normalized] = row
+        return catalog
+
+    def _save_candidate_catalog(self, catalog: dict[str, dict[str, Any]]) -> None:
+        try:
+            self.candidate_file.parent.mkdir(parents=True, exist_ok=True)
+            # Bound disk state while retaining enough history to prevent old
+            # announcement headlines from becoming "new" again after expiry.
+            ordered = sorted(
+                catalog.items(),
+                key=lambda item: int(item[1].get("first_seen_at") or 0),
+                reverse=True,
+            )[:500]
+            tmp = self.candidate_file.with_name(
+                f".{self.candidate_file.name}.{os.getpid()}.tmp"
+            )
+            tmp.write_text(
+                json.dumps(dict(ordered), ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self.candidate_file)
+        except Exception:
+            log.warning("MEXC aday hafızası yazılamadı", exc_info=True)
+
+    def _candidate_records(
+        self,
+        discovered: list[tuple[str, str, int, str]],
+        *,
+        now: int,
+    ) -> list[dict[str, Any]]:
+        catalog = self._load_candidate_catalog()
+        discovered_pairs: list[str] = []
+        for symbol, title, rank, source in discovered:
+            pair = f"{symbol}USDT"
+            previous = catalog.get(pair) or {}
+            first_seen = int(previous.get("first_seen_at") or now)
+            catalog[pair] = {
+                "symbol": symbol,
+                "pair": pair,
+                "title": title or previous.get("title") or pair,
+                "rank": int(rank),
+                "source": source or previous.get("source") or "ANNOUNCEMENT",
+                "first_seen_at": first_seen,
+                "last_seen_at": now,
+            }
+            if pair not in discovered_pairs:
+                discovered_pairs.append(pair)
+        self._save_candidate_catalog(catalog)
+
+        watched = self._watched_pairs_snapshot()
+        cutoff = now - self.candidate_ttl_seconds
+        active_pairs = {
+            pair for pair, row in catalog.items()
+            if int(row.get("first_seen_at") or 0) >= cutoff
+        }
+        ordered_pairs = [
+            *sorted(watched),
+            *(pair for pair in discovered_pairs if pair in active_pairs and pair not in watched),
+            *(
+                pair for pair, _ in sorted(
+                    catalog.items(),
+                    key=lambda item: int(item[1].get("first_seen_at") or 0),
+                    reverse=True,
+                )
+                if pair in active_pairs
+                and pair not in watched
+                and pair not in discovered_pairs
+            ),
+        ]
+
+        records: list[dict[str, Any]] = []
+        auto_count = 0
+        for pair in ordered_pairs:
+            manual = pair in watched
+            if not manual and auto_count >= self.max_candidates:
+                continue
+            row = dict(catalog.get(pair) or {})
+            if not row:
+                row = {
+                    "symbol": pair[:-4],
+                    "pair": pair,
+                    "title": f"Manuel takip: {pair}",
+                    "rank": self.max_candidates,
+                    "source": "MANUAL_WATCH",
+                    "first_seen_at": now,
+                    "last_seen_at": now,
+                }
+            row["manually_watched"] = manual
+            records.append(row)
+            if not manual:
+                auto_count += 1
+        return records
+
     def fetch_listings(self) -> list[MexcListing]:
+        scan_started_at = int(time.time())
         titles = self.fetch_listing_titles()
         try:
             exchange = self.exchange_info()
@@ -324,12 +461,17 @@ class MexcNewListingProvider:
 
         if titles and not discovered:
             raise RuntimeError("MEXC listing başlığı bulundu fakat sembol ayrıştırılamadı")
-        if not discovered and not exchange:
+        records = self._candidate_records(discovered, now=scan_started_at)
+        if not records and not exchange:
             raise RuntimeError("MEXC duyuru ve Spot API kaynakları birlikte kullanılamıyor")
 
         observations: list[MexcListing] = []
-        for symbol, title, rank, source in discovered[: self.max_candidates]:
-            pair = f"{symbol}USDT"
+        for record in records:
+            symbol = str(record.get("symbol") or "").upper()
+            pair = str(record.get("pair") or f"{symbol}USDT").upper()
+            title = str(record.get("title") or pair)
+            rank = int(record.get("rank") or 0)
+            source = str(record.get("source") or "ANNOUNCEMENT")
             info = exchange.get(pair) or {}
             tick = ticker.get(pair) or {}
             if info:
@@ -340,6 +482,10 @@ class MexcNewListingProvider:
                 )
             else:
                 spot_status = "NOT_OPEN" if exchange else "UNKNOWN"
+            bid = _safe_float(tick.get("bidPrice"))
+            ask = _safe_float(tick.get("askPrice"))
+            midpoint = (bid + ask) / 2 if bid > 0 and ask >= bid else 0.0
+            spread_bps = ((ask - bid) / midpoint * 10_000) if midpoint > 0 else 0.0
             observations.append(
                 MexcListing(
                     symbol=symbol,
@@ -352,6 +498,9 @@ class MexcNewListingProvider:
                     quote_volume=_safe_float(tick.get("quoteVolume")),
                     volume_acceleration=0.0,
                     discovery_source=source,
+                    first_seen_at=int(record.get("first_seen_at") or scan_started_at),
+                    spread_bps=spread_bps,
+                    manually_watched=bool(record.get("manually_watched")),
                 )
             )
 
