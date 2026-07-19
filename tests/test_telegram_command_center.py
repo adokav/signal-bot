@@ -165,6 +165,59 @@ def test_filtered_candidates_get_one_tap_watch_buttons():
     }
 
 
+def test_passed_candidates_get_one_tap_watch_buttons_and_show_watched_state():
+    state = _MenuState()
+    snapshot = {
+        "listing_candidates": [
+            {"symbol": "NOVAUSDT", "score": 72, "metadata": {}},
+            {"symbol": "ALPHAUSDT", "score": 80, "metadata": {}},
+        ]
+    }
+    state.meta["mexc_manual_watchlist"] = {
+        "ALPHAUSDT": {"added_at": 1},
+    }
+
+    keyboard = bot._passed_watch_keyboard(snapshot, state)
+
+    assert keyboard == {
+        "inline_keyboard": [
+            [{
+                "text": "👀 NOVA takibe al",
+                "callback_data": "WATCH_ADD NOVAUSDT",
+            }],
+            [{
+                "text": "✅ ALPHA takipte",
+                "callback_data": "WATCH_STATUS ALPHAUSDT",
+            }],
+        ]
+    }
+
+
+def test_watch_status_reports_current_passed_candidate_without_readding():
+    state = _MenuState()
+    state.meta["mexc_manual_watchlist"] = {
+        "NOVAUSDT": {"added_at": 1},
+    }
+    state.meta["unified_radar_snapshot"] = {
+        "listing_candidates": [{
+            "symbol": "NOVAUSDT",
+            "score": 76,
+            "stage": "HOT",
+            "metadata": {
+                "filter_status": "PASSED",
+                "volume_acceleration": 2.5,
+                "change_pct": 9.0,
+            },
+        }]
+    }
+
+    message = bot._mexc_watch_status("NOVA", state)
+
+    assert "NOVAUSDT — 76/100" in message
+    assert "Eşiği geçti" in message
+    assert "Takip alarmı aktiftir" in message
+
+
 def test_watched_candidate_alerts_once_when_it_clears_the_filter(monkeypatch):
     state = _MenuState()
     state.meta["mexc_manual_watchlist"] = {
