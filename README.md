@@ -22,30 +22,47 @@ RENDERUSDT, PYTHUSDT, BONKUSDT, POPCATUSDT
 Geniş radar adayları bu listeyi kendiliğinden büyütemez. Unified Engine
 varsayılan olarak `SHADOW` çalışır ve hiçbir radar adayı emir yetkisi taşımaz.
 Telegram'da `/radar` komutu PriceMonitorX piyasa radarı ile PhenomenonX MEXC
-yeni listeleme radarını birlikte; `/listings` ise yeni listeleme Top 3'ünü
-ayrıntılı gösterir.
+yeni listeleme radarını birlikte; `/listings` puan eşiğini geçenleri,
+`/filtered` filtrede kalanları ve `/watch` süresiz takip listesini gösterir.
 
 ```text
 UNIFIED_ENGINE_ENABLED=1
 UNIFIED_ENGINE_MODE=SHADOW
 UNIFIED_CEX_RADAR_ENABLED=1
 UNIFIED_LISTING_RADAR_ENABLED=1
-UNIFIED_SCAN_INTERVAL_SECONDS=600
+UNIFIED_SCAN_INTERVAL_SECONDS=120
 UNIFIED_LISTING_TOP_N=5
 UNIFIED_LISTING_MIN_SCORE=52
 UNIFIED_LISTING_MAX_CANDIDATES=20
 UNIFIED_LISTING_SEEN_FILE=mexc_seen_symbols.json
+UNIFIED_LISTING_CANDIDATE_FILE=mexc_listing_candidates.json
+UNIFIED_LISTING_CANDIDATE_TTL_HOURS=72
 ```
 
 ## Telegram komuta merkezi
 
-Ana klavye telefonda taşmayan üç satırlık bir komuta merkezidir:
+Ana klavye telefonda taşmayan, görev isimleri kısa bir komuta merkezidir:
 
 ```text
 📊 Durum      | 📂 Pozisyon
-🆕 MEXC       | 🧭 Radar
-✅ Onaylar     | ☰ Diğer
+🚀 MEXC Fırsat | 👀 Takip
+🧭 Radar       | ✅ Onaylar
+☰ Diğer
 ```
+
+`MEXC Fırsat` alt menüsü:
+
+```text
+🎯 Eşiği Geçen | 🟡 Filtredekiler
+👀 Takip Listem | 🔄 Şimdi Tara
+⬅️ Ana Menü
+```
+
+Yeni adaylar 72 saat boyunca yeniden puanlanır. Filtredekiler ekranında bir
+coine ait `👀` inline butonuna dokunmak onu süresiz takip listesine alır;
+`/watch_add NOVA` ve `/watch_remove NOVA` aynı işlemin komut karşılıklarıdır.
+Takipteki aday filtreyi geçtiğinde veya `BUILDING/HOT` aşamasına yükseldiğinde
+bildirim üretilir. Bu akış işlem evrenini değiştirmez ve emir yetkisi vermez.
 
 `Diğer` menüsü Rejim, Portföy, 7 Gün ve Yardım araçlarını açar; seçimden sonra
 ana menü geri gelir. Butonlar okunabilir etiket gönderir; eski klavye etiketleri

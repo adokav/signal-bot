@@ -85,13 +85,15 @@ class UnifiedConfig:
     mode: str = "SHADOW"
     cex_enabled: bool = True
     listing_enabled: bool = True
-    scan_interval_seconds: int = 10 * 60
+    scan_interval_seconds: int = 2 * 60
     cex_top_n: int = 12
     cex_min_quote_volume: float = 500_000.0
     listing_top_n: int = 5
     listing_min_score: int = 52
     listing_max_candidates: int = 20
     listing_seen_file: str = "mexc_seen_symbols.json"
+    listing_candidate_file: str = "mexc_listing_candidates.json"
+    listing_candidate_ttl_hours: int = 72
     request_timeout_seconds: int = 15
 
     @classmethod
@@ -105,7 +107,7 @@ class UnifiedConfig:
             mode=mode,
             cex_enabled=_env_bool("UNIFIED_CEX_RADAR_ENABLED", True),
             listing_enabled=_env_bool("UNIFIED_LISTING_RADAR_ENABLED", True),
-            scan_interval_seconds=_env_int("UNIFIED_SCAN_INTERVAL_SECONDS", 10 * 60, 300),
+            scan_interval_seconds=_env_int("UNIFIED_SCAN_INTERVAL_SECONDS", 2 * 60, 60),
             cex_top_n=_env_int("UNIFIED_CEX_TOP_N", 12, 1),
             cex_min_quote_volume=_env_float("UNIFIED_CEX_MIN_QUOTE_VOLUME", 500_000.0, 0.0),
             listing_top_n=min(10, _env_int("UNIFIED_LISTING_TOP_N", 5, 1)),
@@ -116,5 +118,12 @@ class UnifiedConfig:
             ),
             listing_seen_file=os.getenv("UNIFIED_LISTING_SEEN_FILE", "mexc_seen_symbols.json").strip()
             or "mexc_seen_symbols.json",
+            listing_candidate_file=os.getenv(
+                "UNIFIED_LISTING_CANDIDATE_FILE", "mexc_listing_candidates.json"
+            ).strip() or "mexc_listing_candidates.json",
+            listing_candidate_ttl_hours=min(
+                168,
+                _env_int("UNIFIED_LISTING_CANDIDATE_TTL_HOURS", 72, 1),
+            ),
             request_timeout_seconds=_env_int("UNIFIED_REQUEST_TIMEOUT_SECONDS", 15, 3),
         )

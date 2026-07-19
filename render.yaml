@@ -29,6 +29,12 @@ services:
         value: "0"
       - key: SCAN_INTERVAL
         value: "300"
+      - key: TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS
+        value: "5"
+      - key: UNIFIED_SCAN_INTERVAL_SECONDS
+        value: "120"
+      - key: UNIFIED_LISTING_CANDIDATE_TTL_HOURS
+        value: "72"
       - key: LONG_SETUP_ENGINE_ENABLED
         value: "1"
       - key: LONG_CONFLUENCE_MIN_SETUP

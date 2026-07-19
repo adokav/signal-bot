@@ -11,6 +11,7 @@ import html
 import json
 import re
 from collections.abc import Iterable
+from dataclasses import replace
 
 from .models import MexcListing, RadarCandidate
 
@@ -101,8 +102,12 @@ def score_mexc_listing(
 
     if item.discovery_source == "EXCHANGE_DIFF":
         reasons.append("MEXC Spot API'de yeni görüldü")
+    elif item.discovery_source == "MANUAL_WATCH":
+        reasons.append("manuel MEXC takibi")
     else:
         reasons.append("MEXC New Listings akışında")
+    if item.manually_watched and item.discovery_source != "MANUAL_WATCH":
+        reasons.append("manuel takip listesinde")
 
     spot_status = str(item.spot_status or "UNKNOWN").upper()
     if spot_status == "OPEN":
@@ -126,10 +131,20 @@ def score_mexc_listing(
 
     if item.volume_acceleration >= 2.0:
         score += 15
-        reasons.append(f"tamamlanmış saat hacim ivmesi {item.volume_acceleration:.1f}x")
+        reasons.append(f"tamamlanmış 5dk hacim ivmesi {item.volume_acceleration:.1f}x")
     elif item.volume_acceleration >= 1.25:
         score += 9
-        reasons.append(f"hacim ivmesi {item.volume_acceleration:.1f}x")
+        reasons.append(f"5dk hacim ivmesi {item.volume_acceleration:.1f}x")
+
+    if 0 < item.spread_bps <= 35:
+        score += 6
+        reasons.append(f"alış-satış makası dar ({item.spread_bps:.0f} bps)")
+    elif item.spread_bps > 150:
+        score -= 12
+        risks.append(f"alış-satış makası çok geniş ({item.spread_bps:.0f} bps)")
+    elif item.spread_bps > 80:
+        score -= 6
+        risks.append(f"alış-satış makası geniş ({item.spread_bps:.0f} bps)")
 
     # Missing ticker data is represented by zeroes, so price behaviour may
     # contribute only after a real market price has been confirmed.
@@ -181,9 +196,58 @@ def score_mexc_listing(
             "change_pct": item.change_pct,
             "quote_volume": item.quote_volume,
             "volume_acceleration": item.volume_acceleration,
+            "spread_bps": item.spread_bps,
             "discovery_source": item.discovery_source,
+            "first_seen_at": item.first_seen_at,
+            "manually_watched": item.manually_watched,
         },
     )
+
+
+def partition_mexc_listings(
+    listings: Iterable[MexcListing],
+    *,
+    trade_universe: dict[str, str],
+    top_n: int = 5,
+    min_score: int = 52,
+) -> tuple[list[RadarCandidate], list[RadarCandidate]]:
+    """Return both threshold-pass and rejected candidates with explanations."""
+    passed: list[RadarCandidate] = []
+    filtered: list[RadarCandidate] = []
+    for raw_candidate in (
+        score_mexc_listing(item, trade_universe=trade_universe)
+        for item in listings
+    ):
+        filter_reasons: list[str] = []
+        if raw_candidate.stage == "CROWDED":
+            filter_reasons.append("ilk hareket aşırı uzamış")
+        if raw_candidate.score < min_score:
+            filter_reasons.append(
+                f"puan eşiğine {min_score - raw_candidate.score} puan eksik"
+            )
+        accepted = not filter_reasons
+        metadata = dict(raw_candidate.metadata)
+        metadata.update(
+            {
+                "filter_status": "PASSED" if accepted else "FILTERED",
+                "filter_reasons": filter_reasons,
+                "score_threshold": min_score,
+                "score_gap": max(0, min_score - raw_candidate.score),
+            }
+        )
+        candidate = replace(raw_candidate, metadata=metadata)
+        (passed if accepted else filtered).append(candidate)
+
+    def sort_key(item: RadarCandidate) -> tuple[float, float, int]:
+        return (
+            float(item.score),
+            float(item.metadata.get("quote_volume", 0.0)),
+            -int(item.metadata.get("announcement_rank", 0)),
+        )
+
+    passed.sort(key=sort_key, reverse=True)
+    filtered.sort(key=sort_key, reverse=True)
+    return passed[: max(1, top_n)], filtered
 
 
 def rank_mexc_listings(
@@ -193,20 +257,10 @@ def rank_mexc_listings(
     top_n: int = 5,
     min_score: int = 52,
 ) -> list[RadarCandidate]:
-    candidates = [
-        score_mexc_listing(item, trade_universe=trade_universe)
-        for item in listings
-    ]
-    eligible = [
-        item for item in candidates
-        if item.score >= min_score and item.stage != "CROWDED"
-    ]
-    eligible.sort(
-        key=lambda item: (
-            item.score,
-            float(item.metadata.get("quote_volume", 0.0)),
-            -int(item.metadata.get("announcement_rank", 0)),
-        ),
-        reverse=True,
+    passed, _ = partition_mexc_listings(
+        listings,
+        trade_universe=trade_universe,
+        top_n=top_n,
+        min_score=min_score,
     )
-    return eligible[: max(1, top_n)]
+    return passed

@@ -11,6 +11,7 @@ from .engine import (
     UnifiedRadarEngine,
     UnifiedRadarRuntime,
     attach_snapshot_to_results,
+    format_filtered_listing_report,
     format_listing_report,
     format_snapshot_brief,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "UnifiedRadarRuntime",
     "attach_snapshot_to_results",
     "build_trade_universe",
+    "format_filtered_listing_report",
     "format_listing_report",
     "format_snapshot_brief",
 ]

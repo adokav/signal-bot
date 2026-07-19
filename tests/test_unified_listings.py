@@ -4,6 +4,7 @@ from acce_unified.config import DEFAULT_TRADE_UNIVERSE
 from acce_unified.listings import (
     extract_listing_titles,
     extract_symbols_from_title,
+    partition_mexc_listings,
     rank_mexc_listings,
     score_mexc_listing,
 )
@@ -95,3 +96,38 @@ def test_official_announcement_remains_watch_when_spot_api_is_unreachable():
     assert candidate.stage == "WATCH"
     assert candidate.execution_eligible is False
     assert any("Spot API teyidi erişilemedi" in flag for flag in candidate.risk_flags)
+
+
+def test_filtered_candidates_are_retained_with_plain_language_reasons():
+    weak = _listing(
+        rank=20,
+        spot_status="NOT_OPEN",
+        last_price=0.0,
+        quote_volume=0.0,
+        volume_acceleration=0.0,
+    )
+    crowded = _listing(change_pct=120.0, quote_volume=80_000_000.0)
+
+    passed, filtered = partition_mexc_listings(
+        [weak, crowded],
+        trade_universe=DEFAULT_TRADE_UNIVERSE,
+        min_score=52,
+    )
+
+    assert passed == []
+    assert {item.stage for item in filtered} == {"WEAK", "CROWDED"}
+    assert all(item.metadata["filter_status"] == "FILTERED" for item in filtered)
+    assert any(
+        "puan eksik" in reason
+        for item in filtered
+        for reason in item.metadata["filter_reasons"]
+    )
+
+
+def test_tight_spread_adds_early_liquidity_evidence():
+    candidate = score_mexc_listing(
+        _listing(spread_bps=22.0),
+        trade_universe=DEFAULT_TRADE_UNIVERSE,
+    )
+
+    assert any("makası dar" in reason for reason in candidate.reasons)

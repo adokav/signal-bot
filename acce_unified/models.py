@@ -27,6 +27,9 @@ class MexcListing:
     quote_volume: float
     volume_acceleration: float
     discovery_source: str = "ANNOUNCEMENT"
+    first_seen_at: int = 0
+    spread_bps: float = 0.0
+    manually_watched: bool = False
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,7 @@ class RadarSnapshot:
     mode: str
     cex_candidates: tuple[RadarCandidate, ...] = ()
     listing_candidates: tuple[RadarCandidate, ...] = ()
+    listing_filtered_candidates: tuple[RadarCandidate, ...] = ()
     errors: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -60,6 +64,9 @@ class RadarSnapshot:
             "mode": self.mode,
             "cex_candidates": [item.to_dict() for item in self.cex_candidates],
             "listing_candidates": [item.to_dict() for item in self.listing_candidates],
+            "listing_filtered_candidates": [
+                item.to_dict() for item in self.listing_filtered_candidates
+            ],
             "errors": list(self.errors),
             "can_authorize_trade": False,
         }
