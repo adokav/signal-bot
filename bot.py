@@ -10945,7 +10945,8 @@ def _format_mexc_watchlist(state_mgr: StateManager) -> str:
     if not watchlist:
         return (
             "👀 MEXC TAKİP LİSTEM\n\nTakipte coin yok. "
-            "Filtredekiler ekranındaki 👀 butonuna dokunarak ekleyebilirsin."
+            "Eşiği Geçen veya Filtredekiler ekranındaki 👀 butonuna "
+            "dokunarak ekleyebilirsin."
         )
     lines = ["👀 MEXC TAKİP LİSTEM", "Filtre değişse de izleme sürer.", ""]
     ordered = sorted(
@@ -10973,22 +10974,78 @@ def _format_mexc_watchlist(state_mgr: StateManager) -> str:
     return "\n".join(lines)
 
 
-def _filtered_watch_keyboard(snapshot: Any, state_mgr: StateManager) -> Optional[dict]:
+def _mexc_watch_status(value: Any, state_mgr: StateManager) -> str:
+    pair = _normalize_mexc_watch_pair(value)
+    if not pair:
+        return "Geçersiz coin."
+    entry = _mexc_watchlist(state_mgr).get(pair)
+    if not entry:
+        return f"{pair} takip listende değil."
+    current = _mexc_candidate_by_pair(
+        state_mgr.get_meta("unified_radar_snapshot")
+    ).get(pair) or entry.get("last_candidate") or {}
+    if not current:
+        return f"✅ {pair} takipte. İlk MEXC teyidi bekleniyor."
+    metadata = current.get("metadata") or {}
+    filter_status = str(metadata.get("filter_status") or "").upper()
+    filter_text = "Eşiği geçti" if filter_status == "PASSED" else "Filtrede izleniyor"
+    try:
+        acceleration = float(metadata.get("volume_acceleration") or 0)
+        change = float(metadata.get("change_pct") or 0)
+    except (TypeError, ValueError):
+        acceleration, change = 0.0, 0.0
+    return (
+        f"✅ MEXC TAKİP DURUMU\n\n"
+        f"{pair} — {int(current.get('score') or 0)}/100 · "
+        f"{_friendly_listing_stage(current.get('stage'))}\n"
+        f"Durum: {filter_text}\n"
+        f"5dk hacim ivmesi: {acceleration:.1f}x\n"
+        f"24s değişim: %{change:+.1f}\n\n"
+        "Takip alarmı aktiftir; otomatik emir oluşturmaz."
+    )
+
+
+def _candidate_watch_keyboard(
+    snapshot: Any,
+    state_mgr: StateManager,
+    *,
+    bucket: str,
+) -> Optional[dict]:
     watched = set(_mexc_watchlist(state_mgr))
     data = snapshot if isinstance(snapshot, dict) else {}
     rows = [
-        row for row in (data.get("listing_filtered_candidates") or [])
-        if isinstance(row, dict) and str(row.get("symbol") or "").upper() not in watched
+        row for row in (data.get(bucket) or [])
+        if isinstance(row, dict)
     ]
-    buttons = [
-        [{
-            "text": f"👀 {str(row.get('symbol') or '?').removesuffix('USDT')} takibe al",
-            "callback_data": f"WATCH_ADD {str(row.get('symbol') or '').upper()}",
-        }]
-        for row in rows[:5]
-        if _normalize_mexc_watch_pair(row.get("symbol"))
-    ]
+    buttons = []
+    for row in rows[:5]:
+        pair = _normalize_mexc_watch_pair(row.get("symbol"))
+        if not pair:
+            continue
+        if pair in watched:
+            text = f"✅ {pair.removesuffix('USDT')} takipte"
+            callback_data = f"WATCH_STATUS {pair}"
+        else:
+            text = f"👀 {pair.removesuffix('USDT')} takibe al"
+            callback_data = f"WATCH_ADD {pair}"
+        buttons.append([{"text": text, "callback_data": callback_data}])
     return {"inline_keyboard": buttons} if buttons else None
+
+
+def _passed_watch_keyboard(snapshot: Any, state_mgr: StateManager) -> Optional[dict]:
+    return _candidate_watch_keyboard(
+        snapshot,
+        state_mgr,
+        bucket="listing_candidates",
+    )
+
+
+def _filtered_watch_keyboard(snapshot: Any, state_mgr: StateManager) -> Optional[dict]:
+    return _candidate_watch_keyboard(
+        snapshot,
+        state_mgr,
+        bucket="listing_filtered_candidates",
+    )
 
 
 def _watch_remove_keyboard(state_mgr: StateManager) -> Optional[dict]:
@@ -11335,11 +11392,18 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 "MEXC yeni listelemelerini izler. İkisi de tek başına emir veremez."
             )
         elif cmd in {"LISTINGS", "MEXC", "NEW_LISTINGS"}:
-            snapshot = state_mgr.get_meta("unified_radar_snapshot")
+            snapshot = state_mgr.get_meta("unified_radar_snapshot") or {}
             send_message(
                 format_listing_report(snapshot, limit=5),
                 reply_markup=MEXC_KEYBOARD,
             )
+            inline_keyboard = _passed_watch_keyboard(snapshot, state_mgr)
+            if inline_keyboard:
+                send_message(
+                    "Eşiği geçenlerden takip etmek istediğin coini seç:",
+                    reply_markup=inline_keyboard,
+                    keyboard=False,
+                )
         elif cmd in {"FILTERED", "FILTERED_LISTINGS"}:
             snapshot = state_mgr.get_meta("unified_radar_snapshot") or {}
             send_message(
@@ -11377,6 +11441,14 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
             else:
                 _, message = remove_mexc_watch(parts[1], state_mgr)
                 send_message(message, reply_markup=MEXC_KEYBOARD)
+        elif cmd == "WATCH_STATUS":
+            if len(parts) < 2:
+                send_message("Takip durumu için coin seç.", reply_markup=MEXC_KEYBOARD)
+            else:
+                send_message(
+                    _mexc_watch_status(parts[1], state_mgr),
+                    reply_markup=MEXC_KEYBOARD,
+                )
         elif cmd == "MEXC_REFRESH":
             _tick_unified_radar([], state_mgr, force=True)
             send_message(
