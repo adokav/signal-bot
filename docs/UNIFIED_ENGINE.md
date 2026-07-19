@@ -86,15 +86,23 @@ Geçersiz veya boş override, incelenmiş dokuz varlıklı varsayılana geri dö
 
 PhenomenonX her gözlemi önce puanlar, sonra iki görünüm üretir:
 
-- `listing_candidates`: kalite eşiğini geçen ve ilk pump'ı aşırı uzamamış adaylar;
-- `listing_filtered_candidates`: eşik altında veya `CROWDED` olan adaylar ve
-  bunların açık filtre gerekçeleri.
+- `listing_candidates` / **Güçlü Adaylar**: kalite eşiğini geçen ve ilk pump'ı
+  aşırı uzamamış adaylar;
+- `listing_filtered_candidates` / **İzleme Havuzu**: eşik altında veya
+  `CROWDED` olan adaylar ve bunların açık filtre gerekçeleri.
 
-Yeni adaylar 72 saatlik katalogda yeniden puanlanır. Telegram'daki `👀` eylemi
-adayı manuel takip listesine alır ve süre sınırını kaldırır. Aday filtreden
-geçtiğinde veya `BUILDING/HOT` aşamasına yükseldiğinde yalnızca takip alarmı
-üretilir. Bu üç durumun hiçbiri `TRADE_UNIVERSE` değerini veya emir yetkisini
-değiştirmez.
+Yeni adaylar 72 saatlik katalogda yeniden puanlanır. Telegram listesi yalnız
+aday seçtirir; kalıcı takip eylemi aday detayında açılır ve süre sınırını
+kaldırır. Aday filtreden geçtiğinde veya `BUILDING/HOT` aşamasına yükseldiğinde
+yalnızca takip alarmı üretilir. Bu üç durumun hiçbiri `TRADE_UNIVERSE` değerini
+veya emir yetkisini değiştirmez.
+
+Telegram reply keyboard yalnız Panel, Fırsatlar, Pozisyonlar ve Güvenlik
+bölümlerini taşır. Adaylar, raporlar ve onaylar inline ekranlardır; callback
+geçişleri aynı mesajı düzenler ve aday listeleri beşli sayfalanır. Güvenlik
+ekranı mevcut modu gösterir fakat
+LIVE/otomasyon açan bir callback sunmaz. Gelecekteki otomatik icra; risk bütçesi,
+kill-switch ve çift onay tamamlanmadan bu yüzeye bağlanmamalıdır.
 
 ## Doğrulama ve terfi
 

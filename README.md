@@ -22,8 +22,8 @@ RENDERUSDT, PYTHUSDT, BONKUSDT, POPCATUSDT
 Geniş radar adayları bu listeyi kendiliğinden büyütemez. Unified Engine
 varsayılan olarak `SHADOW` çalışır ve hiçbir radar adayı emir yetkisi taşımaz.
 Telegram'da `/radar` komutu PriceMonitorX piyasa radarı ile PhenomenonX MEXC
-yeni listeleme radarını birlikte; `/listings` puan eşiğini geçenleri,
-`/filtered` filtrede kalanları ve `/watch` süresiz takip listesini gösterir.
+yeni listeleme radarını birlikte; `/listings` Güçlü Adayları, `/filtered`
+İzleme Havuzunu ve `/watch` süresiz takip listesini gösterir.
 
 ```text
 UNIFIED_ENGINE_ENABLED=1
@@ -39,36 +39,39 @@ UNIFIED_LISTING_CANDIDATE_FILE=mexc_listing_candidates.json
 UNIFIED_LISTING_CANDIDATE_TTL_HOURS=72
 ```
 
-## Telegram komuta merkezi
+## Telegram kontrol yüzeyi
 
-Ana klavye telefonda taşmayan, görev isimleri kısa bir komuta merkezidir:
-
-```text
-📊 Durum      | 📂 Pozisyon
-🚀 MEXC Fırsat | 👀 Takip
-🧭 Radar       | ✅ Onaylar
-☰ Diğer
-```
-
-`MEXC Fırsat` alt menüsü:
+Reply keyboard değişmeyen dört ana bölüme ayrılır:
 
 ```text
-🎯 Eşiği Geçen | 🟡 Filtredekiler
-👀 Takip Listem | 🔄 Şimdi Tara
-⬅️ Ana Menü
+🏠 Panel        | 🔎 Fırsatlar
+📂 Pozisyonlar  | 🛡️ Güvenlik
 ```
 
-Yeni adaylar 72 saat boyunca yeniden puanlanır. Filtredekiler ekranında bir
-coine ait `👀` inline butonuna dokunmak onu süresiz takip listesine alır;
-`/watch_add NOVA` ve `/watch_remove NOVA` aynı işlemin komut karşılıklarıdır.
+Değişken eylemler mesaj altındaki inline kontrol yüzeyinde açılır:
+
+```text
+🔥 Güçlü N | 🟡 İzleme N
+⭐ Takibim N | 🧭 Piyasa
+🔄 Şimdi tara
+⬅️ Kontrol paneli
+```
+
+Liste düğmeleri coin, puan ve aşamayı gösterir; beşli sayfalama daha düşük
+sıralı adayları da erişilebilir tutar. Coin seçilince tek bir detay ekranı
+açılır; kalıcı takibe alma/çıkarma yalnız bu ekranda yapılır. Callback
+navigasyonu yeni mesaj göndermek yerine mevcut kontrol mesajını düzenler.
+Yeni adaylar 72 saat boyunca yeniden puanlanır; `/watch_add NOVA` ve
+`/watch_remove NOVA` butonların komut karşılıklarıdır.
 Takipteki aday filtreyi geçtiğinde veya `BUILDING/HOT` aşamasına yükseldiğinde
 bildirim üretilir. Bu akış işlem evrenini değiştirmez ve emir yetkisi vermez.
 
-`Diğer` menüsü Rejim, Portföy, 7 Gün ve Yardım araçlarını açar; seçimden sonra
-ana menü geri gelir. Butonlar okunabilir etiket gönderir; eski klavye etiketleri
-ve slash komutları (`/status`, `/listings`, `/approvals`, `/menu` vb.) aynı
-şekilde çalışmaya devam eder. Komut dinleyicisi varsayılan olarak beş saniyede
-bir kontrol edilir (`TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS=5`).
+`Güvenlik` merkezi çalışma modunu, gerçek emir kapısını, API hata sayısını ve
+bekleyen onayları görünür tutar. Telegram üzerinden tek dokunuşla LIVE veya
+otomasyon açan bir eylem yoktur. Eski klavye etiketleri ve slash komutları
+geriye dönük çalışır; yeni `/panel`, `/opportunities` ve `/safety` komutları da
+aynı merkezleri açar. Komut dinleyicisi varsayılan olarak beş saniyede bir
+kontrol edilir (`TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS=5`).
 
 Ayrıntılı tasarım, geçiş ve geri alma kuralları:
 [`docs/UNIFIED_ENGINE.md`](docs/UNIFIED_ENGINE.md).
