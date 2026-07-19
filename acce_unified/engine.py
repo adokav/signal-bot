@@ -220,20 +220,20 @@ def format_listing_report(
 ) -> str:
     """Human-readable Telegram report for PhenomenonX MEXC candidates."""
     if snapshot is None:
-        return "🆕 PHENOMENONX — MEXC NEW LISTING\n\nİlk tarama henüz tamamlanmadı."
+        return "🔥 MEXC — GÜÇLÜ ADAYLAR\n\nİlk tarama henüz tamamlanmadı."
     data = snapshot.to_dict() if isinstance(snapshot, RadarSnapshot) else snapshot
     rows = data.get("listing_candidates") or []
     if not rows:
         errors = [str(item) for item in (data.get("errors") or []) if str(item).startswith("LISTING:")]
         suffix = f"\nKaynak durumu: {', '.join(errors)}" if errors else ""
         return (
-            "🆕 PHENOMENONX — MEXC NEW LISTING\n\n"
-            "Şu an eşiği geçen yeni listeleme adayı yok."
+            "🔥 MEXC — GÜÇLÜ ADAYLAR\n\n"
+            "Şu an güçlü aday seviyesine ulaşan yeni listeleme yok."
             f"{suffix}"
         )
 
     lines = [
-        "🆕 PHENOMENONX — MEXC NEW LISTING",
+        "🔥 MEXC — GÜÇLÜ ADAYLAR",
         "Resmî duyuru + MEXC Spot teyidi | emir yetkisi yok",
         "",
     ]
@@ -268,7 +268,7 @@ def format_listing_report(
         if title:
             lines.append(f"   Duyuru: {title[:160]}")
         lines.append("")
-    lines.append("Erken keşif radarıdır; yeni coin otomatik olarak işlem evrenine alınmaz.")
+    lines.append("Bir aday düğmesine dokunarak detay ve takip işlemlerini açabilirsin.")
     return "\n".join(lines)
 
 
@@ -279,15 +279,15 @@ def format_filtered_listing_report(
 ) -> str:
     """Explain candidates hidden by the quality/chase filter."""
     if snapshot is None:
-        return "🟡 MEXC — FİLTREDEKİLER\n\nİlk tarama henüz tamamlanmadı."
+        return "🟡 MEXC — İZLEME HAVUZU\n\nİlk tarama henüz tamamlanmadı."
     data = snapshot.to_dict() if isinstance(snapshot, RadarSnapshot) else snapshot
     rows = data.get("listing_filtered_candidates") or []
     if not rows:
-        return "🟡 MEXC — FİLTREDEKİLER\n\nŞu an filtrede bekleyen aday yok."
+        return "🟡 MEXC — İZLEME HAVUZU\n\nŞu an izleme havuzunda aday yok."
 
     lines = [
-        "🟡 MEXC — FİLTREDEKİLER",
-        "Elendi diye kaybolmaz; istersen tek dokunuşla sürekli takibe alınır.",
+        "🟡 MEXC — İZLEME HAVUZU",
+        "Henüz güçlü değil; gerekçesiyle izlenir ve yeniden puanlanır.",
         "",
     ]
     for index, item in enumerate(rows[: max(1, limit)], 1):
@@ -304,5 +304,5 @@ def format_filtered_listing_report(
         if risks:
             lines.append("   ⚠️ " + " · ".join(str(value) for value in risks[:2]))
         lines.append("")
-    lines.append("Aşağıdaki 👀 butonları yalnız izleme başlatır; emir vermez.")
+    lines.append("Bir aday düğmesine dokunarak detay ve kalıcı takip işlemlerini açabilirsin.")
     return "\n".join(lines)

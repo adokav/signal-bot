@@ -54,7 +54,7 @@ from acce_unified import (
 )
 from acce_unified.validation import ValidationPolicy, evaluate_promotion
 
-__version__ = "4.3.0-mexc-opportunity-center"
+__version__ = "4.4.0-telegram-control-surface"
 
 # ============================================================
 # LOGGING
@@ -1679,16 +1679,26 @@ def get_session_context() -> SessionContext:
 # Telegram mesaj boyut limiti: 4096 karakter
 TELEGRAM_MAX_LEN = 4000  # Güvenli pay
 
-# Telefonda taşmayan kısa ana menü; daha seyrek kullanılan raporlar
-# ikinci ekrana alınır. Reply keyboard etiketleri mesaj olarak gittiği için
-# kısa ve insanca okunur tutulur. Eski etiketler ile slash komutları geriye
-# dönük desteklenir.
+# Reply keyboard yalnız dört sabit bölümü gösterir. Değişken/duruma bağlı
+# eylemler mesaj altındaki inline keyboard'larda kalır; böylece bildirimler
+# alt menüyü değiştirmez ve gelecekteki icra kontrolleri keşif kontrollerine
+# karışmaz. Eski etiketler ile slash komutları geriye dönük desteklenir.
 def _keyboard_alias_key(text: str) -> str:
     return " ".join(str(text or "").replace("\ufe0f", "").strip().split()).casefold()
 
 
 _KEYBOARD_COMMAND_LABELS: dict[str, str] = {
-    # Command Center v3 — erken fırsat hunisi
+    # Command Center v4 — sabit bölümler
+    "🏠 Panel": "DASHBOARD",
+    "🔎 Fırsatlar": "MEXC_MENU",
+    "📂 Pozisyonlar": "POSITIONS",
+    "🛡️ Güvenlik": "SAFETY",
+    # Inline merkez etiketleri düz mesaj olarak gelirse de çalışsın.
+    "🔥 Güçlü Adaylar": "LISTINGS",
+    "🟡 İzleme Havuzu": "FILTERED_LISTINGS",
+    "⭐ Takip Listem": "WATCHLIST",
+    "🔄 Şimdi Tara": "MEXC_REFRESH",
+    # Command Center v3
     "📊 Durum": "STATUS",
     "📂 Pozisyon": "POSITIONS",
     "🚀 MEXC Fırsat": "MEXC_MENU",
@@ -1721,20 +1731,8 @@ KEYBOARD_COMMAND_ALIASES: dict[str, str] = {
 }
 
 KEYBOARD_ROWS: tuple[tuple[str, ...], ...] = (
-    ("📊 Durum", "📂 Pozisyon"),
-    ("🚀 MEXC Fırsat", "👀 Takip"),
-    ("🧭 Radar", "✅ Onaylar"),
-    ("☰ Diğer",),
-)
-MEXC_KEYBOARD_ROWS: tuple[tuple[str, ...], ...] = (
-    ("🎯 Eşiği Geçen", "🟡 Filtredekiler"),
-    ("👀 Takip Listem", "🔄 Şimdi Tara"),
-    ("⬅️ Ana Menü",),
-)
-MORE_KEYBOARD_ROWS: tuple[tuple[str, ...], ...] = (
-    ("🌍 Rejim", "💰 Portföy"),
-    ("📈 7 Gün", "ℹ️ Yardım"),
-    ("⬅️ Ana Menü",),
+    ("🏠 Panel", "🔎 Fırsatlar"),
+    ("📂 Pozisyonlar", "🛡️ Güvenlik"),
 )
 
 
@@ -1754,21 +1752,16 @@ def _reply_keyboard(
 
 MAIN_KEYBOARD = _reply_keyboard(
     KEYBOARD_ROWS,
-    placeholder="Komut seç…",
-)
-MORE_KEYBOARD = _reply_keyboard(
-    MORE_KEYBOARD_ROWS,
-    placeholder="Ek araç seç…",
-)
-MEXC_KEYBOARD = _reply_keyboard(
-    MEXC_KEYBOARD_ROWS,
-    placeholder="MEXC fırsat görünümü seç…",
+    placeholder="Bölüm seç…",
 )
 
 
 # Telegram '/' menusunde gozukecek komut listesi. _register_bot_commands ile
 # bot baslangicinda bir kez kaydedilir.
 BOT_COMMANDS: list[dict[str, str]] = [
+    {"command": "panel", "description": "Dört bölümlü kontrol paneli"},
+    {"command": "opportunities", "description": "MEXC fırsat merkezi"},
+    {"command": "safety", "description": "Güvenlik ve icra merkezi"},
     {"command": "status", "description": "Anlık sağlık ve 24 saatlik durum"},
     {"command": "positions", "description": "Açık pozisyonlar, stop, TP ve PnL"},
     {"command": "listings", "description": "PhenomenonX MEXC yeni listelemeleri"},
@@ -10758,6 +10751,64 @@ def _answer_telegram_callback(update: dict) -> None:
         log.debug("Telegram callback yanıtlanamadı", exc_info=True)
 
 
+def _edit_callback_message(
+    update: dict,
+    text: str,
+    *,
+    reply_markup: Optional[dict] = None,
+) -> bool:
+    """Edit an inline control surface in place instead of filling the chat."""
+    callback = update.get("callback_query") or {}
+    message = callback.get("message") if isinstance(callback, dict) else None
+    if not isinstance(message, dict) or not TOKEN:
+        return False
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    if chat_id is None or message_id is None:
+        return False
+    if len(text) > TELEGRAM_MAX_LEN:
+        text = text[:TELEGRAM_MAX_LEN - 20] + "\n\n[...mesaj kısaltıldı]"
+    data: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+    }
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup)
+    try:
+        with _HTTP_SEMAPHORE:
+            response = _http_session().post(
+                f"{TELEGRAM_BASE}/bot{TOKEN}/editMessageText",
+                data=data,
+                timeout=15,
+            )
+        if response.status_code == 200:
+            return True
+        # Aynı ekranın iki kez seçilmesi Telegram'da hata değil, no-op'tur.
+        if response.status_code == 400 and "message is not modified" in response.text.lower():
+            return True
+        log.debug("Telegram editMessageText %s: %s", response.status_code, response.text[:200])
+    except requests.RequestException:
+        log.debug("Telegram kontrol yüzeyi düzenlenemedi", exc_info=True)
+    return False
+
+
+def _respond_telegram(
+    update: dict,
+    text: str,
+    *,
+    reply_markup: Optional[dict] = None,
+) -> bool:
+    """Edit callback screens in place; send one new screen for reply-key taps."""
+    if _edit_callback_message(update, text, reply_markup=reply_markup):
+        return True
+    return send_message(
+        text,
+        reply_markup=reply_markup,
+        keyboard=reply_markup is None,
+    )
+
+
 def _resolve_telegram_command(text: str) -> str:
     """Map a persistent keyboard label or slash command to one command name."""
     normalized = " ".join(str(text or "").strip().split())
@@ -10930,13 +10981,179 @@ def _mexc_center_text(snapshot: Any, state_mgr: StateManager) -> str:
     freshness = f"{age} sn önce" if age is not None else "ilk tarama bekleniyor"
     return (
         "🚀 MEXC ERKEN FIRSAT MERKEZİ\n\n"
-        f"🎯 Eşiği geçen: {passed}\n"
-        f"🟡 Filtrede: {filtered}\n"
-        f"👀 Manuel takip: {watched}\n"
+        f"🔥 Güçlü aday: {passed}\n"
+        f"🟡 İzleme havuzu: {filtered}\n"
+        f"⭐ Takip listem: {watched}\n"
         f"🕒 Son veri: {freshness}\n\n"
-        f"Filtredekiler kaybolmaz; {UNIFIED_CONFIG.listing_candidate_ttl_hours} "
-        "saat yeniden puanlanır. "
-        "İstediklerini 👀 ile süresiz takibe alabilirsin."
+        f"İzleme havuzundaki adaylar {UNIFIED_CONFIG.listing_candidate_ttl_hours} "
+        "saat yeniden puanlanır. Bir coine dokunarak detayını açabilir, "
+        "oradan kalıcı takibe alabilirsin."
+    )
+
+
+def _state_snapshot_safe(state_mgr: StateManager) -> dict:
+    snapshot = getattr(state_mgr, "snapshot", None)
+    if callable(snapshot):
+        try:
+            value = snapshot()
+            if isinstance(value, dict):
+                return value
+        except Exception:
+            log.debug("Telegram panel snapshot alınamadı", exc_info=True)
+    meta = getattr(state_mgr, "meta", {})
+    return {"meta": meta if isinstance(meta, dict) else {}, "trades": {}}
+
+
+def _dashboard_text(state_mgr: StateManager) -> str:
+    state = _state_snapshot_safe(state_mgr)
+    meta = state.get("meta") or {}
+    trades = state.get("trades") or {}
+    open_trades = sum(
+        1 for trade in trades.values()
+        if isinstance(trade, dict) and trade.get("result") is None
+    )
+    radar = state_mgr.get_meta("unified_radar_snapshot", {}) or {}
+    strong = len(radar.get("listing_candidates") or [])
+    pool = len(radar.get("listing_filtered_candidates") or [])
+    watched = len(_mexc_watchlist(state_mgr))
+    pending = sum(
+        1 for row in _pending_trade_approvals(state_mgr).values()
+        if isinstance(row, dict) and row.get("status") == "PENDING"
+    )
+    failures = int(meta.get("consecutive_failures") or 0)
+    health = "🟢 Normal" if failures == 0 else f"🟠 {failures} API hatası"
+    live_gate = EXECUTION_MODE == "LIVE" and ENABLE_LIVE_TRADING
+    execution = "🔴 CANLI" if live_gate else ("🟡 PAPER" if EXECUTION_MODE == "PAPER" else "⚪ TAKİP")
+    return (
+        "🏠 SIGNAL BOT KONTROL PANELİ\n\n"
+        f"Sistem: {health}\n"
+        f"Emir modu: {execution}\n"
+        f"Açık pozisyon: {open_trades} · Onay bekleyen: {pending}\n"
+        f"MEXC: {strong} güçlü · {pool} izleme · {watched} takip\n\n"
+        "Sabit menü yalnız ana bölümleri açar. Ayrıntılı işlemler bu mesajın "
+        "altındaki bağlamsal butonlarda görünür."
+    )
+
+
+def _dashboard_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🔎 Fırsatlar", "callback_data": "MEXC_MENU"},
+                {"text": "📂 Pozisyonlar", "callback_data": "POSITIONS"},
+            ],
+            [
+                {"text": "🛡️ Güvenlik", "callback_data": "SAFETY"},
+                {"text": "☰ Araçlar", "callback_data": "MORE"},
+            ],
+            [{"text": "🔄 Paneli yenile", "callback_data": "DASHBOARD"}],
+        ]
+    }
+
+
+def _mexc_center_keyboard(snapshot: Any, state_mgr: StateManager) -> dict:
+    data = snapshot if isinstance(snapshot, dict) else {}
+    strong = len(data.get("listing_candidates") or [])
+    pool = len(data.get("listing_filtered_candidates") or [])
+    watched = len(_mexc_watchlist(state_mgr))
+    return {
+        "inline_keyboard": [
+            [
+                {"text": f"🔥 Güçlü {strong}", "callback_data": "LISTINGS"},
+                {"text": f"🟡 İzleme {pool}", "callback_data": "FILTERED_LISTINGS"},
+            ],
+            [
+                {"text": f"⭐ Takibim {watched}", "callback_data": "WATCHLIST"},
+                {"text": "🧭 Piyasa", "callback_data": "RADAR"},
+            ],
+            [{"text": "🔄 Şimdi tara", "callback_data": "MEXC_REFRESH"}],
+            [{"text": "⬅️ Kontrol paneli", "callback_data": "DASHBOARD"}],
+        ]
+    }
+
+
+def _more_tools_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🌍 Rejim", "callback_data": "REGIME"},
+                {"text": "💰 Portföy", "callback_data": "EQUITY"},
+            ],
+            [
+                {"text": "📈 7 Gün", "callback_data": "REPORT"},
+                {"text": "ℹ️ Yardım", "callback_data": "HELP"},
+            ],
+            [{"text": "⬅️ Kontrol paneli", "callback_data": "DASHBOARD"}],
+        ]
+    }
+
+
+def _safety_center_text(state_mgr: StateManager) -> str:
+    state = _state_snapshot_safe(state_mgr)
+    meta = state.get("meta") or {}
+    pending = sum(
+        1 for row in _pending_trade_approvals(state_mgr).values()
+        if isinstance(row, dict) and row.get("status") == "PENDING"
+    )
+    live_gate = EXECUTION_MODE == "LIVE" and ENABLE_LIVE_TRADING
+    live_text = "🔴 AÇIK" if live_gate else "🟢 KAPALI"
+    paper_text = "AÇIK" if PAPER_EXECUTION_ENABLED else "KAPALI"
+    return (
+        "🛡️ GÜVENLİK VE İCRA MERKEZİ\n\n"
+        f"Çalışma modu: {EXECUTION_MODE}\n"
+        f"Paper execution: {paper_text}\n"
+        f"Gerçek emir kapısı: {live_text}\n"
+        f"Onay bekleyen işlem: {pending}\n"
+        f"Ardışık API hatası: {int(meta.get('consecutive_failures') or 0)}\n\n"
+        "Gerçek emir açma düğmesi bu ekranda bilerek bulunmaz. Otomasyon daha "
+        "sonra risk bütçesi, kill-switch ve çift onay kapıları tamamlandığında "
+        "buradan yönetilecek."
+    )
+
+
+def _safety_center_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "🤖 Otomasyon hazırlığı", "callback_data": "AUTOMATION_INFO"}],
+            [
+                {"text": "✅ Onay merkezi", "callback_data": "APPROVALS"},
+                {"text": "📊 Sistem durumu", "callback_data": "STATUS"},
+            ],
+            [{"text": "⬅️ Kontrol paneli", "callback_data": "DASHBOARD"}],
+        ]
+    }
+
+
+def _positions_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🔄 Pozisyonları yenile", "callback_data": "POSITIONS"},
+                {"text": "✅ Onaylar", "callback_data": "APPROVALS"},
+            ],
+            [{"text": "⬅️ Kontrol paneli", "callback_data": "DASHBOARD"}],
+        ]
+    }
+
+
+def _opportunity_back_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "⬅️ Fırsat merkezi", "callback_data": "MEXC_MENU"}],
+            [{"text": "🏠 Kontrol paneli", "callback_data": "DASHBOARD"}],
+        ]
+    }
+
+
+def _automation_info_text() -> str:
+    return (
+        "🤖 OTOMASYON HAZIRLIK PLANI\n\n"
+        "1. PAPER sonuçları ve maliyetler doğrulanır.\n"
+        "2. İşlem başına/günlük risk limitleri kilitlenir.\n"
+        "3. Yeni emirleri anında durduran kill-switch eklenir.\n"
+        "4. PAPER → LIVE geçişi çift onay ve süreli kilit ile yapılır.\n"
+        "5. Canlı modda dahi pozisyon büyütme ve zarar limiti aşılamaz.\n\n"
+        "Mevcut Telegram arayüzü otomatik veya gerçek emir modunu açamaz."
     )
 
 
@@ -10945,8 +11162,8 @@ def _format_mexc_watchlist(state_mgr: StateManager) -> str:
     if not watchlist:
         return (
             "👀 MEXC TAKİP LİSTEM\n\nTakipte coin yok. "
-            "Eşiği Geçen veya Filtredekiler ekranındaki 👀 butonuna "
-            "dokunarak ekleyebilirsin."
+            "Güçlü Adaylar veya İzleme Havuzu ekranında bir coine dokunup "
+            "detayından kalıcı takibe alabilirsin."
         )
     lines = ["👀 MEXC TAKİP LİSTEM", "Filtre değişse de izleme sürer.", ""]
     ordered = sorted(
@@ -11005,59 +11222,262 @@ def _mexc_watch_status(value: Any, state_mgr: StateManager) -> str:
     )
 
 
-def _candidate_watch_keyboard(
+def _candidate_stage_icon(value: Any) -> str:
+    return {
+        "HOT": "🔥",
+        "BUILDING": "📈",
+        "WATCH": "👀",
+        "WEAK": "⚪",
+        "CROWDED": "⛔",
+    }.get(str(value or "").upper(), "•")
+
+
+_CANDIDATE_ORIGIN_CODES = {
+    "L": "LISTINGS",
+    "F": "FILTERED_LISTINGS",
+    "W": "WATCHLIST",
+    "M": "MEXC_MENU",
+}
+
+
+def _candidate_origin_command(value: Any) -> str:
+    raw = str(value or "").upper()
+    if raw and raw[0] in _CANDIDATE_ORIGIN_CODES and raw[1:].isdigit():
+        return _CANDIDATE_ORIGIN_CODES[raw[0]]
+    if raw in _CANDIDATE_ORIGIN_CODES:
+        return _CANDIDATE_ORIGIN_CODES[raw]
+    if raw in _CANDIDATE_ORIGIN_CODES.values():
+        return raw
+    return "MEXC_MENU"
+
+
+def _candidate_origin_page(value: Any) -> int:
+    raw = str(value or "").upper()
+    if raw and raw[0] in _CANDIDATE_ORIGIN_CODES and raw[1:].isdigit():
+        return max(0, min(99, int(raw[1:])))
+    return 0
+
+
+def _candidate_origin_code(value: Any, page: int = 0) -> str:
+    command = _candidate_origin_command(value)
+    code = next(
+        (code for code, target in _CANDIDATE_ORIGIN_CODES.items() if target == command),
+        "M",
+    )
+    safe_page = max(0, min(99, int(page)))
+    return f"{code}{safe_page}" if safe_page else code
+
+
+def _candidate_page(
+    snapshot: Any,
+    *,
+    bucket: str,
+    page: int,
+    page_size: int = 5,
+) -> tuple[dict, int, int]:
+    data = snapshot if isinstance(snapshot, dict) else {}
+    rows = [row for row in (data.get(bucket) or []) if isinstance(row, dict)]
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    safe_page = max(0, min(int(page), total_pages - 1))
+    start = safe_page * page_size
+    paged = dict(data)
+    paged[bucket] = rows[start:start + page_size]
+    return paged, safe_page, total_pages
+
+
+def _telegram_page_arg(parts: list[str], index: int = 1) -> int:
+    try:
+        return max(0, min(99, int(parts[index])))
+    except (IndexError, TypeError, ValueError):
+        return 0
+
+
+def _candidate_list_keyboard(
     snapshot: Any,
     state_mgr: StateManager,
     *,
     bucket: str,
-) -> Optional[dict]:
+    origin: str,
+    page: int = 0,
+) -> dict:
     watched = set(_mexc_watchlist(state_mgr))
-    data = snapshot if isinstance(snapshot, dict) else {}
-    rows = [
-        row for row in (data.get(bucket) or [])
-        if isinstance(row, dict)
-    ]
+    data, safe_page, total_pages = _candidate_page(
+        snapshot,
+        bucket=bucket,
+        page=page,
+    )
+    rows = data.get(bucket) or []
     buttons = []
     for row in rows[:5]:
         pair = _normalize_mexc_watch_pair(row.get("symbol"))
         if not pair:
             continue
-        if pair in watched:
-            text = f"✅ {pair.removesuffix('USDT')} takipte"
-            callback_data = f"WATCH_STATUS {pair}"
-        else:
-            text = f"👀 {pair.removesuffix('USDT')} takibe al"
-            callback_data = f"WATCH_ADD {pair}"
-        buttons.append([{"text": text, "callback_data": callback_data}])
-    return {"inline_keyboard": buttons} if buttons else None
+        watch_mark = "⭐" if pair in watched else _candidate_stage_icon(row.get("stage"))
+        score = int(row.get("score") or 0)
+        buttons.append([{
+            "text": f"{watch_mark} {pair.removesuffix('USDT')} · {score}/100",
+            "callback_data": f"CANDIDATE {pair} {_candidate_origin_code(origin, safe_page)}",
+        }])
+    if total_pages > 1:
+        nav: list[dict[str, str]] = []
+        if safe_page > 0:
+            nav.append({
+                "text": "◀️",
+                "callback_data": f"{origin} {safe_page - 1}",
+            })
+        nav.append({
+            "text": f"{safe_page + 1}/{total_pages}",
+            "callback_data": f"{origin} {safe_page}",
+        })
+        if safe_page + 1 < total_pages:
+            nav.append({
+                "text": "▶️",
+                "callback_data": f"{origin} {safe_page + 1}",
+            })
+        buttons.append(nav)
+    buttons.extend(
+        [
+            [{"text": "⬅️ Fırsat merkezi", "callback_data": "MEXC_MENU"}],
+            [{"text": "🏠 Kontrol paneli", "callback_data": "DASHBOARD"}],
+        ]
+    )
+    return {"inline_keyboard": buttons}
 
 
-def _passed_watch_keyboard(snapshot: Any, state_mgr: StateManager) -> Optional[dict]:
-    return _candidate_watch_keyboard(
+def _passed_watch_keyboard(
+    snapshot: Any,
+    state_mgr: StateManager,
+    *,
+    page: int = 0,
+) -> dict:
+    return _candidate_list_keyboard(
         snapshot,
         state_mgr,
         bucket="listing_candidates",
+        origin="LISTINGS",
+        page=page,
     )
 
 
-def _filtered_watch_keyboard(snapshot: Any, state_mgr: StateManager) -> Optional[dict]:
-    return _candidate_watch_keyboard(
+def _filtered_watch_keyboard(
+    snapshot: Any,
+    state_mgr: StateManager,
+    *,
+    page: int = 0,
+) -> dict:
+    return _candidate_list_keyboard(
         snapshot,
         state_mgr,
         bucket="listing_filtered_candidates",
+        origin="FILTERED_LISTINGS",
+        page=page,
     )
 
 
-def _watch_remove_keyboard(state_mgr: StateManager) -> Optional[dict]:
-    pairs = list(_mexc_watchlist(state_mgr))[:8]
-    if not pairs:
-        return None
-    return {
-        "inline_keyboard": [
-            [{"text": f"🗑 {pair.removesuffix('USDT')}", "callback_data": f"WATCH_REMOVE {pair}"}]
-            for pair in pairs
+def _mexc_candidate_detail_text(value: Any, state_mgr: StateManager) -> str:
+    pair = _normalize_mexc_watch_pair(value)
+    if not pair:
+        return "⚠️ Geçersiz MEXC adayı."
+    watch_entry = _mexc_watchlist(state_mgr).get(pair) or {}
+    current = _mexc_candidate_by_pair(
+        state_mgr.get_meta("unified_radar_snapshot")
+    ).get(pair) or watch_entry.get("last_candidate") or {}
+    if not current:
+        return (
+            f"🔎 {pair}\n\nGüncel aday verisi henüz yok. "
+            "Takibe alırsan MEXC teyidi geldiğinde yeniden puanlanır."
+        )
+    metadata = current.get("metadata") or {}
+    try:
+        acceleration = float(metadata.get("volume_acceleration") or 0)
+        change = float(metadata.get("change_pct") or 0)
+        spread = float(metadata.get("spread_bps") or 0)
+        quote_volume = float(metadata.get("quote_volume") or 0)
+        price = float(metadata.get("last_price") or 0)
+    except (TypeError, ValueError):
+        acceleration = change = spread = quote_volume = price = 0.0
+    filter_status = str(metadata.get("filter_status") or "UNKNOWN").upper()
+    status_text = "🔥 Güçlü aday" if filter_status == "PASSED" else "🟡 İzleme havuzunda"
+    watched_text = "⭐ Kalıcı takip açık" if watch_entry else "☆ Kalıcı takip kapalı"
+    lines = [
+        f"🔎 {pair.removesuffix('USDT')} ADAY DETAYI",
+        "",
+        f"Puan: {int(current.get('score') or 0)}/100 · {_friendly_listing_stage(current.get('stage'))}",
+        f"Durum: {status_text}",
+        f"Takip: {watched_text}",
+        f"24s değişim: %{change:+.1f} · hacim: {format_money(quote_volume)}",
+        f"5dk hacim ivmesi: {acceleration:.1f}x · makas: {spread:.0f} bps",
+        f"Fiyat: {price:g}",
+    ]
+    filter_reasons = metadata.get("filter_reasons") or []
+    if filter_reasons:
+        lines.append("Bekleme nedeni: " + " · ".join(str(x) for x in filter_reasons[:2]))
+    risks = current.get("risk_flags") or []
+    if risks:
+        lines.append("Risk: " + " · ".join(str(x) for x in risks[:2]))
+    lines.extend(["", "Bu ekran yalnız keşif ve takip içindir; emir oluşturmaz."])
+    return "\n".join(lines)
+
+
+def _candidate_detail_keyboard(
+    value: Any,
+    state_mgr: StateManager,
+    *,
+    origin: str = "MEXC_MENU",
+) -> dict:
+    pair = _normalize_mexc_watch_pair(value)
+    safe_origin = _candidate_origin_command(origin)
+    origin_page = _candidate_origin_page(origin)
+    origin_code = _candidate_origin_code(safe_origin, origin_page)
+    rows: list[list[dict[str, str]]] = []
+    if pair:
+        if pair in _mexc_watchlist(state_mgr):
+            rows.append([{
+                "text": "🔕 Takipten çıkar",
+                "callback_data": f"WATCH_REMOVE {pair} {origin_code}",
+            }])
+        else:
+            rows.append([{
+                "text": "⭐ Kalıcı takibe al",
+                "callback_data": f"WATCH_ADD {pair} {origin_code}",
+            }])
+        rows.append([{
+            "text": "🔄 Adayı yenile",
+            "callback_data": f"CANDIDATE {pair} {origin_code}",
+        }])
+    back_text = {
+        "LISTINGS": "⬅️ Güçlü adaylar",
+        "FILTERED_LISTINGS": "⬅️ İzleme havuzu",
+        "WATCHLIST": "⬅️ Takip listem",
+    }.get(safe_origin, "⬅️ Fırsat merkezi")
+    back_callback = f"{safe_origin} {origin_page}" if origin_page else safe_origin
+    rows.append([{"text": back_text, "callback_data": back_callback}])
+    rows.append([{"text": "🏠 Kontrol paneli", "callback_data": "DASHBOARD"}])
+    return {"inline_keyboard": rows}
+
+
+def _watchlist_keyboard(state_mgr: StateManager) -> dict:
+    watchlist = _mexc_watchlist(state_mgr)
+    rows: list[list[dict[str, str]]] = []
+    ordered = sorted(
+        watchlist.items(),
+        key=lambda item: int(item[1].get("added_at") or 0),
+        reverse=True,
+    )
+    for pair, entry in ordered[:8]:
+        candidate = entry.get("last_candidate") or {}
+        score = int(candidate.get("score") or 0)
+        rows.append([{
+            "text": f"⭐ {pair.removesuffix('USDT')} · {score}/100",
+            "callback_data": f"CANDIDATE {pair} W",
+        }])
+    rows.extend(
+        [
+            [{"text": "⬅️ Fırsat merkezi", "callback_data": "MEXC_MENU"}],
+            [{"text": "🏠 Kontrol paneli", "callback_data": "DASHBOARD"}],
         ]
-    }
+    )
+    return {"inline_keyboard": rows}
 
 
 def _pending_trade_approvals(state_mgr: StateManager) -> dict:
@@ -11182,31 +11602,47 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
         if cmd == "START":
             send_message(
                 f"🤖 Signal Bot aktif (v{__version__})\n\n"
-                "Komuta merkezi hazır. Önce Durum/Pozisyon ile riski gör; "
-                "ardından MEXC Fırsat veya Radar ile keşfe geç. Ek raporlar "
-                "Diğer menüsünde. Onaylar hiçbir işlemi senden habersiz ilerletmez.",
+                "Dört bölümlü sabit menü hazır. Fırsat, pozisyon ve güvenlik "
+                "işlemleri kendi bağlamsal ekranlarında açılır.",
                 reply_markup=MAIN_KEYBOARD,
             )
-        elif cmd in {"MAIN_MENU", "MENU"}:
             send_message(
-                "🏠 Ana komuta menüsü açıldı.",
-                reply_markup=MAIN_KEYBOARD,
+                _dashboard_text(state_mgr),
+                reply_markup=_dashboard_keyboard(),
+                keyboard=False,
             )
-        elif cmd == "MEXC_MENU":
+        elif cmd in {"DASHBOARD", "PANEL", "MAIN_MENU", "MENU"}:
+            if cmd == "MENU" and not update.get("callback_query"):
+                send_message(
+                    "✅ Sabit ana menü yenilendi.",
+                    reply_markup=MAIN_KEYBOARD,
+                )
+            _respond_telegram(
+                update,
+                _dashboard_text(state_mgr),
+                reply_markup=_dashboard_keyboard(),
+            )
+        elif cmd in {"MEXC_MENU", "OPPORTUNITIES"}:
             snapshot = state_mgr.get_meta("unified_radar_snapshot") or {}
-            send_message(
+            _respond_telegram(
+                update,
                 _mexc_center_text(snapshot, state_mgr),
-                reply_markup=MEXC_KEYBOARD,
+                reply_markup=_mexc_center_keyboard(snapshot, state_mgr),
             )
         elif cmd in {"MORE", "MORE_MENU"}:
-            send_message(
-                "☰ Ek araçlar — seçimden sonra ana menü otomatik geri gelir.",
-                reply_markup=MORE_KEYBOARD,
+            _respond_telegram(
+                update,
+                "☰ ARAÇLAR\n\nPiyasa bağlamı, portföy ve performans raporları.",
+                reply_markup=_more_tools_keyboard(),
             )
         elif cmd == "HELP":
-            send_message(
+            _respond_telegram(
+                update,
                 "Komutlar:\n"
                 "/start — bot uyandır, özet\n"
+                "/panel — kontrol paneli\n"
+                "/opportunities — MEXC fırsat merkezi\n"
+                "/safety — güvenlik ve icra merkezi\n"
                 "/status — anlık sağlık durumu + 24h özet\n"
                 "/positions — açık pozisyonlar (entry/stop/TP/PnL)\n"
                 "/listings — MEXC puan eşiğini geçen adaylar\n"
@@ -11225,7 +11661,7 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 "ACCEPT <id> — öneri kabul\n"
                 "DECLINE <id> — öneri red\n"
                 "TRADE_PENDING / TRADE_ACCEPT <id> / TRADE_DECLINE <id> — trade onay",
-                reply_markup=MAIN_KEYBOARD,
+                reply_markup=_more_tools_keyboard(),
             )
         elif cmd == "STATUS":
             snap = state_mgr.snapshot()
@@ -11269,7 +11705,8 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 perf_line = "24h: trade yok"
 
             scan_text = f"{scan_age}s önce" if scan_age is not None else "henüz yok"
-            send_message(
+            _respond_telegram(
+                update,
                 f"📊 STATUS (v{__version__})\n\n"
                 f"Son başarılı scan: {scan_text}\n"
                 f"Açık trade: {open_trades}\n"
@@ -11278,7 +11715,8 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 f"Bekleyen öneri: {pending}\n"
                 f"Ardışık API hatası: {failures}\n"
                 f"Mode: {EXECUTION_MODE}\n"
-                f"Zaman: {tr_now_text()}"
+                f"Zaman: {tr_now_text()}",
+                reply_markup=_safety_center_keyboard(),
             )
         elif cmd == "POSITIONS":
             snap = state_mgr.snapshot()
@@ -11288,7 +11726,11 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 if isinstance(t, dict) and t.get("result") is None
             ]
             if not opens:
-                send_message("📭 Açık pozisyon yok.")
+                _respond_telegram(
+                    update,
+                    "📂 POZİSYONLAR\n\n📭 Açık pozisyon yok.",
+                    reply_markup=_positions_keyboard(),
+                )
             else:
                 lines = [f"📂 Açık pozisyon: {len(opens)}\n"]
                 for t in opens[:10]:
@@ -11306,7 +11748,11 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                     )
                 if len(opens) > 10:
                     lines.append(f"\n... +{len(opens) - 10} pozisyon daha")
-                send_message("\n".join(lines))
+                _respond_telegram(
+                    update,
+                    "\n".join(lines),
+                    reply_markup=_positions_keyboard(),
+                )
         elif cmd == "EQUITY":
             snap = state_mgr.snapshot()
             trades = snap.get("trades", {}) or {}
@@ -11323,14 +11769,16 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
             total_pnl_pct = sum(trade_realized_pnl_pct(t) for t in closed)
             equity = ACCOUNT_SIZE_USD * (1 + total_pnl_pct)
             wr = (len(wins) / len(closed) * 100) if closed else 0.0
-            send_message(
+            _respond_telegram(
+                update,
                 f"💰 EQUITY\n\n"
                 f"Başlangıç: ${ACCOUNT_SIZE_USD:,.2f}\n"
                 f"Anlık: ${equity:,.2f} ({total_pnl_pct * 100:+.2f}%)\n"
                 f"Açık pozisyon: {len(opens)}\n"
                 f"Kapalı trade: {len(closed)} ({len(wins)}W/{len(losses)}L)\n"
                 f"Win rate: %{wr:.1f}\n"
-                f"Mode: {EXECUTION_MODE}"
+                f"Mode: {EXECUTION_MODE}",
+                reply_markup=_more_tools_keyboard(),
             )
         elif cmd == "REPORT":
             snap = state_mgr.snapshot()
@@ -11342,7 +11790,11 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 and int(t.get("closed_at") or 0) >= cutoff_7d
             ]
             if not closed_7d:
-                send_message("📊 Son 7 gün trade yok.")
+                _respond_telegram(
+                    update,
+                    "📊 SON 7 GÜN\n\nTrade yok.",
+                    reply_markup=_more_tools_keyboard(),
+                )
             else:
                 pnls = [trade_realized_pnl_pct(t) for t in closed_7d]
                 wins = [p for p in pnls if p > 0]
@@ -11355,13 +11807,15 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 pf_text = f"{pf:.2f}" if pf != float("inf") else "∞"
                 avg_win = (sum(wins) / len(wins) * 100) if wins else 0.0
                 avg_loss = (sum(losses) / len(losses) * 100) if losses else 0.0
-                send_message(
+                _respond_telegram(
+                    update,
                     f"📊 REPORT (son 7 gün)\n\n"
                     f"Trade: {len(closed_7d)} ({len(wins)}W/{len(losses)}L)\n"
                     f"Win rate: %{wr:.1f}\n"
                     f"Profit factor: {pf_text}\n"
                     f"Toplam PnL: {total * 100:+.2f}%\n"
-                    f"Avg Win: {avg_win:+.2f}% | Avg Loss: {avg_loss:.2f}%"
+                    f"Avg Win: {avg_win:+.2f}% | Avg Loss: {avg_loss:.2f}%",
+                    reply_markup=_more_tools_keyboard(),
                 )
         elif cmd == "REGIME":
             snap = state_mgr.snapshot()
@@ -11374,95 +11828,166 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
             macro_regime = diag.get("macro_regime", "?")
             macro_score = macro.get("macro_score", "?")
             news = diag.get("news_state", "?")
-            send_message(
+            _respond_telegram(
+                update,
                 f"🌍 REGIME\n\n"
                 f"Rejim: {regime}\n"
                 f"Güven: {confidence}\n"
                 f"Macro: {macro_regime} (score: {macro_score})\n"
                 f"News: {news}\n"
-                f"Zaman: {tr_now_text()}"
+                f"Zaman: {tr_now_text()}",
+                reply_markup=_more_tools_keyboard(),
             )
         elif cmd == "RADAR":
             snapshot = state_mgr.get_meta("unified_radar_snapshot")
-            send_message(
+            _respond_telegram(
+                update,
                 "🧭 UNIFIED RADAR\n\n"
                 f"{format_snapshot_brief(snapshot)}\n\n"
                 f"{format_unified_validation_brief(state_mgr)}\n\n"
                 "PriceMonitorX geniş MEXC piyasa hareketini; PhenomenonX yalnız "
-                "MEXC yeni listelemelerini izler. İkisi de tek başına emir veremez."
+                "MEXC yeni listelemelerini izler. İkisi de tek başına emir veremez.",
+                reply_markup=_opportunity_back_keyboard(),
             )
         elif cmd in {"LISTINGS", "MEXC", "NEW_LISTINGS"}:
             snapshot = state_mgr.get_meta("unified_radar_snapshot") or {}
-            send_message(
-                format_listing_report(snapshot, limit=5),
-                reply_markup=MEXC_KEYBOARD,
+            page_snapshot, page, total_pages = _candidate_page(
+                snapshot,
+                bucket="listing_candidates",
+                page=_telegram_page_arg(parts),
             )
-            inline_keyboard = _passed_watch_keyboard(snapshot, state_mgr)
-            if inline_keyboard:
-                send_message(
-                    "Eşiği geçenlerden takip etmek istediğin coini seç:",
-                    reply_markup=inline_keyboard,
-                    keyboard=False,
-                )
+            page_text = format_listing_report(page_snapshot, limit=5)
+            if total_pages > 1:
+                page_text += f"\n\nSayfa {page + 1}/{total_pages}"
+            _respond_telegram(
+                update,
+                page_text,
+                reply_markup=_passed_watch_keyboard(snapshot, state_mgr, page=page),
+            )
         elif cmd in {"FILTERED", "FILTERED_LISTINGS"}:
             snapshot = state_mgr.get_meta("unified_radar_snapshot") or {}
-            send_message(
-                format_filtered_listing_report(snapshot, limit=5),
-                reply_markup=MEXC_KEYBOARD,
+            page_snapshot, page, total_pages = _candidate_page(
+                snapshot,
+                bucket="listing_filtered_candidates",
+                page=_telegram_page_arg(parts),
             )
-            inline_keyboard = _filtered_watch_keyboard(snapshot, state_mgr)
-            if inline_keyboard:
-                send_message(
-                    "Takibe almak istediğin coine dokun:",
-                    reply_markup=inline_keyboard,
-                    keyboard=False,
-                )
+            page_text = format_filtered_listing_report(page_snapshot, limit=5)
+            if total_pages > 1:
+                page_text += f"\n\nSayfa {page + 1}/{total_pages}"
+            _respond_telegram(
+                update,
+                page_text,
+                reply_markup=_filtered_watch_keyboard(snapshot, state_mgr, page=page),
+            )
         elif cmd in {"WATCH", "WATCHLIST"}:
-            send_message(
+            _respond_telegram(
+                update,
                 _format_mexc_watchlist(state_mgr),
-                reply_markup=MEXC_KEYBOARD,
+                reply_markup=_watchlist_keyboard(state_mgr),
             )
-            inline_keyboard = _watch_remove_keyboard(state_mgr)
-            if inline_keyboard:
-                send_message(
-                    "Takipten çıkarmak için:",
-                    reply_markup=inline_keyboard,
-                    keyboard=False,
+        elif cmd == "CANDIDATE":
+            if len(parts) < 2:
+                _respond_telegram(
+                    update,
+                    "Aday seçilemedi.",
+                    reply_markup=_opportunity_back_keyboard(),
+                )
+            else:
+                origin = parts[2] if len(parts) > 2 else "M"
+                _respond_telegram(
+                    update,
+                    _mexc_candidate_detail_text(parts[1], state_mgr),
+                    reply_markup=_candidate_detail_keyboard(
+                        parts[1],
+                        state_mgr,
+                        origin=origin,
+                    ),
                 )
         elif cmd == "WATCH_ADD":
             if len(parts) < 2:
-                send_message("Kullanım: /watch_add NOVA", reply_markup=MEXC_KEYBOARD)
+                _respond_telegram(
+                    update,
+                    "Kullanım: /watch_add NOVA",
+                    reply_markup=_opportunity_back_keyboard(),
+                )
             else:
                 _, message = add_mexc_watch(parts[1], state_mgr)
-                send_message(message, reply_markup=MEXC_KEYBOARD)
+                origin = parts[2] if len(parts) > 2 else "M"
+                _respond_telegram(
+                    update,
+                    f"{message}\n\n{_mexc_candidate_detail_text(parts[1], state_mgr)}",
+                    reply_markup=_candidate_detail_keyboard(
+                        parts[1],
+                        state_mgr,
+                        origin=origin,
+                    ),
+                )
         elif cmd == "WATCH_REMOVE":
             if len(parts) < 2:
-                send_message("Kullanım: /watch_remove NOVA", reply_markup=MEXC_KEYBOARD)
+                _respond_telegram(
+                    update,
+                    "Kullanım: /watch_remove NOVA",
+                    reply_markup=_opportunity_back_keyboard(),
+                )
             else:
                 _, message = remove_mexc_watch(parts[1], state_mgr)
-                send_message(message, reply_markup=MEXC_KEYBOARD)
+                origin = parts[2] if len(parts) > 2 else "M"
+                _respond_telegram(
+                    update,
+                    f"{message}\n\n{_mexc_candidate_detail_text(parts[1], state_mgr)}",
+                    reply_markup=_candidate_detail_keyboard(
+                        parts[1],
+                        state_mgr,
+                        origin=origin,
+                    ),
+                )
         elif cmd == "WATCH_STATUS":
             if len(parts) < 2:
-                send_message("Takip durumu için coin seç.", reply_markup=MEXC_KEYBOARD)
+                _respond_telegram(
+                    update,
+                    "Takip durumu için coin seç.",
+                    reply_markup=_opportunity_back_keyboard(),
+                )
             else:
-                send_message(
-                    _mexc_watch_status(parts[1], state_mgr),
-                    reply_markup=MEXC_KEYBOARD,
+                _respond_telegram(
+                    update,
+                    _mexc_candidate_detail_text(parts[1], state_mgr),
+                    reply_markup=_candidate_detail_keyboard(
+                        parts[1],
+                        state_mgr,
+                        origin="WATCHLIST",
+                    ),
                 )
         elif cmd == "MEXC_REFRESH":
             _tick_unified_radar([], state_mgr, force=True)
-            send_message(
+            snapshot = state_mgr.get_meta("unified_radar_snapshot") or {}
+            _respond_telegram(
+                update,
                 "🔄 MEXC taraması başlatıldı. Sonuç birkaç saniye içinde "
-                "Fırsatlar ve Filtredekiler ekranına yansıyacak.",
-                reply_markup=MEXC_KEYBOARD,
+                "Güçlü Adaylar ve İzleme Havuzu ekranlarına yansıyacak.",
+                reply_markup=_mexc_center_keyboard(snapshot, state_mgr),
+            )
+        elif cmd == "SAFETY":
+            _respond_telegram(
+                update,
+                _safety_center_text(state_mgr),
+                reply_markup=_safety_center_keyboard(),
+            )
+        elif cmd == "AUTOMATION_INFO":
+            _respond_telegram(
+                update,
+                _automation_info_text(),
+                reply_markup=_safety_center_keyboard(),
             )
         elif cmd == "APPROVALS":
-            send_message(
+            _respond_telegram(
+                update,
                 "✅ ONAY MERKEZİ\n\n"
                 "TRADE ONAYLARI\n"
                 f"{pending_trade_approvals_text(state_mgr)}\n\n"
                 "PARAMETRE ÖNERİLERİ\n"
-                f"{pending_parameter_suggestions_text()}"
+                f"{pending_parameter_suggestions_text()}",
+                reply_markup=_safety_center_keyboard(),
             )
         elif cmd == "PENDING":
             send_message(pending_parameter_suggestions_text())
