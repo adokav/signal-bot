@@ -54,7 +54,7 @@ from acce_unified import (
 )
 from acce_unified.validation import ValidationPolicy, evaluate_promotion
 
-__version__ = "4.4.0-telegram-control-surface"
+__version__ = "4.5.0-social-intelligence-radar"
 
 # ============================================================
 # LOGGING
@@ -1696,6 +1696,7 @@ _KEYBOARD_COMMAND_LABELS: dict[str, str] = {
     # Inline merkez etiketleri düz mesaj olarak gelirse de çalışsın.
     "🔥 Güçlü Adaylar": "LISTINGS",
     "🟡 İzleme Havuzu": "FILTERED_LISTINGS",
+    "📣 Sosyal Radar": "SOCIAL_RADAR",
     "⭐ Takip Listem": "WATCHLIST",
     "🔄 Şimdi Tara": "MEXC_REFRESH",
     # Command Center v3
@@ -1766,6 +1767,7 @@ BOT_COMMANDS: list[dict[str, str]] = [
     {"command": "positions", "description": "Açık pozisyonlar, stop, TP ve PnL"},
     {"command": "listings", "description": "PhenomenonX MEXC yeni listelemeleri"},
     {"command": "filtered", "description": "Filtrede kalan MEXC adayları"},
+    {"command": "social", "description": "Sosyal ilgi ve fenomen radarı"},
     {"command": "watch", "description": "MEXC takip listem"},
     {"command": "watch_add", "description": "Coini takibe al: /watch_add COIN"},
     {"command": "watch_remove", "description": "Takipten çıkar: /watch_remove COIN"},
@@ -10935,11 +10937,24 @@ def _sync_mexc_watchlist_state(snapshot: dict, state_mgr: StateManager) -> None:
         new_status = str(new_metadata.get("filter_status") or "")
         old_stage = str(previous.get("stage") or "") if isinstance(previous, dict) else ""
         new_stage = str(current.get("stage") or "")
+        old_social = (old_metadata or {}).get("social") or {}
+        new_social = new_metadata.get("social") or {}
+        old_social_stage = str(old_social.get("stage") or "")
+        new_social_stage = str(new_social.get("stage") or "")
         crossed_filter = bool(previous) and old_status == "FILTERED" and new_status == "PASSED"
         warmed_up = bool(previous) and old_stage not in {"BUILDING", "HOT"} and new_stage in {"BUILDING", "HOT"}
-        signature = f"{generated_at}:{new_stage}:{current.get('score')}:{new_status}"
+        social_emerged = (
+            bool(previous)
+            and old_social_stage not in {"EMERGING", "CONFIRMED"}
+            and new_social_stage in {"EMERGING", "CONFIRMED"}
+        )
+        signature = (
+            f"{generated_at}:{new_stage}:{current.get('score')}:"
+            f"{new_status}:{new_social_stage}:"
+            f"{new_social.get('viral_potential', 0)}"
+        )
         if (
-            (crossed_filter or warmed_up)
+            (crossed_filter or warmed_up or social_emerged)
             and entry.get("last_alert_signature") != signature
         ):
             entry["last_alert_signature"] = signature
@@ -10951,11 +10966,19 @@ def _sync_mexc_watchlist_state(snapshot: dict, state_mgr: StateManager) -> None:
 
     for pair, current in alerts:
         metadata = current.get("metadata") or {}
+        social = metadata.get("social") or {}
+        social_line = ""
+        if social and social.get("status") != "DATA_PENDING":
+            social_line = (
+                f"Sosyal: {int(social.get('viral_potential') or 0)}/100 · "
+                f"{_friendly_social_stage(social.get('stage'))}\n"
+            )
         send_message(
             f"🔥 MEXC TAKİP ADAYI ISINIYOR\n\n"
             f"{pair} — {int(current.get('score') or 0)}/100 · {_friendly_listing_stage(current.get('stage'))}\n"
             f"24s değişim: %{float(metadata.get('change_pct') or 0):+.1f}\n"
             f"5dk hacim ivmesi: {float(metadata.get('volume_acceleration') or 0):.1f}x\n\n"
+            f"{social_line}"
             "Takip alarmıdır; otomatik emir oluşturmaz.",
             keyboard=False,
         )
@@ -10975,6 +10998,7 @@ def _mexc_center_text(snapshot: Any, state_mgr: StateManager) -> str:
     data = snapshot if isinstance(snapshot, dict) else {}
     passed = len(data.get("listing_candidates") or [])
     filtered = len(data.get("listing_filtered_candidates") or [])
+    social = len(data.get("social_candidates") or [])
     watched = len(_mexc_watchlist(state_mgr))
     generated_at = int(data.get("generated_at") or 0)
     age = max(0, now_ts() - generated_at) if generated_at else None
@@ -10983,6 +11007,7 @@ def _mexc_center_text(snapshot: Any, state_mgr: StateManager) -> str:
         "🚀 MEXC ERKEN FIRSAT MERKEZİ\n\n"
         f"🔥 Güçlü aday: {passed}\n"
         f"🟡 İzleme havuzu: {filtered}\n"
+        f"📣 Sosyal sinyal: {social}\n"
         f"⭐ Takip listem: {watched}\n"
         f"🕒 Son veri: {freshness}\n\n"
         f"İzleme havuzundaki adaylar {UNIFIED_CONFIG.listing_candidate_ttl_hours} "
@@ -11055,6 +11080,7 @@ def _mexc_center_keyboard(snapshot: Any, state_mgr: StateManager) -> dict:
     data = snapshot if isinstance(snapshot, dict) else {}
     strong = len(data.get("listing_candidates") or [])
     pool = len(data.get("listing_filtered_candidates") or [])
+    social = len(data.get("social_candidates") or [])
     watched = len(_mexc_watchlist(state_mgr))
     return {
         "inline_keyboard": [
@@ -11063,10 +11089,13 @@ def _mexc_center_keyboard(snapshot: Any, state_mgr: StateManager) -> dict:
                 {"text": f"🟡 İzleme {pool}", "callback_data": "FILTERED_LISTINGS"},
             ],
             [
+                {"text": f"📣 Sosyal {social}", "callback_data": "SOCIAL_RADAR"},
                 {"text": f"⭐ Takibim {watched}", "callback_data": "WATCHLIST"},
-                {"text": "🧭 Piyasa", "callback_data": "RADAR"},
             ],
-            [{"text": "🔄 Şimdi tara", "callback_data": "MEXC_REFRESH"}],
+            [
+                {"text": "🧭 Piyasa", "callback_data": "RADAR"},
+                {"text": "🔄 Şimdi tara", "callback_data": "MEXC_REFRESH"},
+            ],
             [{"text": "⬅️ Kontrol paneli", "callback_data": "DASHBOARD"}],
         ]
     }
@@ -11236,6 +11265,7 @@ _CANDIDATE_ORIGIN_CODES = {
     "L": "LISTINGS",
     "F": "FILTERED_LISTINGS",
     "W": "WATCHLIST",
+    "S": "SOCIAL_RADAR",
     "M": "MEXC_MENU",
 }
 
@@ -11374,6 +11404,138 @@ def _filtered_watch_keyboard(
     )
 
 
+def _friendly_social_stage(value: Any) -> str:
+    return {
+        "DATA_PENDING": "⚪ Veri bekliyor",
+        "QUIET": "⚪ Sessiz",
+        "SEED": "🌱 Tohum",
+        "EMERGING": "🚀 Yükseliyor",
+        "CONFIRMED": "🔥 Teyitli",
+        "CROWDED": "⛔ Kalabalık",
+        "SUSPICIOUS": "🕵️ Şüpheli",
+        "NEGATIVE_EVENT": "🔻 Olumsuz olay",
+    }.get(str(value or "").upper(), str(value or "-"))
+
+
+def _social_radar_rows(snapshot: Any) -> list[dict]:
+    data = snapshot if isinstance(snapshot, dict) else {}
+    return [
+        row for row in (data.get("social_candidates") or [])
+        if isinstance(row, dict)
+    ]
+
+
+def _format_social_radar(snapshot: Any, *, limit: int = 8) -> str:
+    rows = _social_radar_rows(snapshot)
+    if not rows:
+        return (
+            "📣 SOSYAL RADAR\n\n"
+            "Henüz doğrulanmış sosyal veri yok. GDELT haber taraması varsayılan "
+            "olarak çalışır; X verisi için Render'a X_BEARER_TOKEN eklenebilir."
+        )
+    lines = [
+        "📣 SOSYAL RADAR",
+        "İlgi yönünü, organikliği ve kalabalıklaşmayı ayrı ölçer.",
+        "",
+    ]
+    for index, row in enumerate(rows[:limit], 1):
+        social = (row.get("metadata") or {}).get("social") or {}
+        lines.extend([
+            f"{index}. {str(row.get('symbol') or '?').removesuffix('USDT')} — "
+            f"{int(social.get('viral_potential') or 0)}/100 · "
+            f"{_friendly_social_stage(social.get('stage'))}",
+            f"   Duygu {int(social.get('sentiment_score') or 0):+d} · "
+            f"Manipülasyon {int(social.get('manipulation_risk') or 0)} · "
+            f"Crowding {int(social.get('crowding_risk') or 0)}",
+        ])
+        reasons = social.get("reasons") or []
+        if reasons:
+            lines.append("   " + " · ".join(str(value) for value in reasons[:2]))
+        lines.append("")
+    lines.append("Sosyal skor tek başına işlem veya otomatik alım yetkisi vermez.")
+    return "\n".join(lines)
+
+
+def _social_radar_keyboard(snapshot: Any, state_mgr: StateManager) -> dict:
+    watched = set(_mexc_watchlist(state_mgr))
+    rows: list[list[dict[str, str]]] = []
+    for candidate in _social_radar_rows(snapshot)[:8]:
+        pair = _normalize_mexc_watch_pair(candidate.get("symbol"))
+        if not pair:
+            continue
+        social = (candidate.get("metadata") or {}).get("social") or {}
+        mark = "⭐" if pair in watched else {
+            "CONFIRMED": "🔥", "EMERGING": "🚀", "SEED": "🌱",
+            "SUSPICIOUS": "🕵️", "CROWDED": "⛔", "NEGATIVE_EVENT": "🔻",
+        }.get(str(social.get("stage") or "").upper(), "⚪")
+        rows.append([{
+            "text": f"{mark} {pair.removesuffix('USDT')} · {int(social.get('viral_potential') or 0)}/100",
+            "callback_data": f"SOCIAL_DETAIL {pair} S",
+        }])
+    rows.extend([
+        [{"text": "⬅️ Fırsat merkezi", "callback_data": "MEXC_MENU"}],
+        [{"text": "🏠 Kontrol paneli", "callback_data": "DASHBOARD"}],
+    ])
+    return {"inline_keyboard": rows}
+
+
+def _social_detail_text(value: Any, state_mgr: StateManager) -> str:
+    pair = _normalize_mexc_watch_pair(value)
+    if not pair:
+        return "⚠️ Geçersiz sosyal radar adayı."
+    candidate = _mexc_candidate_by_pair(
+        state_mgr.get_meta("unified_radar_snapshot")
+    ).get(pair) or {}
+    social = (candidate.get("metadata") or {}).get("social") or {}
+    if not social or social.get("status") == "DATA_PENDING":
+        return f"📣 {pair}\n\nSosyal veri henüz yeterli değil; aday veri bekliyor."
+    platforms = ", ".join(social.get("platforms") or []) or "-"
+    lines = [
+        f"📣 {pair.removesuffix('USDT')} SOSYAL ANALİZ",
+        "",
+        f"Aşama: {_friendly_social_stage(social.get('stage'))}",
+        f"Fenomen potansiyeli: {int(social.get('viral_potential') or 0)}/100",
+        f"Ham ilgi: {int(social.get('attention_score') or 0)}/100",
+        f"Duygu: {int(social.get('sentiment_score') or 0):+d}",
+        f"Manipülasyon riski: {int(social.get('manipulation_risk') or 0)}/100",
+        f"Kalabalıklaşma: {int(social.get('crowding_risk') or 0)}/100",
+        f"1s mention/yazar: {int(social.get('mentions_1h') or 0)}/{int(social.get('unique_authors_1h') or 0)}",
+        f"Kanallar: {platforms} · kapsama %{int(social.get('coverage_pct') or 0)}",
+    ]
+    if social.get("narrative"):
+        lines.append(f"Narrative: {social['narrative']}")
+    reasons = social.get("reasons") or []
+    if reasons:
+        lines.extend(["", "Neden bu aşamada:", *[f"• {reason}" for reason in reasons[:4]]])
+    lines.extend([
+        "",
+        "Bu analiz dikkat ve haber önceliğidir; güvenlik/temel/likidite "
+        "kapılarını geçersiz kılamaz.",
+    ])
+    return "\n".join(lines)
+
+
+def _social_detail_keyboard(value: Any, state_mgr: StateManager) -> dict:
+    pair = _normalize_mexc_watch_pair(value)
+    candidate = _mexc_candidate_by_pair(
+        state_mgr.get_meta("unified_radar_snapshot")
+    ).get(pair or "") or {}
+    social = (candidate.get("metadata") or {}).get("social") or {}
+    rows: list[list[dict[str, str]]] = []
+    for source in (social.get("sources") or [])[:3]:
+        url = str(source.get("url") or "")
+        if url.startswith("https://"):
+            title = str(source.get("title") or source.get("provider") or "Kaynak")
+            rows.append([{"text": f"📰 {title[:42]}", "url": url}])
+    if pair:
+        rows.append([{
+            "text": "🔎 Aday detayına dön",
+            "callback_data": f"CANDIDATE {pair} S",
+        }])
+    rows.append([{"text": "⬅️ Sosyal radar", "callback_data": "SOCIAL_RADAR"}])
+    return {"inline_keyboard": rows}
+
+
 def _mexc_candidate_detail_text(value: Any, state_mgr: StateManager) -> str:
     pair = _normalize_mexc_watch_pair(value)
     if not pair:
@@ -11409,6 +11571,16 @@ def _mexc_candidate_detail_text(value: Any, state_mgr: StateManager) -> str:
         f"5dk hacim ivmesi: {acceleration:.1f}x · makas: {spread:.0f} bps",
         f"Fiyat: {price:g}",
     ]
+    social = metadata.get("social") or {}
+    if social and social.get("status") != "DATA_PENDING":
+        lines.extend([
+            "",
+            f"Sosyal: {int(social.get('viral_potential') or 0)}/100 · "
+            f"{_friendly_social_stage(social.get('stage'))}",
+            f"Duygu {int(social.get('sentiment_score') or 0):+d} · "
+            f"Manipülasyon {int(social.get('manipulation_risk') or 0)} · "
+            f"Crowding {int(social.get('crowding_risk') or 0)}",
+        ])
     filter_reasons = metadata.get("filter_reasons") or []
     if filter_reasons:
         lines.append("Bekleme nedeni: " + " · ".join(str(x) for x in filter_reasons[:2]))
@@ -11431,6 +11603,15 @@ def _candidate_detail_keyboard(
     origin_code = _candidate_origin_code(safe_origin, origin_page)
     rows: list[list[dict[str, str]]] = []
     if pair:
+        current = _mexc_candidate_by_pair(
+            state_mgr.get_meta("unified_radar_snapshot")
+        ).get(pair) or {}
+        social = (current.get("metadata") or {}).get("social") or {}
+        if social and social.get("status") != "DATA_PENDING":
+            rows.append([{
+                "text": "📣 Sosyal analizi aç",
+                "callback_data": f"SOCIAL_DETAIL {pair} {origin_code}",
+            }])
         if pair in _mexc_watchlist(state_mgr):
             rows.append([{
                 "text": "🔕 Takipten çıkar",
@@ -11449,6 +11630,7 @@ def _candidate_detail_keyboard(
         "LISTINGS": "⬅️ Güçlü adaylar",
         "FILTERED_LISTINGS": "⬅️ İzleme havuzu",
         "WATCHLIST": "⬅️ Takip listem",
+        "SOCIAL_RADAR": "⬅️ Sosyal radar",
     }.get(safe_origin, "⬅️ Fırsat merkezi")
     back_callback = f"{safe_origin} {origin_page}" if origin_page else safe_origin
     rows.append([{"text": back_text, "callback_data": back_callback}])
@@ -11647,6 +11829,7 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 "/positions — açık pozisyonlar (entry/stop/TP/PnL)\n"
                 "/listings — MEXC puan eşiğini geçen adaylar\n"
                 "/filtered — filtrede kalan MEXC adayları\n"
+                "/social — sosyal ilgi ve fenomen potansiyeli\n"
                 "/watch — süresiz MEXC takip listem\n"
                 "/watch_add NOVA — coin takibe al\n"
                 "/watch_remove NOVA — takipten çıkar\n"
@@ -11879,6 +12062,26 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 page_text,
                 reply_markup=_filtered_watch_keyboard(snapshot, state_mgr, page=page),
             )
+        elif cmd in {"SOCIAL", "SOCIAL_RADAR"}:
+            snapshot = state_mgr.get_meta("unified_radar_snapshot") or {}
+            _respond_telegram(
+                update,
+                _format_social_radar(snapshot),
+                reply_markup=_social_radar_keyboard(snapshot, state_mgr),
+            )
+        elif cmd == "SOCIAL_DETAIL":
+            if len(parts) < 2:
+                _respond_telegram(
+                    update,
+                    "Sosyal radar adayı seçilemedi.",
+                    reply_markup=_opportunity_back_keyboard(),
+                )
+            else:
+                _respond_telegram(
+                    update,
+                    _social_detail_text(parts[1], state_mgr),
+                    reply_markup=_social_detail_keyboard(parts[1], state_mgr),
+                )
         elif cmd in {"WATCH", "WATCHLIST"}:
             _respond_telegram(
                 update,
