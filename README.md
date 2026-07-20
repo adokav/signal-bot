@@ -23,7 +23,8 @@ Geniş radar adayları bu listeyi kendiliğinden büyütemez. Unified Engine
 varsayılan olarak `SHADOW` çalışır ve hiçbir radar adayı emir yetkisi taşımaz.
 Telegram'da `/radar` komutu PriceMonitorX piyasa radarı ile PhenomenonX MEXC
 yeni listeleme radarını birlikte; `/listings` Güçlü Adayları, `/filtered`
-İzleme Havuzunu ve `/watch` süresiz takip listesini gösterir.
+İzleme Havuzunu, `/fundamentals` temel metrikleri ve `/watch` süresiz takip
+listesini gösterir.
 
 ```text
 UNIFIED_ENGINE_ENABLED=1
@@ -42,6 +43,12 @@ UNIFIED_SOCIAL_CACHE_TTL_SECONDS=600
 UNIFIED_SOCIAL_MAX_ASSETS=6
 # Optional: enables X recent-search metrics; GDELT news works without it.
 X_BEARER_TOKEN=
+UNIFIED_FUNDAMENTAL_RADAR_ENABLED=true
+UNIFIED_FUNDAMENTAL_CACHE_TTL_SECONDS=1800
+UNIFIED_FUNDAMENTAL_MAX_ASSETS=20
+# Optional: keyless CoinGecko works at lower limits.
+COINGECKO_DEMO_API_KEY=
+COINGECKO_PRO_API_KEY=
 UNIFIED_LISTING_CANDIDATE_TTL_HOURS=72
 ```
 
@@ -58,12 +65,14 @@ Değişken eylemler mesaj altındaki inline kontrol yüzeyinde açılır:
 
 ```text
 🔥 Güçlü N | 🟡 İzleme N
+🧬 Temel N | 📣 Sosyal N
 ⭐ Takibim N | 🧭 Piyasa
 🔄 Şimdi tara
 ⬅️ Kontrol paneli
 ```
 
-Liste düğmeleri coin, puan ve aşamayı gösterir; beşli sayfalama daha düşük
+Liste düğmeleri coin, fırsat puanı ve bağımsız temel puanı gösterir; beşli
+sayfalama daha düşük
 sıralı adayları da erişilebilir tutar. Coin seçilince tek bir detay ekranı
 açılır; kalıcı takibe alma/çıkarma yalnız bu ekranda yapılır. Callback
 navigasyonu yeni mesaj göndermek yerine mevcut kontrol mesajını düzenler.
@@ -71,6 +80,12 @@ Yeni adaylar 72 saat boyunca yeniden puanlanır; `/watch_add NOVA` ve
 `/watch_remove NOVA` butonların komut karşılıklarıdır.
 Takipteki aday filtreyi geçtiğinde veya `BUILDING/HOT` aşamasına yükseldiğinde
 bildirim üretilir. Bu akış işlem evrenini değiştirmez ve emir yetkisi vermez.
+
+`🧬 Temel Radar` CoinGecko'nun tek toplu sorgusundan piyasa değeri, FDV,
+dolaşımdaki/azami arz, global hacim/PD, ATH mesafesi ve MEXC hacim yoğunlaşması
+ölçümlerini çıkarır. Aynı sembollü birden fazla proje başlıktan kesin
+eşleştirilemiyorsa bot birini tahmin etmez; `AMBIGUOUS` gösterir. Temel puan
+fırsat puanını veya filtre sonucunu değiştirmez.
 
 `Güvenlik` merkezi çalışma modunu, gerçek emir kapısını, API hata sayısını ve
 bekleyen onayları görünür tutar. Telegram üzerinden tek dokunuşla LIVE veya

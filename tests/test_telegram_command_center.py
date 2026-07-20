@@ -118,8 +118,9 @@ def test_inline_centers_use_dynamic_counts_and_clear_navigation():
     keyboard = bot._mexc_center_keyboard(snapshot, state)
     buttons = [button for row in keyboard["inline_keyboard"] for button in row]
 
-    assert [button["text"] for button in buttons[:5]] == [
-        "🔥 Güçlü 1", "🟡 İzleme 2", "📣 Sosyal 0", "⭐ Takibim 1", "🧭 Piyasa",
+    assert [button["text"] for button in buttons[:6]] == [
+        "🔥 Güçlü 1", "🟡 İzleme 2", "🧬 Temel 0", "📣 Sosyal 0",
+        "⭐ Takibim 1", "🧭 Piyasa",
     ]
     assert buttons[-1]["callback_data"] == "DASHBOARD"
 
@@ -128,7 +129,7 @@ def test_botfather_menu_exposes_listing_and_approval_centers():
     commands = {item["command"] for item in bot.BOT_COMMANDS}
     assert {
         "listings", "filtered", "watch", "watch_add", "watch_remove",
-        "radar", "social", "approvals", "positions",
+        "radar", "social", "fundamentals", "approvals", "positions",
     }.issubset(commands)
 
 
@@ -220,7 +221,7 @@ def test_filtered_candidates_open_detail_instead_of_exposing_actions_in_list():
     keyboard = bot._filtered_watch_keyboard(snapshot, state)
 
     assert keyboard["inline_keyboard"][0] == [{
-        "text": "⚪ NOVA · 48/100",
+        "text": "⚪ NOVA · Fırsat 48 · Temel ?",
         "callback_data": "CANDIDATE NOVAUSDT F",
     }]
     assert keyboard["inline_keyboard"][-1][0]["callback_data"] == "DASHBOARD"
@@ -242,11 +243,11 @@ def test_passed_candidates_show_score_and_watch_marker_before_detail():
 
     assert keyboard["inline_keyboard"][:2] == [
         [{
-            "text": "🔥 NOVA · 72/100",
+            "text": "🔥 NOVA · Fırsat 72 · Temel ?",
             "callback_data": "CANDIDATE NOVAUSDT L",
         }],
         [{
-            "text": "⭐ ALPHA · 80/100",
+            "text": "⭐ ALPHA · Fırsat 80 · Temel ?",
             "callback_data": "CANDIDATE ALPHAUSDT L",
         }],
     ]
@@ -332,6 +333,63 @@ def test_social_radar_exposes_viral_authenticity_and_sources_without_trade_actio
     assert not any("BUY" in value or "SELL" in value or "LIVE" in value for value in callbacks)
 
 
+def test_fundamental_radar_exposes_supply_dilution_and_source_without_trade_actions():
+    state = _MenuState()
+    candidate = {
+        "symbol": "NOVAUSDT",
+        "score": 72,
+        "stage": "BUILDING",
+        "metadata": {
+            "fundamentals": {
+                "status": "READY",
+                "stage": "HEALTHY",
+                "fundamental_score": 68,
+                "identity_confidence": 96,
+                "coverage_pct": 86,
+                "name": "Nova Protocol",
+                "market_cap_rank": 700,
+                "market_cap_usd": 20_000_000,
+                "fully_diluted_valuation_usd": 40_000_000,
+                "total_volume_usd": 4_000_000,
+                "volume_to_market_cap_pct": 20,
+                "circulation_pct": 50,
+                "market_cap_to_fdv_pct": 50,
+                "circulating_supply": 50_000_000,
+                "total_supply": 100_000_000,
+                "max_supply": 100_000_000,
+                "ath_change_pct": -35,
+                "reasons": ["dolaşım/FDV oranı %50"],
+                "risk_flags": ["token açılım takvimi ayrıca doğrulanmalı"],
+                "source_url": "https://www.coingecko.com/en/coins/nova-protocol",
+            },
+        },
+    }
+    snapshot = {
+        "listing_candidates": [candidate],
+        "listing_filtered_candidates": [],
+        "fundamental_candidates": [candidate],
+    }
+    state.meta["unified_radar_snapshot"] = snapshot
+
+    radar_text = bot._format_fundamental_radar(snapshot)
+    detail_text = bot._fundamental_detail_text("NOVA", state)
+    keyboard = bot._fundamental_detail_keyboard("NOVA", state)
+    list_keyboard = bot._passed_watch_keyboard(snapshot, state)
+    callbacks = [
+        button.get("callback_data", "")
+        for row in keyboard["inline_keyboard"]
+        for button in row
+    ]
+
+    assert "NOVA — 68/100" in radar_text
+    assert "Dolaşım %50.0" in radar_text
+    assert "Piyasa değeri: $20.00M" in detail_text
+    assert "Piyasa değeri / FDV: %50.0" in detail_text
+    assert "Fırsat 72 · Temel 68" in list_keyboard["inline_keyboard"][0][0]["text"]
+    assert keyboard["inline_keyboard"][0][0]["url"].endswith("nova-protocol")
+    assert not any("BUY" in value or "SELL" in value or "LIVE" in value for value in callbacks)
+
+
 def test_all_generated_callback_payloads_fit_telegram_limit():
     state = _MenuState()
     pair = f"{'X' * 40}USDT"
@@ -340,12 +398,23 @@ def test_all_generated_callback_payloads_fit_telegram_limit():
             "symbol": pair,
             "score": 10,
             "stage": "WEAK",
-            "metadata": {},
-        }]
+            "metadata": {"fundamentals": {"status": "DATA_PENDING"}},
+        }],
+        "fundamental_candidates": [{
+            "symbol": pair,
+            "score": 10,
+            "stage": "WEAK",
+            "metadata": {
+                "fundamentals": {"status": "READY", "fundamental_score": 50},
+            },
+        }],
     }
+    state.meta["unified_radar_snapshot"] = snapshot
     keyboards = [
         bot._filtered_watch_keyboard(snapshot, state),
-        bot._candidate_detail_keyboard(pair, state, origin="FILTERED_LISTINGS"),
+        bot._candidate_detail_keyboard(pair, state, origin="F99"),
+        bot._fundamental_radar_keyboard(snapshot, state),
+        bot._fundamental_detail_keyboard(pair, state, origin="F99"),
         bot._mexc_center_keyboard(snapshot, state),
         bot._dashboard_keyboard(),
         bot._safety_center_keyboard(),
@@ -378,10 +447,16 @@ def test_candidate_lists_are_paginated_and_detail_returns_to_same_page():
     first = bot._filtered_watch_keyboard(snapshot, state, page=0)
     second = bot._filtered_watch_keyboard(snapshot, state, page=1)
     detail = bot._candidate_detail_keyboard("COIN5USDT", state, origin="F1")
+    fundamental_detail = bot._fundamental_detail_keyboard(
+        "COIN5USDT", state, origin="F1"
+    )
+    social_detail = bot._social_detail_keyboard("COIN5USDT", state, origin="F1")
 
     assert first["inline_keyboard"][5][-1]["callback_data"] == "FILTERED_LISTINGS 1"
     assert second["inline_keyboard"][0][0]["callback_data"] == "CANDIDATE COIN5USDT F1"
     assert detail["inline_keyboard"][-2][0]["callback_data"] == "FILTERED_LISTINGS 1"
+    assert fundamental_detail["inline_keyboard"][0][0]["callback_data"] == "CANDIDATE COIN5USDT F1"
+    assert social_detail["inline_keyboard"][0][0]["callback_data"] == "CANDIDATE COIN5USDT F1"
 
 
 def test_watch_status_reports_current_passed_candidate_without_readding():

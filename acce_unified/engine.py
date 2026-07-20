@@ -12,6 +12,7 @@ from typing import Any
 
 from .cex import rank_cex_tickers
 from .config import UnifiedConfig
+from .fundamentals import FundamentalMetricsProvider
 from .listings import partition_mexc_listings
 from .models import RadarSnapshot
 from .providers import MexcNewListingProvider, MexcPublicProvider
@@ -30,6 +31,7 @@ class UnifiedRadarEngine:
         cex_provider: Any | None = None,
         listing_provider: Any | None = None,
         social_provider: Any | None = None,
+        fundamental_provider: Any | None = None,
     ):
         self.config = config
         self.trade_universe = dict(trade_universe)
@@ -50,6 +52,13 @@ class UnifiedRadarEngine:
             cache_ttl_seconds=config.social_cache_ttl_seconds,
             max_assets=config.social_max_assets,
         )
+        self.fundamental_provider = fundamental_provider or FundamentalMetricsProvider(
+            demo_api_key=os.getenv("COINGECKO_DEMO_API_KEY", ""),
+            pro_api_key=os.getenv("COINGECKO_PRO_API_KEY", ""),
+            timeout=config.request_timeout_seconds,
+            cache_ttl_seconds=config.fundamental_cache_ttl_seconds,
+            max_assets=config.fundamental_max_assets,
+        )
 
     def set_watched_pairs(self, pairs: list[str] | tuple[str, ...] | set[str]) -> None:
         setter = getattr(self.listing_provider, "set_watched_pairs", None)
@@ -62,6 +71,7 @@ class UnifiedRadarEngine:
         listing_candidates = []
         listing_filtered_candidates = []
         social_candidates = []
+        fundamental_candidates = []
         errors: list[str] = []
         if self.config.cex_enabled:
             try:
@@ -77,6 +87,19 @@ class UnifiedRadarEngine:
         if self.config.listing_enabled:
             try:
                 listings = self.listing_provider.fetch_listings()
+                if self.config.fundamental_enabled:
+                    try:
+                        fundamental_by_pair = self.fundamental_provider.fetch_many(listings)
+                        listings = [
+                            replace(
+                                item,
+                                fundamental_data=fundamental_by_pair.get(item.pair, {}),
+                            )
+                            for item in listings
+                        ]
+                    except Exception as exc:
+                        errors.append(f"FUNDAMENTALS:{type(exc).__name__}")
+                        log.warning("Fundamental metrics radar failed: %s", exc)
                 if self.config.social_enabled:
                     try:
                         social_by_pair = self.social_provider.fetch_many(listings)
@@ -108,6 +131,19 @@ class UnifiedRadarEngine:
                     ),
                     reverse=True,
                 )
+                fundamental_candidates = sorted(
+                    (
+                        item
+                        for item in (*listing_candidates, *listing_filtered_candidates)
+                        if (item.metadata.get("fundamentals") or {}).get("status") == "READY"
+                    ),
+                    key=lambda item: (
+                        int((item.metadata.get("fundamentals") or {}).get("fundamental_score") or 0),
+                        int((item.metadata.get("fundamentals") or {}).get("coverage_pct") or 0),
+                        item.score,
+                    ),
+                    reverse=True,
+                )
             except Exception as exc:
                 errors.append(f"LISTING:{type(exc).__name__}")
                 log.warning("PhenomenonX MEXC listing radar failed: %s", exc)
@@ -118,6 +154,7 @@ class UnifiedRadarEngine:
             listing_candidates=tuple(listing_candidates),
             listing_filtered_candidates=tuple(listing_filtered_candidates),
             social_candidates=tuple(social_candidates),
+            fundamental_candidates=tuple(fundamental_candidates),
             errors=tuple(errors),
         )
 
@@ -217,6 +254,7 @@ def format_snapshot_brief(snapshot: RadarSnapshot | dict | None) -> str:
     cex = (data.get("cex_candidates") or [None])[0]
     listing = (data.get("listing_candidates") or [None])[0]
     filtered_count = len(data.get("listing_filtered_candidates") or [])
+    fundamental_count = len(data.get("fundamental_candidates") or [])
     errors = data.get("errors") or []
     error_text = f" | hata: {', '.join(errors)}" if errors else ""
     return (
@@ -224,6 +262,7 @@ def format_snapshot_brief(snapshot: RadarSnapshot | dict | None) -> str:
         f"PriceMonitorX {_candidate_line(cex)} | "
         f"PhenomenonX/MEXC Yeni {_candidate_line(listing)}"
         f" | filtrede {filtered_count}"
+        f" | temel veri {fundamental_count}"
         f" | trade yetkisi: YOK{error_text}"
     )
 
@@ -250,6 +289,29 @@ def _stage_label(stage: Any) -> str:
         "WEAK": "⚪ Zayıf",
         "CROWDED": "⛔ Geç kalınmış",
     }.get(str(stage or "").upper(), str(stage or "-"))
+
+
+def _fundamental_report_line(metadata: dict[str, Any]) -> str:
+    fundamentals = metadata.get("fundamentals") or {}
+    if fundamentals.get("status") != "READY":
+        status = str(fundamentals.get("status") or "DATA_PENDING").upper()
+        label = {
+            "AMBIGUOUS": "kimlik belirsiz",
+            "NOT_FOUND": "veri bulunamadı",
+            "PROVIDER_COOLDOWN": "sağlayıcı beklemede",
+            "PROVIDER_UNAVAILABLE": "sağlayıcı erişilemiyor",
+        }.get(status, "veri bekleniyor")
+        return f"   🧬 Temel: {label}"
+    circulation = fundamentals.get("circulation_pct")
+    circulation_text = (
+        f"%{float(circulation):.0f}" if circulation is not None else "?"
+    )
+    return (
+        f"   🧬 Temel {int(fundamentals.get('fundamental_score') or 0)}/100 | "
+        f"PD {_money(fundamentals.get('market_cap_usd'))} | "
+        f"FDV {_money(fundamentals.get('fully_diluted_valuation_usd'))} | "
+        f"dolaşım {circulation_text}"
+    )
 
 
 def format_listing_report(
@@ -299,6 +361,7 @@ def format_listing_report(
                 f"   5dk hacim ivmesi {acceleration:.1f}x | fiyat {price:g}",
             ]
         )
+        lines.append(_fundamental_report_line(metadata))
         if reasons:
             lines.append("   ✅ " + " · ".join(str(value) for value in reasons[:3]))
         if risks:
@@ -340,6 +403,7 @@ def format_filtered_listing_report(
                 f"   24s hacim {_money(metadata.get('quote_volume'))} | 5dk ivme {float(metadata.get('volume_acceleration') or 0):.1f}x",
             ]
         )
+        lines.append(_fundamental_report_line(metadata))
         if risks:
             lines.append("   ⚠️ " + " · ".join(str(value) for value in risks[:2]))
         lines.append("")

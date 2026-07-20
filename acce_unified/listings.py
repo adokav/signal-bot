@@ -13,6 +13,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import replace
 
+from .fundamentals import score_fundamental_snapshot
 from .models import MexcListing, RadarCandidate
 from .social import score_social_snapshot
 
@@ -188,6 +189,14 @@ def score_mexc_listing(
             + str(social.get("stage") or "UNKNOWN").lower()
         )
 
+    fundamentals = (
+        dict(item.fundamental_data)
+        if item.fundamental_data
+        else score_fundamental_snapshot(None)
+    )
+    if fundamentals.get("status") == "READY" and fundamentals.get("stage") == "HIGH_RISK":
+        risks.append("temel metriklerde yüksek risk")
+
     return RadarCandidate(
         source="PHENOMENONX_MEXC_NEW_LISTING",
         key=f"listing:{pair}",
@@ -213,6 +222,7 @@ def score_mexc_listing(
             "first_seen_at": item.first_seen_at,
             "manually_watched": item.manually_watched,
             "social": social,
+            "fundamentals": fundamentals,
         },
     )
 

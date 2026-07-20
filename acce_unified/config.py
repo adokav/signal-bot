@@ -98,6 +98,9 @@ class UnifiedConfig:
     social_gdelt_enabled: bool = True
     social_cache_ttl_seconds: int = 10 * 60
     social_max_assets: int = 6
+    fundamental_enabled: bool = True
+    fundamental_cache_ttl_seconds: int = 30 * 60
+    fundamental_max_assets: int = 20
     request_timeout_seconds: int = 15
 
     @classmethod
@@ -137,6 +140,14 @@ class UnifiedConfig:
             social_max_assets=min(
                 12,
                 _env_int("UNIFIED_SOCIAL_MAX_ASSETS", 6, 1),
+            ),
+            fundamental_enabled=_env_bool("UNIFIED_FUNDAMENTAL_RADAR_ENABLED", True),
+            fundamental_cache_ttl_seconds=_env_int(
+                "UNIFIED_FUNDAMENTAL_CACHE_TTL_SECONDS", 30 * 60, 300
+            ),
+            fundamental_max_assets=min(
+                50,
+                _env_int("UNIFIED_FUNDAMENTAL_MAX_ASSETS", 20, 1),
             ),
             request_timeout_seconds=_env_int("UNIFIED_REQUEST_TIMEOUT_SECONDS", 15, 3),
         )

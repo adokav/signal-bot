@@ -86,6 +86,7 @@ def test_engine_keeps_social_ranking_separate_from_market_score():
         cex_enabled=False,
         listing_enabled=True,
         social_enabled=True,
+        fundamental_enabled=False,
     )
     snapshot = UnifiedRadarEngine(
         config,
