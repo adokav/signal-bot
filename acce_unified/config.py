@@ -95,9 +95,17 @@ class UnifiedConfig:
     listing_candidate_file: str = "mexc_listing_candidates.json"
     listing_candidate_ttl_hours: int = 72
     social_enabled: bool = True
+    social_reddit_enabled: bool = True
     social_gdelt_enabled: bool = True
     social_cache_ttl_seconds: int = 10 * 60
     social_max_assets: int = 6
+    social_window_hours: int = 6
+    social_min_mentions: int = 4
+    social_min_unique_authors: int = 3
+    social_min_community_platforms: int = 1
+    social_min_sentiment: int = -10
+    social_alert_gate_required: bool = True
+    social_alert_cooldown_seconds: int = 6 * 60 * 60
     fundamental_enabled: bool = True
     fundamental_cache_ttl_seconds: int = 30 * 60
     fundamental_max_assets: int = 20
@@ -133,6 +141,7 @@ class UnifiedConfig:
                 _env_int("UNIFIED_LISTING_CANDIDATE_TTL_HOURS", 72, 1),
             ),
             social_enabled=_env_bool("UNIFIED_SOCIAL_RADAR_ENABLED", True),
+            social_reddit_enabled=_env_bool("UNIFIED_SOCIAL_REDDIT_ENABLED", True),
             social_gdelt_enabled=_env_bool("UNIFIED_SOCIAL_GDELT_ENABLED", True),
             social_cache_ttl_seconds=_env_int(
                 "UNIFIED_SOCIAL_CACHE_TTL_SECONDS", 10 * 60, 60
@@ -140,6 +149,28 @@ class UnifiedConfig:
             social_max_assets=min(
                 12,
                 _env_int("UNIFIED_SOCIAL_MAX_ASSETS", 6, 1),
+            ),
+            social_window_hours=min(
+                24,
+                _env_int("UNIFIED_SOCIAL_WINDOW_HOURS", 6, 1),
+            ),
+            social_min_mentions=_env_int("UNIFIED_SOCIAL_MIN_MENTIONS", 4, 1),
+            social_min_unique_authors=_env_int(
+                "UNIFIED_SOCIAL_MIN_UNIQUE_AUTHORS", 3, 1
+            ),
+            social_min_community_platforms=min(
+                2,
+                _env_int("UNIFIED_SOCIAL_MIN_PLATFORMS", 1, 1),
+            ),
+            social_min_sentiment=min(
+                100,
+                _env_int("UNIFIED_SOCIAL_MIN_SENTIMENT", -10, -100),
+            ),
+            social_alert_gate_required=_env_bool(
+                "UNIFIED_SOCIAL_ALERT_GATE_REQUIRED", True
+            ),
+            social_alert_cooldown_seconds=_env_int(
+                "UNIFIED_SOCIAL_ALERT_COOLDOWN_SECONDS", 6 * 60 * 60, 0
             ),
             fundamental_enabled=_env_bool("UNIFIED_FUNDAMENTAL_RADAR_ENABLED", True),
             fundamental_cache_ttl_seconds=_env_int(

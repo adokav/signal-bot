@@ -38,11 +38,22 @@ UNIFIED_LISTING_MAX_CANDIDATES=20
 UNIFIED_LISTING_SEEN_FILE=mexc_seen_symbols.json
 UNIFIED_LISTING_CANDIDATE_FILE=mexc_listing_candidates.json
 UNIFIED_SOCIAL_RADAR_ENABLED=true
+UNIFIED_SOCIAL_REDDIT_ENABLED=true
 UNIFIED_SOCIAL_GDELT_ENABLED=true
 UNIFIED_SOCIAL_CACHE_TTL_SECONDS=600
 UNIFIED_SOCIAL_MAX_ASSETS=6
-# Optional: enables X recent-search metrics; GDELT news works without it.
+UNIFIED_SOCIAL_WINDOW_HOURS=6
+UNIFIED_SOCIAL_MIN_MENTIONS=4
+UNIFIED_SOCIAL_MIN_UNIQUE_AUTHORS=3
+UNIFIED_SOCIAL_MIN_PLATFORMS=1
+UNIFIED_SOCIAL_MIN_SENTIMENT=-10
+UNIFIED_SOCIAL_ALERT_GATE_REQUIRED=true
+UNIFIED_SOCIAL_ALERT_COOLDOWN_SECONDS=21600
+# En az bir gerçek topluluk kaynağı gerekir. GDELT yalnız haber bağlamıdır.
 X_BEARER_TOKEN=
+REDDIT_CLIENT_ID=
+REDDIT_CLIENT_SECRET=
+REDDIT_USER_AGENT=server:adokav-signal-bot:v4.7 (by /u/adokav)
 UNIFIED_FUNDAMENTAL_RADAR_ENABLED=true
 UNIFIED_FUNDAMENTAL_CACHE_TTL_SECONDS=1800
 UNIFIED_FUNDAMENTAL_MAX_ASSETS=20
@@ -79,7 +90,18 @@ navigasyonu yeni mesaj göndermek yerine mevcut kontrol mesajını düzenler.
 Yeni adaylar 72 saat boyunca yeniden puanlanır; `/watch_add NOVA` ve
 `/watch_remove NOVA` butonların komut karşılıklarıdır.
 Takipteki aday filtreyi geçtiğinde veya `BUILDING/HOT` aşamasına yükseldiğinde
-bildirim üretilir. Bu akış işlem evrenini değiştirmez ve emir yetkisi vermez.
+bildirim, varsayılan olarak yalnız gerçek topluluk kanıtı `PASS` ise üretilir.
+En az dört görüş, üç benzersiz yazar ve bir topluluk platformu aranır. Yetersiz
+kanıt `WAIT`; kopya/eşgüdümlü ilgi, ağır olumsuzluk veya aşırı kalabalıklaşma
+`BLOCK`; topluluk kaynağı yokluğu `UNAVAILABLE` olur. Haber sayısı bu kapıyı
+açamaz. Aynı adaya tekrar alarm için varsayılan altı saat beklenir. Bu akış
+işlem evrenini değiştirmez ve emir yetkisi vermez.
+
+`📣 Topluluk Radarı` X ve/veya Reddit'teki görüşleri; görüş/yazar sayısı,
+ivme, boğa/ayı yönü, etkileşim, güvenilir yazar, kopya metin, yeni hesap
+yoğunluğu ve yazar yoğunlaşmasıyla değerlendirir. GDELT sonuçları ayrı bir
+`haber bağlamı` alanında tutulur. Bağlı topluluk kaynağı yokken bot artık
+`0/100 · Sessiz` puanı üretmez; eksikliği açıkça gösterir.
 
 `🧬 Temel Radar` CoinGecko'nun tek toplu sorgusundan piyasa değeri, FDV,
 dolaşımdaki/azami arz, global hacim/PD, ATH mesafesi ve MEXC hacim yoğunlaşması

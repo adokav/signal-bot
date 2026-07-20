@@ -47,10 +47,22 @@ class UnifiedRadarEngine:
         )
         self.social_provider = social_provider or SocialIntelligenceProvider(
             x_bearer_token=os.getenv("X_BEARER_TOKEN", ""),
+            reddit_client_id=os.getenv("REDDIT_CLIENT_ID", ""),
+            reddit_client_secret=os.getenv("REDDIT_CLIENT_SECRET", ""),
+            reddit_user_agent=os.getenv(
+                "REDDIT_USER_AGENT",
+                "server:adokav-signal-bot:v4.7 (by /u/adokav)",
+            ),
+            reddit_enabled=config.social_reddit_enabled,
             gdelt_enabled=config.social_gdelt_enabled,
             timeout=config.request_timeout_seconds,
             cache_ttl_seconds=config.social_cache_ttl_seconds,
             max_assets=config.social_max_assets,
+            window_hours=config.social_window_hours,
+            min_mentions=config.social_min_mentions,
+            min_unique_authors=config.social_min_unique_authors,
+            min_community_platforms=config.social_min_community_platforms,
+            min_sentiment=config.social_min_sentiment,
         )
         self.fundamental_provider = fundamental_provider or FundamentalMetricsProvider(
             demo_api_key=os.getenv("COINGECKO_DEMO_API_KEY", ""),
@@ -123,9 +135,21 @@ class UnifiedRadarEngine:
                     (
                         item
                         for item in (*listing_candidates, *listing_filtered_candidates)
-                        if int((item.metadata.get("social") or {}).get("coverage_pct") or 0) > 0
+                        if (
+                            int(
+                                (item.metadata.get("social") or {}).get(
+                                    "mentions_window"
+                                )
+                                or 0
+                            )
+                            > 0
+                            or (item.metadata.get("social") or {}).get("status")
+                            == "READY"
+                        )
                     ),
                     key=lambda item: (
+                        (item.metadata.get("social") or {}).get("community_gate")
+                        == "PASS",
                         int((item.metadata.get("social") or {}).get("viral_potential") or 0),
                         int((item.metadata.get("social") or {}).get("attention_score") or 0),
                     ),

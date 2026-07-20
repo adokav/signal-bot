@@ -66,10 +66,21 @@ UNIFIED_LISTING_MAX_CANDIDATES=20
 UNIFIED_LISTING_SEEN_FILE=mexc_seen_symbols.json
 UNIFIED_LISTING_CANDIDATE_FILE=mexc_listing_candidates.json
 UNIFIED_SOCIAL_RADAR_ENABLED=true
+UNIFIED_SOCIAL_REDDIT_ENABLED=true
 UNIFIED_SOCIAL_GDELT_ENABLED=true
 UNIFIED_SOCIAL_CACHE_TTL_SECONDS=600
 UNIFIED_SOCIAL_MAX_ASSETS=6
+UNIFIED_SOCIAL_WINDOW_HOURS=6
+UNIFIED_SOCIAL_MIN_MENTIONS=4
+UNIFIED_SOCIAL_MIN_UNIQUE_AUTHORS=3
+UNIFIED_SOCIAL_MIN_PLATFORMS=1
+UNIFIED_SOCIAL_MIN_SENTIMENT=-10
+UNIFIED_SOCIAL_ALERT_GATE_REQUIRED=true
+UNIFIED_SOCIAL_ALERT_COOLDOWN_SECONDS=21600
 X_BEARER_TOKEN=
+REDDIT_CLIENT_ID=
+REDDIT_CLIENT_SECRET=
+REDDIT_USER_AGENT=server:adokav-signal-bot:v4.7 (by /u/adokav)
 UNIFIED_FUNDAMENTAL_RADAR_ENABLED=true
 UNIFIED_FUNDAMENTAL_CACHE_TTL_SECONDS=1800
 UNIFIED_FUNDAMENTAL_MAX_ASSETS=20
@@ -108,6 +119,29 @@ başlık + sembol tek bir kimliği doğrulamıyorsa `AMBIGUOUS`; sağlayıcı ve
 yoksa `NOT_FOUND/DATA_PENDING` döner ve puan uydurmaz. 429 yanıtı tüm sağlayıcı
 için cooldown başlatır. Bu puan fırsat filtresine, `TRADE_UNIVERSE` değerine ve
 emir kararına bağlanmaz.
+
+## Topluluk görüşü kapısı
+
+Sosyal katman iki farklı kanıt türünü birbirine karıştırmaz:
+
+- **Topluluk:** X ve Reddit gönderileri; görüş, benzersiz yazar, yön,
+  etkileşim ve organiklik ölçümüne girer.
+- **Haber:** GDELT başlıkları; anlatı ve kaynak bağlamı sağlar fakat topluluk
+  görüşü, sessizlik veya talep teyidi sayılmaz.
+
+Kapı durumları şunlardır:
+
+- `PASS`: asgari görüş/yazar/platform kanıtı var, ilgi organik ve aşama
+  `SEED`, `EMERGING` veya `CONFIRMED`;
+- `WAIT`: sağlayıcı çalışıyor fakat veri eşiği veya ivme henüz yeterli değil;
+- `BLOCK`: manipülasyon, olumsuz olay, aşırı kalabalıklaşma veya duygu eşiği
+  ihlali;
+- `UNAVAILABLE`: X/Reddit bağlı değil ya da bağlı sağlayıcıya ulaşılamıyor.
+
+Varsayılan `UNIFIED_SOCIAL_ALERT_GATE_REQUIRED=true` iken takip alarmı yalnız
+`PASS` ile açılır. Kararlı olay imzası ve altı saatlik cooldown aynı adayın
+puan dalgalanmasıyla tekrar tekrar bildirilmesini engeller. Bu kapı yalnız
+bildirim filtresidir; otomatik işlem veya sermaye evrenine ekleme yetkisi yoktur.
 
 Yeni adaylar 72 saatlik katalogda yeniden puanlanır. Telegram listesi yalnız
 aday seçtirir; kalıcı takip eylemi aday detayında açılır ve süre sınırını

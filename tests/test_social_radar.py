@@ -56,8 +56,78 @@ def test_missing_social_data_is_pending_not_negative():
     signal = score_social_snapshot(None)
 
     assert signal["stage"] == "DATA_PENDING"
+    assert signal["status"] == "COMMUNITY_SOURCE_MISSING"
+    assert signal["community_gate"] == "UNAVAILABLE"
     assert signal["coverage_pct"] == 0
+    assert signal["viral_potential"] is None
     assert signal["can_authorize_trade"] is False
+
+
+def test_news_only_is_context_not_a_community_opinion_score():
+    signal = score_social_snapshot(
+        {
+            "news_count": 8,
+            "news_platforms": ["NEWS"],
+            "news_coverage_pct": 25,
+            "coverage_pct": 25,
+            "sources": [{"provider": "GDELT", "source_type": "NEWS"}],
+        }
+    )
+
+    assert signal["status"] == "COMMUNITY_SOURCE_MISSING"
+    assert signal["community_gate"] == "UNAVAILABLE"
+    assert signal["viral_potential"] is None
+    assert signal["news_count"] == 8
+
+
+def test_sparse_community_evidence_waits_instead_of_becoming_quiet():
+    signal = score_social_snapshot(
+        {
+            "configured_community_platforms": ["X"],
+            "reached_community_platforms": ["X"],
+            "community_platforms": ["X"],
+            "mentions_window": 2,
+            "unique_authors_window": 2,
+            "community_texts": ["NOVA looks promising", "NOVA roadmap"],
+        }
+    )
+
+    assert signal["status"] == "INSUFFICIENT_DATA"
+    assert signal["stage"] == "INSUFFICIENT_DATA"
+    assert signal["community_gate"] == "WAIT"
+    assert signal["viral_potential"] is None
+
+
+def test_organic_positive_opinions_can_pass_the_alert_gate():
+    signal = score_social_snapshot(
+        {
+            "configured_community_platforms": ["X"],
+            "reached_community_platforms": ["X"],
+            "community_platforms": ["X"],
+            "mentions_window": 12,
+            "previous_mentions_window": 1,
+            "unique_authors_window": 10,
+            "previous_unique_authors_window": 1,
+            "engagements_window": 300,
+            "credible_authors_window": 3,
+            "active_buckets": 5,
+            "duplicate_ratio": 0.0,
+            "new_account_ratio": 0.0,
+            "author_concentration": 0.1,
+            "community_texts": [
+                "NOVA has strong utility and community",
+                "NOVA roadmap and launch look promising",
+                "NOVA mainnet adoption is growing",
+                "NOVA partnership looks bullish",
+            ],
+        },
+        volume_acceleration=2.0,
+    )
+
+    assert signal["status"] == "READY"
+    assert signal["community_gate"] == "PASS"
+    assert signal["viral_potential"] >= 55
+    assert signal["bullish_count"] == 4
 
 
 def test_duplicate_burst_is_marked_suspicious_even_when_mentions_rise():
@@ -77,6 +147,7 @@ def test_duplicate_burst_is_marked_suspicious_even_when_mentions_rise():
     )
 
     assert signal["stage"] == "SUSPICIOUS"
+    assert signal["community_gate"] == "BLOCK"
     assert signal["manipulation_risk"] >= 60
     assert signal["viral_potential"] < signal["attention_score"]
 
@@ -99,5 +170,6 @@ def test_engine_keeps_social_ranking_separate_from_market_score():
     candidate = snapshot.social_candidates[0]
     assert candidate.symbol == "NOVAUSDT"
     assert candidate.metadata["social"]["stage"] in {"EMERGING", "CONFIRMED"}
+    assert candidate.metadata["social"]["community_gate"] == "PASS"
     assert candidate.metadata["social"]["can_authorize_trade"] is False
     assert candidate.execution_eligible is False
