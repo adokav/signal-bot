@@ -296,14 +296,22 @@ def test_social_radar_exposes_viral_authenticity_and_sources_without_trade_actio
             "social": {
                 "status": "READY",
                 "stage": "EMERGING",
+                "community_gate": "PASS",
                 "viral_potential": 78,
                 "attention_score": 86,
                 "sentiment_score": 34,
                 "manipulation_risk": 12,
                 "crowding_risk": 18,
-                "mentions_1h": 42,
-                "unique_authors_1h": 31,
+                "mentions_window": 42,
+                "unique_authors_window": 31,
+                "window_hours": 6,
+                "bullish_pct": 74,
+                "bearish_pct": 26,
+                "neutral_count": 4,
                 "coverage_pct": 90,
+                "community_coverage_pct": 60,
+                "news_coverage_pct": 30,
+                "community_platforms": ["X"],
                 "platforms": ["NEWS", "X"],
                 "reasons": ["1s mention ivmesi 4.0x", "2 bağımsız kanal"],
                 "sources": [{"title": "Nova launch", "url": "https://example.com/nova"}],
@@ -327,8 +335,10 @@ def test_social_radar_exposes_viral_authenticity_and_sources_without_trade_actio
     ]
 
     assert "NOVA — 78/100" in radar_text
+    assert "✅ PASS" in radar_text
     assert "Manipülasyon 12" in radar_text
     assert "Fenomen potansiyeli: 78/100" in detail_text
+    assert "Boğa/Ayı/Nötr: %74/%26/4 görüş" in detail_text
     assert keyboard["inline_keyboard"][0][0]["url"] == "https://example.com/nova"
     assert not any("BUY" in value or "SELL" in value or "LIVE" in value for value in callbacks)
 
@@ -493,6 +503,68 @@ def test_watched_candidate_alerts_once_when_it_clears_the_filter(monkeypatch):
                 "symbol": "NOVAUSDT",
                 "score": 48,
                 "stage": "WEAK",
+                "metadata": {
+                    "filter_status": "FILTERED",
+                    "social": {
+                        "status": "INSUFFICIENT_DATA",
+                        "stage": "INSUFFICIENT_DATA",
+                        "community_gate": "WAIT",
+                    },
+                },
+            },
+        }
+    }
+    sent = []
+    monkeypatch.setattr(bot, "now_ts", lambda: 1_700_000_100)
+    monkeypatch.setattr(
+        bot,
+        "send_message",
+        lambda text, **kwargs: sent.append((text, kwargs)) or True,
+    )
+    snapshot = {
+        "generated_at": 1_700_000_100,
+        "listing_candidates": [{
+            "symbol": "NOVAUSDT",
+            "score": 72,
+            "stage": "BUILDING",
+            "metadata": {
+                "filter_status": "PASSED",
+                "change_pct": 8.0,
+                "volume_acceleration": 2.2,
+                "social": {
+                    "status": "READY",
+                    "stage": "EMERGING",
+                    "community_gate": "PASS",
+                    "viral_potential": 68,
+                    "window_hours": 6,
+                    "mentions_window": 8,
+                    "unique_authors_window": 6,
+                    "bullish_pct": 75,
+                    "bearish_pct": 25,
+                },
+            },
+        }],
+        "listing_filtered_candidates": [],
+    }
+
+    bot._sync_mexc_watchlist_state(snapshot, state)
+    bot._sync_mexc_watchlist_state(snapshot, state)
+
+    assert len(sent) == 1
+    assert "TOPLULUK TEYİTLİ" in sent[0][0]
+    assert "6 saat görüş/yazar: 8/6" in sent[0][0]
+    assert sent[0][1]["keyboard"] is False
+
+
+def test_watched_candidate_does_not_alert_without_community_confirmation(monkeypatch):
+    state = _MenuState()
+    state.meta["mexc_manual_watchlist"] = {
+        "NOVAUSDT": {
+            "added_at": 1,
+            "last_candidate": {
+                "symbol": "NOVAUSDT",
+                "score": 48,
+                "stage": "WEAK",
                 "metadata": {"filter_status": "FILTERED"},
             },
         }
@@ -514,14 +586,80 @@ def test_watched_candidate_alerts_once_when_it_clears_the_filter(monkeypatch):
                 "filter_status": "PASSED",
                 "change_pct": 8.0,
                 "volume_acceleration": 2.2,
+                "social": {
+                    "status": "COMMUNITY_SOURCE_MISSING",
+                    "stage": "DATA_PENDING",
+                    "community_gate": "UNAVAILABLE",
+                    "viral_potential": None,
+                },
             },
         }],
         "listing_filtered_candidates": [],
     }
 
     bot._sync_mexc_watchlist_state(snapshot, state)
-    bot._sync_mexc_watchlist_state(snapshot, state)
 
+    assert sent == []
+    entry = state.meta["mexc_manual_watchlist"]["NOVAUSDT"]
+    assert entry.get("last_alert_signature") is None
+
+
+def test_community_reconfirmation_respects_cooldown_then_can_alert_again(monkeypatch):
+    state = _MenuState()
+    state.meta["mexc_manual_watchlist"] = {
+        "NOVAUSDT": {
+            "added_at": 1,
+            "last_alert_at": 1_700_000_000,
+            "last_alert_signature": "old",
+            "last_candidate": {
+                "symbol": "NOVAUSDT",
+                "score": 70,
+                "stage": "BUILDING",
+                "metadata": {
+                    "filter_status": "PASSED",
+                    "social": {"community_gate": "WAIT"},
+                },
+            },
+        }
+    }
+    sent = []
+    monkeypatch.setattr(bot, "now_ts", lambda: 1_700_030_000)
+    monkeypatch.setattr(
+        bot,
+        "send_message",
+        lambda text, **kwargs: sent.append(text) or True,
+    )
+
+    def snapshot(generated_at, gate):
+        return {
+            "generated_at": generated_at,
+            "listing_candidates": [{
+                "symbol": "NOVAUSDT",
+                "score": 72,
+                "stage": "BUILDING",
+                "metadata": {
+                    "filter_status": "PASSED",
+                    "change_pct": 4.0,
+                    "volume_acceleration": 1.8,
+                    "social": {
+                        "status": "READY" if gate == "PASS" else "INSUFFICIENT_DATA",
+                        "stage": "EMERGING" if gate == "PASS" else "INSUFFICIENT_DATA",
+                        "community_gate": gate,
+                        "viral_potential": 64 if gate == "PASS" else None,
+                        "mentions_window": 7,
+                        "unique_authors_window": 5,
+                    },
+                },
+            }],
+            "listing_filtered_candidates": [],
+        }
+
+    # Reconfirmation inside six hours is deliberately muted.
+    bot._sync_mexc_watchlist_state(snapshot(1_700_000_100, "PASS"), state)
+    assert sent == []
+    bot._sync_mexc_watchlist_state(snapshot(1_700_000_200, "WAIT"), state)
+
+    # A fresh WAIT -> PASS transition after cooldown is eligible again.
+    bot._sync_mexc_watchlist_state(snapshot(1_700_022_000, "PASS"), state)
     assert len(sent) == 1
-    assert "ISINIYOR" in sent[0][0]
-    assert sent[0][1]["keyboard"] is False
+    assert "TOPLULUK TEYİTLİ" in sent[0]

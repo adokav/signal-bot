@@ -54,7 +54,7 @@ from acce_unified import (
 )
 from acce_unified.validation import ValidationPolicy, evaluate_promotion
 
-__version__ = "4.6.0-fundamental-metrics-radar"
+__version__ = "4.7.0-community-opinion-gate"
 
 # ============================================================
 # LOGGING
@@ -10928,6 +10928,10 @@ def _sync_mexc_watchlist_state(snapshot: dict, state_mgr: StateManager) -> None:
     by_pair = _mexc_candidate_by_pair(snapshot)
     generated_at = int(snapshot.get("generated_at") or now_ts())
     alerts: list[tuple[str, dict]] = []
+    alert_gate_required = (
+        UNIFIED_CONFIG.social_enabled
+        and UNIFIED_CONFIG.social_alert_gate_required
+    )
     for pair, entry in watchlist.items():
         current = by_pair.get(pair)
         if not current:
@@ -10941,25 +10945,35 @@ def _sync_mexc_watchlist_state(snapshot: dict, state_mgr: StateManager) -> None:
         new_stage = str(current.get("stage") or "")
         old_social = (old_metadata or {}).get("social") or {}
         new_social = new_metadata.get("social") or {}
-        old_social_stage = str(old_social.get("stage") or "")
-        new_social_stage = str(new_social.get("stage") or "")
+        old_social_stage = str(old_social.get("stage") or "").upper()
+        new_social_stage = str(new_social.get("stage") or "").upper()
+        old_social_gate = str(old_social.get("community_gate") or "").upper()
+        new_social_gate = str(new_social.get("community_gate") or "").upper()
         crossed_filter = bool(previous) and old_status == "FILTERED" and new_status == "PASSED"
         warmed_up = bool(previous) and old_stage not in {"BUILDING", "HOT"} and new_stage in {"BUILDING", "HOT"}
-        social_emerged = (
+        social_validated = (
             bool(previous)
-            and old_social_stage not in {"EMERGING", "CONFIRMED"}
-            and new_social_stage in {"EMERGING", "CONFIRMED"}
+            and old_social_gate != "PASS"
+            and new_social_gate == "PASS"
         )
         signature = (
-            f"{generated_at}:{new_stage}:{current.get('score')}:"
-            f"{new_status}:{new_social_stage}:"
-            f"{new_social.get('viral_potential', 0)}"
+            f"{new_status}:{new_stage}:{new_social_gate}:{new_social_stage}:"
+            f"filter={int(crossed_filter)}:warm={int(warmed_up)}:"
+            f"community={int(social_validated)}"
+        )
+        gate_allows_alert = not alert_gate_required or new_social_gate == "PASS"
+        last_alert_at = int(entry.get("last_alert_at") or 0)
+        cooldown_elapsed = (
+            generated_at - last_alert_at
+            >= UNIFIED_CONFIG.social_alert_cooldown_seconds
         )
         if (
-            (crossed_filter or warmed_up or social_emerged)
-            and entry.get("last_alert_signature") != signature
+            (crossed_filter or warmed_up or social_validated)
+            and gate_allows_alert
+            and cooldown_elapsed
         ):
             entry["last_alert_signature"] = signature
+            entry["last_alert_at"] = generated_at
             alerts.append((pair, current))
         entry["last_candidate"] = current
         entry["last_seen_at"] = generated_at
@@ -10970,13 +10984,24 @@ def _sync_mexc_watchlist_state(snapshot: dict, state_mgr: StateManager) -> None:
         metadata = current.get("metadata") or {}
         social = metadata.get("social") or {}
         social_line = ""
-        if social and social.get("status") != "DATA_PENDING":
+        if social.get("status") == "READY" and social.get("community_gate") == "PASS":
+            bullish = int(social.get("bullish_pct") or 0)
+            bearish = int(social.get("bearish_pct") or 0)
             social_line = (
-                f"Sosyal: {int(social.get('viral_potential') or 0)}/100 · "
+                f"Topluluk: ✅ PASS · {int(social.get('viral_potential') or 0)}/100 · "
                 f"{_friendly_social_stage(social.get('stage'))}\n"
+                f"{int(social.get('window_hours') or 6)} saat görüş/yazar: "
+                f"{int(social.get('mentions_window') or 0)}/"
+                f"{int(social.get('unique_authors_window') or 0)} · "
+                f"Boğa/Ayı %{bullish}/%{bearish}\n"
             )
+        title = (
+            "🔥 TOPLULUK TEYİTLİ MEXC ADAYI"
+            if alert_gate_required
+            else "🔥 MEXC TAKİP ADAYI ISINIYOR"
+        )
         send_message(
-            f"🔥 MEXC TAKİP ADAYI ISINIYOR\n\n"
+            f"{title}\n\n"
             f"{pair} — {int(current.get('score') or 0)}/100 · {_friendly_listing_stage(current.get('stage'))}\n"
             f"24s değişim: %{float(metadata.get('change_pct') or 0):+.1f}\n"
             f"5dk hacim ivmesi: {float(metadata.get('volume_acceleration') or 0):.1f}x\n\n"
@@ -11595,6 +11620,7 @@ def _fundamental_detail_keyboard(
 def _friendly_social_stage(value: Any) -> str:
     return {
         "DATA_PENDING": "⚪ Veri bekliyor",
+        "INSUFFICIENT_DATA": "🟡 Kanıt yetersiz",
         "QUIET": "⚪ Sessiz",
         "SEED": "🌱 Tohum",
         "EMERGING": "🚀 Yükseliyor",
@@ -11603,6 +11629,25 @@ def _friendly_social_stage(value: Any) -> str:
         "SUSPICIOUS": "🕵️ Şüpheli",
         "NEGATIVE_EVENT": "🔻 Olumsuz olay",
     }.get(str(value or "").upper(), str(value or "-"))
+
+
+def _friendly_social_status(value: Any) -> str:
+    return {
+        "READY": "ölçüm hazır",
+        "INSUFFICIENT_DATA": "topluluk kanıtı yetersiz",
+        "COMMUNITY_SOURCE_MISSING": "topluluk kaynağı bağlı değil",
+        "PROVIDER_UNAVAILABLE": "topluluk sağlayıcısına ulaşılamıyor",
+        "DATA_PENDING": "veri bekleniyor",
+    }.get(str(value or "").upper(), str(value or "veri bekleniyor"))
+
+
+def _friendly_community_gate(value: Any) -> str:
+    return {
+        "PASS": "✅ PASS",
+        "WAIT": "🟡 WAIT",
+        "BLOCK": "⛔ BLOCK",
+        "UNAVAILABLE": "⚪ UNAVAILABLE",
+    }.get(str(value or "").upper(), "⚪ UNAVAILABLE")
 
 
 def _social_radar_rows(snapshot: Any) -> list[dict]:
@@ -11617,30 +11662,44 @@ def _format_social_radar(snapshot: Any, *, limit: int = 8) -> str:
     rows = _social_radar_rows(snapshot)
     if not rows:
         return (
-            "📣 SOSYAL RADAR\n\n"
-            "Henüz doğrulanmış sosyal veri yok. GDELT haber taraması varsayılan "
-            "olarak çalışır; X verisi için Render'a X_BEARER_TOKEN eklenebilir."
+            "📣 TOPLULUK RADARI\n\n"
+            "Henüz gerçek topluluk görüşü bulunamadı. Haberler yalnız bağlamdır; "
+            "topluluk teyidi sayılmaz. Render'da X_BEARER_TOKEN veya Reddit "
+            "OAuth bilgileri bağlandığında görüş/yazar filtresi çalışır."
         )
     lines = [
-        "📣 SOSYAL RADAR",
-        "İlgi yönünü, organikliği ve kalabalıklaşmayı ayrı ölçer.",
+        "📣 TOPLULUK RADARI",
+        "Görüş yönünü, organikliği ve kalabalıklaşmayı filtreler; haber ayrıdır.",
         "",
     ]
     for index, row in enumerate(rows[:limit], 1):
         social = (row.get("metadata") or {}).get("social") or {}
-        lines.extend([
-            f"{index}. {str(row.get('symbol') or '?').removesuffix('USDT')} — "
-            f"{int(social.get('viral_potential') or 0)}/100 · "
-            f"{_friendly_social_stage(social.get('stage'))}",
-            f"   Duygu {int(social.get('sentiment_score') or 0):+d} · "
-            f"Manipülasyon {int(social.get('manipulation_risk') or 0)} · "
-            f"Crowding {int(social.get('crowding_risk') or 0)}",
-        ])
+        symbol = str(row.get("symbol") or "?").removesuffix("USDT")
+        gate = _friendly_community_gate(social.get("community_gate"))
+        if social.get("status") == "READY":
+            lines.extend([
+                f"{index}. {symbol} — {int(social.get('viral_potential') or 0)}/100 · "
+                f"{_friendly_social_stage(social.get('stage'))} · {gate}",
+                f"   Görüş/Yazar {int(social.get('mentions_window') or 0)}/"
+                f"{int(social.get('unique_authors_window') or 0)} · "
+                f"Boğa/Ayı %{int(social.get('bullish_pct') or 0)}/"
+                f"%{int(social.get('bearish_pct') or 0)}",
+                f"   Duygu {int(social.get('sentiment_score') or 0):+d} · "
+                f"Manipülasyon {int(social.get('manipulation_risk') or 0)} · "
+                f"Kalabalık {int(social.get('crowding_risk') or 0)}",
+            ])
+        else:
+            lines.extend([
+                f"{index}. {symbol} — {_friendly_social_stage(social.get('stage'))} · {gate}",
+                f"   Görüş/Yazar {int(social.get('mentions_window') or 0)}/"
+                f"{int(social.get('unique_authors_window') or 0)} · "
+                f"{_friendly_social_status(social.get('status'))}",
+            ])
         reasons = social.get("reasons") or []
         if reasons:
             lines.append("   " + " · ".join(str(value) for value in reasons[:2]))
         lines.append("")
-    lines.append("Sosyal skor tek başına işlem veya otomatik alım yetkisi vermez.")
+    lines.append("PASS yalnız fırsat alarmını açar; işlem veya otomatik alım yetkisi vermez.")
     return "\n".join(lines)
 
 
@@ -11656,8 +11715,13 @@ def _social_radar_keyboard(snapshot: Any, state_mgr: StateManager) -> dict:
             "CONFIRMED": "🔥", "EMERGING": "🚀", "SEED": "🌱",
             "SUSPICIOUS": "🕵️", "CROWDED": "⛔", "NEGATIVE_EVENT": "🔻",
         }.get(str(social.get("stage") or "").upper(), "⚪")
+        score = (
+            f"{int(social.get('viral_potential') or 0)}/100"
+            if social.get("status") == "READY"
+            else "kanıt bekliyor"
+        )
         rows.append([{
-            "text": f"{mark} {pair.removesuffix('USDT')} · {int(social.get('viral_potential') or 0)}/100",
+            "text": f"{mark} {pair.removesuffix('USDT')} · {score}",
             "callback_data": f"SOCIAL_DETAIL {pair} S",
         }])
     rows.extend([
@@ -11675,20 +11739,60 @@ def _social_detail_text(value: Any, state_mgr: StateManager) -> str:
         state_mgr.get_meta("unified_radar_snapshot")
     ).get(pair) or {}
     social = (candidate.get("metadata") or {}).get("social") or {}
-    if not social or social.get("status") == "DATA_PENDING":
-        return f"📣 {pair}\n\nSosyal veri henüz yeterli değil; aday veri bekliyor."
-    platforms = ", ".join(social.get("platforms") or []) or "-"
+    status = str(social.get("status") or "DATA_PENDING").upper()
+    if status != "READY":
+        configured = ", ".join(social.get("configured_community_platforms") or []) or "-"
+        reached = ", ".join(social.get("reached_community_platforms") or []) or "-"
+        reasons = social.get("gate_reasons") or social.get("reasons") or []
+        lines = [
+            f"📣 {pair.removesuffix('USDT')} TOPLULUK ANALİZİ",
+            "",
+            f"Durum: {_friendly_social_status(status)}",
+            f"Topluluk kapısı: {_friendly_community_gate(social.get('community_gate'))}",
+            f"{int(social.get('window_hours') or 6)} saat görüş/yazar: "
+            f"{int(social.get('mentions_window') or 0)}/"
+            f"{int(social.get('unique_authors_window') or 0)}",
+            f"Bağlı/ulaşılan: {configured} / {reached}",
+        ]
+        if reasons:
+            lines.extend(["", *[f"• {reason}" for reason in reasons[:3]]])
+        if status == "COMMUNITY_SOURCE_MISSING":
+            lines.extend([
+                "",
+                "Render Environment bölümüne X_BEARER_TOKEN veya "
+                "REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET eklenmeli.",
+            ])
+        lines.extend([
+            "",
+            "Haber bulunması bu kapıyı açmaz ve eksik veri 0 puan sayılmaz.",
+        ])
+        return "\n".join(lines)
+    community_platforms = ", ".join(social.get("community_platforms") or []) or "-"
+    news_platforms = ", ".join(
+        platform
+        for platform in (social.get("platforms") or [])
+        if platform not in (social.get("community_platforms") or [])
+    ) or "-"
     lines = [
-        f"📣 {pair.removesuffix('USDT')} SOSYAL ANALİZ",
+        f"📣 {pair.removesuffix('USDT')} TOPLULUK ANALİZİ",
         "",
         f"Aşama: {_friendly_social_stage(social.get('stage'))}",
+        f"Topluluk kapısı: {_friendly_community_gate(social.get('community_gate'))}",
         f"Fenomen potansiyeli: {int(social.get('viral_potential') or 0)}/100",
         f"Ham ilgi: {int(social.get('attention_score') or 0)}/100",
         f"Duygu: {int(social.get('sentiment_score') or 0):+d}",
+        f"Boğa/Ayı/Nötr: %{int(social.get('bullish_pct') or 0)}/"
+        f"%{int(social.get('bearish_pct') or 0)}/"
+        f"{int(social.get('neutral_count') or 0)} görüş",
         f"Manipülasyon riski: {int(social.get('manipulation_risk') or 0)}/100",
         f"Kalabalıklaşma: {int(social.get('crowding_risk') or 0)}/100",
-        f"1s mention/yazar: {int(social.get('mentions_1h') or 0)}/{int(social.get('unique_authors_1h') or 0)}",
-        f"Kanallar: {platforms} · kapsama %{int(social.get('coverage_pct') or 0)}",
+        f"{int(social.get('window_hours') or 6)} saat görüş/yazar: "
+        f"{int(social.get('mentions_window') or 0)}/"
+        f"{int(social.get('unique_authors_window') or 0)}",
+        f"Topluluk: {community_platforms} · kapsama "
+        f"%{int(social.get('community_coverage_pct') or 0)}",
+        f"Haber bağlamı: {news_platforms} · kapsama "
+        f"%{int(social.get('news_coverage_pct') or 0)}",
     ]
     if social.get("narrative"):
         lines.append(f"Narrative: {social['narrative']}")
@@ -11719,7 +11823,8 @@ def _social_detail_keyboard(
         url = str(source.get("url") or "")
         if url.startswith("https://"):
             title = str(source.get("title") or source.get("provider") or "Kaynak")
-            rows.append([{"text": f"📰 {title[:42]}", "url": url}])
+            icon = "🗣" if source.get("source_type") == "COMMUNITY" else "📰"
+            rows.append([{"text": f"{icon} {title[:42]}", "url": url}])
     if pair:
         safe_origin = _candidate_origin_command(origin)
         origin_page = _candidate_origin_page(origin)
@@ -11780,14 +11885,23 @@ def _mexc_candidate_detail_text(value: Any, state_mgr: StateManager) -> str:
     elif fundamentals:
         lines.append("\nTemel veri: ⚪ kimlik/veri teyidi bekleniyor")
     social = metadata.get("social") or {}
-    if social and social.get("status") != "DATA_PENDING":
+    if social.get("status") == "READY":
         lines.extend([
             "",
-            f"Sosyal: {int(social.get('viral_potential') or 0)}/100 · "
+            f"Topluluk: {_friendly_community_gate(social.get('community_gate'))} · "
+            f"{int(social.get('viral_potential') or 0)}/100 · "
             f"{_friendly_social_stage(social.get('stage'))}",
-            f"Duygu {int(social.get('sentiment_score') or 0):+d} · "
-            f"Manipülasyon {int(social.get('manipulation_risk') or 0)} · "
-            f"Crowding {int(social.get('crowding_risk') or 0)}",
+            f"Görüş/Yazar {int(social.get('mentions_window') or 0)}/"
+            f"{int(social.get('unique_authors_window') or 0)} · "
+            f"Boğa/Ayı %{int(social.get('bullish_pct') or 0)}/"
+            f"%{int(social.get('bearish_pct') or 0)}",
+        ])
+    elif social:
+        lines.extend([
+            "",
+            f"Topluluk: {_friendly_community_gate(social.get('community_gate'))} · "
+            f"{_friendly_social_status(social.get('status'))}",
+            "Eksik veri 0/100 kabul edilmez; haber topluluk yerine geçmez.",
         ])
     filter_reasons = metadata.get("filter_reasons") or []
     if filter_reasons:
@@ -11821,7 +11935,7 @@ def _candidate_detail_keyboard(
                 "callback_data": f"FUND_DETAIL {pair} {origin_code}",
             }])
         social = (current.get("metadata") or {}).get("social") or {}
-        if social and social.get("status") != "DATA_PENDING":
+        if social:
             rows.append([{
                 "text": "📣 Sosyal analizi aç",
                 "callback_data": f"SOCIAL_DETAIL {pair} {origin_code}",
