@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any
 
 from .cex import rank_cex_tickers
@@ -13,6 +15,7 @@ from .config import UnifiedConfig
 from .listings import partition_mexc_listings
 from .models import RadarSnapshot
 from .providers import MexcNewListingProvider, MexcPublicProvider
+from .social import SocialIntelligenceProvider
 
 
 log = logging.getLogger(__name__)
@@ -26,6 +29,7 @@ class UnifiedRadarEngine:
         *,
         cex_provider: Any | None = None,
         listing_provider: Any | None = None,
+        social_provider: Any | None = None,
     ):
         self.config = config
         self.trade_universe = dict(trade_universe)
@@ -39,6 +43,13 @@ class UnifiedRadarEngine:
             candidate_ttl_hours=config.listing_candidate_ttl_hours,
             max_candidates=config.listing_max_candidates,
         )
+        self.social_provider = social_provider or SocialIntelligenceProvider(
+            x_bearer_token=os.getenv("X_BEARER_TOKEN", ""),
+            gdelt_enabled=config.social_gdelt_enabled,
+            timeout=config.request_timeout_seconds,
+            cache_ttl_seconds=config.social_cache_ttl_seconds,
+            max_assets=config.social_max_assets,
+        )
 
     def set_watched_pairs(self, pairs: list[str] | tuple[str, ...] | set[str]) -> None:
         setter = getattr(self.listing_provider, "set_watched_pairs", None)
@@ -50,6 +61,7 @@ class UnifiedRadarEngine:
         cex_candidates = []
         listing_candidates = []
         listing_filtered_candidates = []
+        social_candidates = []
         errors: list[str] = []
         if self.config.cex_enabled:
             try:
@@ -64,11 +76,37 @@ class UnifiedRadarEngine:
                 log.warning("Unified CEX radar failed: %s", exc)
         if self.config.listing_enabled:
             try:
+                listings = self.listing_provider.fetch_listings()
+                if self.config.social_enabled:
+                    try:
+                        social_by_pair = self.social_provider.fetch_many(listings)
+                        listings = [
+                            replace(
+                                item,
+                                social_data=social_by_pair.get(item.pair, {}),
+                            )
+                            for item in listings
+                        ]
+                    except Exception as exc:
+                        errors.append(f"SOCIAL:{type(exc).__name__}")
+                        log.warning("Social intelligence radar failed: %s", exc)
                 listing_candidates, listing_filtered_candidates = partition_mexc_listings(
-                    self.listing_provider.fetch_listings(),
+                    listings,
                     trade_universe=self.trade_universe,
                     top_n=self.config.listing_top_n,
                     min_score=self.config.listing_min_score,
+                )
+                social_candidates = sorted(
+                    (
+                        item
+                        for item in (*listing_candidates, *listing_filtered_candidates)
+                        if int((item.metadata.get("social") or {}).get("coverage_pct") or 0) > 0
+                    ),
+                    key=lambda item: (
+                        int((item.metadata.get("social") or {}).get("viral_potential") or 0),
+                        int((item.metadata.get("social") or {}).get("attention_score") or 0),
+                    ),
+                    reverse=True,
                 )
             except Exception as exc:
                 errors.append(f"LISTING:{type(exc).__name__}")
@@ -79,6 +117,7 @@ class UnifiedRadarEngine:
             cex_candidates=tuple(cex_candidates),
             listing_candidates=tuple(listing_candidates),
             listing_filtered_candidates=tuple(listing_filtered_candidates),
+            social_candidates=tuple(social_candidates),
             errors=tuple(errors),
         )
 

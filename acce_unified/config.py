@@ -94,6 +94,10 @@ class UnifiedConfig:
     listing_seen_file: str = "mexc_seen_symbols.json"
     listing_candidate_file: str = "mexc_listing_candidates.json"
     listing_candidate_ttl_hours: int = 72
+    social_enabled: bool = True
+    social_gdelt_enabled: bool = True
+    social_cache_ttl_seconds: int = 10 * 60
+    social_max_assets: int = 6
     request_timeout_seconds: int = 15
 
     @classmethod
@@ -124,6 +128,15 @@ class UnifiedConfig:
             listing_candidate_ttl_hours=min(
                 168,
                 _env_int("UNIFIED_LISTING_CANDIDATE_TTL_HOURS", 72, 1),
+            ),
+            social_enabled=_env_bool("UNIFIED_SOCIAL_RADAR_ENABLED", True),
+            social_gdelt_enabled=_env_bool("UNIFIED_SOCIAL_GDELT_ENABLED", True),
+            social_cache_ttl_seconds=_env_int(
+                "UNIFIED_SOCIAL_CACHE_TTL_SECONDS", 10 * 60, 60
+            ),
+            social_max_assets=min(
+                12,
+                _env_int("UNIFIED_SOCIAL_MAX_ASSETS", 6, 1),
             ),
             request_timeout_seconds=_env_int("UNIFIED_REQUEST_TIMEOUT_SECONDS", 15, 3),
         )

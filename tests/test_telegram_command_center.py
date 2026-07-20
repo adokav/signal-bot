@@ -118,8 +118,8 @@ def test_inline_centers_use_dynamic_counts_and_clear_navigation():
     keyboard = bot._mexc_center_keyboard(snapshot, state)
     buttons = [button for row in keyboard["inline_keyboard"] for button in row]
 
-    assert [button["text"] for button in buttons[:4]] == [
-        "🔥 Güçlü 1", "🟡 İzleme 2", "⭐ Takibim 1", "🧭 Piyasa",
+    assert [button["text"] for button in buttons[:5]] == [
+        "🔥 Güçlü 1", "🟡 İzleme 2", "📣 Sosyal 0", "⭐ Takibim 1", "🧭 Piyasa",
     ]
     assert buttons[-1]["callback_data"] == "DASHBOARD"
 
@@ -128,7 +128,7 @@ def test_botfather_menu_exposes_listing_and_approval_centers():
     commands = {item["command"] for item in bot.BOT_COMMANDS}
     assert {
         "listings", "filtered", "watch", "watch_add", "watch_remove",
-        "radar", "approvals", "positions",
+        "radar", "social", "approvals", "positions",
     }.issubset(commands)
 
 
@@ -282,6 +282,53 @@ def test_candidate_detail_separates_observation_from_future_execution():
     assert "76/100" in text and "24 bps" in text
     assert "emir oluşturmaz" in text
     assert callbacks[0] == "WATCH_ADD NOVAUSDT L"
+    assert not any("BUY" in value or "SELL" in value or "LIVE" in value for value in callbacks)
+
+
+def test_social_radar_exposes_viral_authenticity_and_sources_without_trade_actions():
+    state = _MenuState()
+    candidate = {
+        "symbol": "NOVAUSDT",
+        "score": 72,
+        "stage": "BUILDING",
+        "metadata": {
+            "social": {
+                "status": "READY",
+                "stage": "EMERGING",
+                "viral_potential": 78,
+                "attention_score": 86,
+                "sentiment_score": 34,
+                "manipulation_risk": 12,
+                "crowding_risk": 18,
+                "mentions_1h": 42,
+                "unique_authors_1h": 31,
+                "coverage_pct": 90,
+                "platforms": ["NEWS", "X"],
+                "reasons": ["1s mention ivmesi 4.0x", "2 bağımsız kanal"],
+                "sources": [{"title": "Nova launch", "url": "https://example.com/nova"}],
+            },
+        },
+    }
+    snapshot = {
+        "listing_candidates": [candidate],
+        "listing_filtered_candidates": [],
+        "social_candidates": [candidate],
+    }
+    state.meta["unified_radar_snapshot"] = snapshot
+
+    radar_text = bot._format_social_radar(snapshot)
+    detail_text = bot._social_detail_text("NOVA", state)
+    keyboard = bot._social_detail_keyboard("NOVA", state)
+    callbacks = [
+        button.get("callback_data", "")
+        for row in keyboard["inline_keyboard"]
+        for button in row
+    ]
+
+    assert "NOVA — 78/100" in radar_text
+    assert "Manipülasyon 12" in radar_text
+    assert "Fenomen potansiyeli: 78/100" in detail_text
+    assert keyboard["inline_keyboard"][0][0]["url"] == "https://example.com/nova"
     assert not any("BUY" in value or "SELL" in value or "LIVE" in value for value in callbacks)
 
 

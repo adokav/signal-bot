@@ -71,7 +71,7 @@ def test_snapshot_serialization_has_global_execution_invariant():
 
 
 def test_engine_keeps_below_threshold_listing_for_watch_flow():
-    cfg = UnifiedConfig(cex_enabled=False, listing_enabled=True)
+    cfg = UnifiedConfig(cex_enabled=False, listing_enabled=True, social_enabled=False)
     snapshot = UnifiedRadarEngine(
         cfg,
         DEFAULT_TRADE_UNIVERSE,

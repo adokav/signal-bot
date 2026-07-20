@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 
 from .models import MexcListing, RadarCandidate
+from .social import score_social_snapshot
 
 
 STABLES = {
@@ -176,6 +177,17 @@ def score_mexc_listing(
     else:
         risks.append("sermaye evreni dışında; otomatik işlem yasak")
 
+    social = (
+        dict(item.social_data)
+        if item.social_data
+        else score_social_snapshot(None)
+    )
+    if social.get("stage") in {"SUSPICIOUS", "NEGATIVE_EVENT"}:
+        risks.append(
+            "sosyal ilgi riskli: "
+            + str(social.get("stage") or "UNKNOWN").lower()
+        )
+
     return RadarCandidate(
         source="PHENOMENONX_MEXC_NEW_LISTING",
         key=f"listing:{pair}",
@@ -200,6 +212,7 @@ def score_mexc_listing(
             "discovery_source": item.discovery_source,
             "first_seen_at": item.first_seen_at,
             "manually_watched": item.manually_watched,
+            "social": social,
         },
     )
 
