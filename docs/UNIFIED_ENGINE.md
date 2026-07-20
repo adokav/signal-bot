@@ -70,6 +70,11 @@ UNIFIED_SOCIAL_GDELT_ENABLED=true
 UNIFIED_SOCIAL_CACHE_TTL_SECONDS=600
 UNIFIED_SOCIAL_MAX_ASSETS=6
 X_BEARER_TOKEN=
+UNIFIED_FUNDAMENTAL_RADAR_ENABLED=true
+UNIFIED_FUNDAMENTAL_CACHE_TTL_SECONDS=1800
+UNIFIED_FUNDAMENTAL_MAX_ASSETS=20
+COINGECKO_DEMO_API_KEY=
+COINGECKO_PRO_API_KEY=
 UNIFIED_LISTING_CANDIDATE_TTL_HOURS=72
 UNIFIED_VALIDATION_MIN_TOTAL_TRADES=40
 UNIFIED_VALIDATION_MIN_OOS_TRADES=16
@@ -95,6 +100,14 @@ PhenomenonX her gözlemi önce puanlar, sonra iki görünüm üretir:
   aşırı uzamamış adaylar;
 - `listing_filtered_candidates` / **İzleme Havuzu**: eşik altında veya
   `CROWDED` olan adaylar ve bunların açık filtre gerekçeleri.
+- `fundamental_candidates` / **Temel Radar**: kimliği doğrulanmış adayların
+  piyasa değeri, FDV, dolaşım, arz açıklığı ve global devir metrikleri.
+
+Temel sağlayıcı sembolleri tek CoinGecko çağrısında toplar. Sembol çakışmasında
+başlık + sembol tek bir kimliği doğrulamıyorsa `AMBIGUOUS`; sağlayıcı verisi
+yoksa `NOT_FOUND/DATA_PENDING` döner ve puan uydurmaz. 429 yanıtı tüm sağlayıcı
+için cooldown başlatır. Bu puan fırsat filtresine, `TRADE_UNIVERSE` değerine ve
+emir kararına bağlanmaz.
 
 Yeni adaylar 72 saatlik katalogda yeniden puanlanır. Telegram listesi yalnız
 aday seçtirir; kalıcı takip eylemi aday detayında açılır ve süre sınırını

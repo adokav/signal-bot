@@ -31,6 +31,7 @@ class MexcListing:
     spread_bps: float = 0.0
     manually_watched: bool = False
     social_data: dict[str, Any] = field(default_factory=dict)
+    fundamental_data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class RadarSnapshot:
     listing_candidates: tuple[RadarCandidate, ...] = ()
     listing_filtered_candidates: tuple[RadarCandidate, ...] = ()
     social_candidates: tuple[RadarCandidate, ...] = ()
+    fundamental_candidates: tuple[RadarCandidate, ...] = ()
     errors: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -70,6 +72,9 @@ class RadarSnapshot:
                 item.to_dict() for item in self.listing_filtered_candidates
             ],
             "social_candidates": [item.to_dict() for item in self.social_candidates],
+            "fundamental_candidates": [
+                item.to_dict() for item in self.fundamental_candidates
+            ],
             "errors": list(self.errors),
             "can_authorize_trade": False,
         }

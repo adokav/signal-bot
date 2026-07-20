@@ -33,7 +33,10 @@ class WeakListing:
 
 
 def test_provider_failure_is_isolated_and_core_metadata_is_non_authoritative():
-    cfg = UnifiedConfig(cex_enabled=True, listing_enabled=True, cex_top_n=3)
+    cfg = UnifiedConfig(
+        cex_enabled=True, listing_enabled=True, cex_top_n=3,
+        fundamental_enabled=False,
+    )
     engine = UnifiedRadarEngine(
         cfg,
         DEFAULT_TRADE_UNIVERSE,
@@ -71,7 +74,10 @@ def test_snapshot_serialization_has_global_execution_invariant():
 
 
 def test_engine_keeps_below_threshold_listing_for_watch_flow():
-    cfg = UnifiedConfig(cex_enabled=False, listing_enabled=True, social_enabled=False)
+    cfg = UnifiedConfig(
+        cex_enabled=False, listing_enabled=True, social_enabled=False,
+        fundamental_enabled=False,
+    )
     snapshot = UnifiedRadarEngine(
         cfg,
         DEFAULT_TRADE_UNIVERSE,

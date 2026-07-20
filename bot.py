@@ -54,7 +54,7 @@ from acce_unified import (
 )
 from acce_unified.validation import ValidationPolicy, evaluate_promotion
 
-__version__ = "4.5.0-social-intelligence-radar"
+__version__ = "4.6.0-fundamental-metrics-radar"
 
 # ============================================================
 # LOGGING
@@ -1697,6 +1697,7 @@ _KEYBOARD_COMMAND_LABELS: dict[str, str] = {
     "🔥 Güçlü Adaylar": "LISTINGS",
     "🟡 İzleme Havuzu": "FILTERED_LISTINGS",
     "📣 Sosyal Radar": "SOCIAL_RADAR",
+    "🧬 Temel Radar": "FUNDAMENTAL_RADAR",
     "⭐ Takip Listem": "WATCHLIST",
     "🔄 Şimdi Tara": "MEXC_REFRESH",
     # Command Center v3
@@ -1768,6 +1769,7 @@ BOT_COMMANDS: list[dict[str, str]] = [
     {"command": "listings", "description": "PhenomenonX MEXC yeni listelemeleri"},
     {"command": "filtered", "description": "Filtrede kalan MEXC adayları"},
     {"command": "social", "description": "Sosyal ilgi ve fenomen radarı"},
+    {"command": "fundamentals", "description": "Coin temel metrikleri ve seyrelme riski"},
     {"command": "watch", "description": "MEXC takip listem"},
     {"command": "watch_add", "description": "Coini takibe al: /watch_add COIN"},
     {"command": "watch_remove", "description": "Takipten çıkar: /watch_remove COIN"},
@@ -10999,6 +11001,7 @@ def _mexc_center_text(snapshot: Any, state_mgr: StateManager) -> str:
     passed = len(data.get("listing_candidates") or [])
     filtered = len(data.get("listing_filtered_candidates") or [])
     social = len(data.get("social_candidates") or [])
+    fundamentals = len(data.get("fundamental_candidates") or [])
     watched = len(_mexc_watchlist(state_mgr))
     generated_at = int(data.get("generated_at") or 0)
     age = max(0, now_ts() - generated_at) if generated_at else None
@@ -11008,6 +11011,7 @@ def _mexc_center_text(snapshot: Any, state_mgr: StateManager) -> str:
         f"🔥 Güçlü aday: {passed}\n"
         f"🟡 İzleme havuzu: {filtered}\n"
         f"📣 Sosyal sinyal: {social}\n"
+        f"🧬 Temel verisi hazır: {fundamentals}\n"
         f"⭐ Takip listem: {watched}\n"
         f"🕒 Son veri: {freshness}\n\n"
         f"İzleme havuzundaki adaylar {UNIFIED_CONFIG.listing_candidate_ttl_hours} "
@@ -11081,6 +11085,7 @@ def _mexc_center_keyboard(snapshot: Any, state_mgr: StateManager) -> dict:
     strong = len(data.get("listing_candidates") or [])
     pool = len(data.get("listing_filtered_candidates") or [])
     social = len(data.get("social_candidates") or [])
+    fundamentals = len(data.get("fundamental_candidates") or [])
     watched = len(_mexc_watchlist(state_mgr))
     return {
         "inline_keyboard": [
@@ -11089,11 +11094,14 @@ def _mexc_center_keyboard(snapshot: Any, state_mgr: StateManager) -> dict:
                 {"text": f"🟡 İzleme {pool}", "callback_data": "FILTERED_LISTINGS"},
             ],
             [
+                {"text": f"🧬 Temel {fundamentals}", "callback_data": "FUNDAMENTAL_RADAR"},
                 {"text": f"📣 Sosyal {social}", "callback_data": "SOCIAL_RADAR"},
-                {"text": f"⭐ Takibim {watched}", "callback_data": "WATCHLIST"},
             ],
             [
+                {"text": f"⭐ Takibim {watched}", "callback_data": "WATCHLIST"},
                 {"text": "🧭 Piyasa", "callback_data": "RADAR"},
+            ],
+            [
                 {"text": "🔄 Şimdi tara", "callback_data": "MEXC_REFRESH"},
             ],
             [{"text": "⬅️ Kontrol paneli", "callback_data": "DASHBOARD"}],
@@ -11266,6 +11274,7 @@ _CANDIDATE_ORIGIN_CODES = {
     "F": "FILTERED_LISTINGS",
     "W": "WATCHLIST",
     "S": "SOCIAL_RADAR",
+    "T": "FUNDAMENTAL_RADAR",
     "M": "MEXC_MENU",
 }
 
@@ -11344,8 +11353,15 @@ def _candidate_list_keyboard(
             continue
         watch_mark = "⭐" if pair in watched else _candidate_stage_icon(row.get("stage"))
         score = int(row.get("score") or 0)
+        fundamentals = (row.get("metadata") or {}).get("fundamentals") or {}
+        fundamental_score = fundamentals.get("fundamental_score")
+        fundamental_text = (
+            f" · Temel {int(fundamental_score)}"
+            if fundamentals.get("status") == "READY" and fundamental_score is not None
+            else " · Temel ?"
+        )
         buttons.append([{
-            "text": f"{watch_mark} {pair.removesuffix('USDT')} · {score}/100",
+            "text": f"{watch_mark} {pair.removesuffix('USDT')} · Fırsat {score}{fundamental_text}",
             "callback_data": f"CANDIDATE {pair} {_candidate_origin_code(origin, safe_page)}",
         }])
     if total_pages > 1:
@@ -11402,6 +11418,178 @@ def _filtered_watch_keyboard(
         origin="FILTERED_LISTINGS",
         page=page,
     )
+
+
+def _friendly_fundamental_stage(value: Any) -> str:
+    return {
+        "STRONG": "🟢 Güçlü",
+        "HEALTHY": "🔵 Sağlıklı",
+        "SPECULATIVE": "🟡 Spekülatif",
+        "HIGH_RISK": "🔴 Yüksek risk",
+        "DATA_PENDING": "⚪ Veri bekliyor",
+    }.get(str(value or "").upper(), str(value or "-"))
+
+
+def _compact_amount(value: Any, *, currency: bool = False) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "?"
+    prefix = "$" if currency else ""
+    absolute = abs(number)
+    for size, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
+        if absolute >= size:
+            return f"{prefix}{number / size:.2f}{suffix}"
+    return f"{prefix}{number:,.2f}"
+
+
+def _metric_pct(value: Any) -> str:
+    try:
+        return f"%{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _fundamental_radar_rows(snapshot: Any) -> list[dict]:
+    data = snapshot if isinstance(snapshot, dict) else {}
+    return [
+        row for row in (data.get("fundamental_candidates") or [])
+        if isinstance(row, dict)
+    ]
+
+
+def _format_fundamental_radar(snapshot: Any, *, limit: int = 8) -> str:
+    rows = _fundamental_radar_rows(snapshot)
+    if not rows:
+        return (
+            "🧬 TEMEL METRİK RADARI\n\n"
+            "Henüz kimliği doğrulanmış temel veri yok. Yeni coin CoinGecko'da "
+            "yer almıyorsa veya aynı sembollü birden fazla proje varsa veri "
+            "puanlanmadan bekletilir."
+        )
+    lines = [
+        "🧬 TEMEL METRİK RADARI",
+        "Piyasa değeri, FDV, dolaşım ve küresel devir birlikte ölçülür.",
+        "",
+    ]
+    for index, row in enumerate(rows[:limit], 1):
+        fundamentals = (row.get("metadata") or {}).get("fundamentals") or {}
+        lines.extend([
+            f"{index}. {str(row.get('symbol') or '?').removesuffix('USDT')} — "
+            f"{int(fundamentals.get('fundamental_score') or 0)}/100 · "
+            f"{_friendly_fundamental_stage(fundamentals.get('stage'))}",
+            f"   PD {_compact_amount(fundamentals.get('market_cap_usd'), currency=True)} · "
+            f"FDV {_compact_amount(fundamentals.get('fully_diluted_valuation_usd'), currency=True)} · "
+            f"Dolaşım {_metric_pct(fundamentals.get('circulation_pct'))}",
+            f"   Hacim/PD {_metric_pct(fundamentals.get('volume_to_market_cap_pct'))} · "
+            f"veri %{int(fundamentals.get('coverage_pct') or 0)}",
+            "",
+        ])
+    lines.append("Temel puan fırsat puanını değiştirmez ve işlem yetkisi vermez.")
+    return "\n".join(lines)
+
+
+def _fundamental_radar_keyboard(snapshot: Any, state_mgr: StateManager) -> dict:
+    watched = set(_mexc_watchlist(state_mgr))
+    rows: list[list[dict[str, str]]] = []
+    for candidate in _fundamental_radar_rows(snapshot)[:8]:
+        pair = _normalize_mexc_watch_pair(candidate.get("symbol"))
+        if not pair:
+            continue
+        fundamentals = (candidate.get("metadata") or {}).get("fundamentals") or {}
+        mark = "⭐" if pair in watched else {
+            "STRONG": "🟢", "HEALTHY": "🔵", "SPECULATIVE": "🟡", "HIGH_RISK": "🔴",
+        }.get(str(fundamentals.get("stage") or "").upper(), "⚪")
+        rows.append([{
+            "text": f"{mark} {pair.removesuffix('USDT')} · Temel {int(fundamentals.get('fundamental_score') or 0)}",
+            "callback_data": f"FUND_DETAIL {pair} T",
+        }])
+    rows.extend([
+        [{"text": "⬅️ Fırsat merkezi", "callback_data": "MEXC_MENU"}],
+        [{"text": "🏠 Kontrol paneli", "callback_data": "DASHBOARD"}],
+    ])
+    return {"inline_keyboard": rows}
+
+
+def _fundamental_detail_text(value: Any, state_mgr: StateManager) -> str:
+    pair = _normalize_mexc_watch_pair(value)
+    if not pair:
+        return "⚠️ Geçersiz temel radar adayı."
+    candidate = _mexc_candidate_by_pair(
+        state_mgr.get_meta("unified_radar_snapshot")
+    ).get(pair) or {}
+    fundamentals = (candidate.get("metadata") or {}).get("fundamentals") or {}
+    status = str(fundamentals.get("status") or "DATA_PENDING").upper()
+    if status != "READY":
+        status_text = {
+            "AMBIGUOUS": "Aynı sembollü projeler var; doğru kimlik teyit edilemedi.",
+            "NOT_FOUND": "CoinGecko üzerinde eşleşen varlık henüz bulunamadı.",
+            "PROVIDER_COOLDOWN": "Veri sağlayıcısı hız limitinde; otomatik yeniden denenecek.",
+            "PROVIDER_UNAVAILABLE": "Temel veri sağlayıcısına geçici olarak ulaşılamıyor.",
+        }.get(status, "Temel veri henüz hazırlanıyor.")
+        return f"🧬 {pair.removesuffix('USDT')} TEMEL KART\n\nDurum: ⚪ {status_text}"
+
+    score = int(fundamentals.get("fundamental_score") or 0)
+    lines = [
+        f"🧬 {pair.removesuffix('USDT')} TEMEL KART",
+        "",
+        f"Temel puan: {score}/100 · {_friendly_fundamental_stage(fundamentals.get('stage'))}",
+        f"Kimlik güveni: %{int(fundamentals.get('identity_confidence') or 0)} · "
+        f"veri kapsaması: %{int(fundamentals.get('coverage_pct') or 0)}",
+        f"Proje: {fundamentals.get('name') or '?'} · sıra: "
+        f"#{fundamentals.get('market_cap_rank') or '?'}",
+        "",
+        f"Piyasa değeri: {_compact_amount(fundamentals.get('market_cap_usd'), currency=True)}",
+        f"Tam seyreltilmiş değer: {_compact_amount(fundamentals.get('fully_diluted_valuation_usd'), currency=True)}",
+        f"Global 24s hacim: {_compact_amount(fundamentals.get('total_volume_usd'), currency=True)}",
+        f"Hacim / piyasa değeri: {_metric_pct(fundamentals.get('volume_to_market_cap_pct'))}",
+        f"MEXC / global hacim: {_metric_pct(fundamentals.get('mexc_volume_share_pct'))}",
+        f"Dolaşım oranı: {_metric_pct(fundamentals.get('circulation_pct'))}",
+        f"Piyasa değeri / FDV: {_metric_pct(fundamentals.get('market_cap_to_fdv_pct'))}",
+        f"Dolaşan arz: {_compact_amount(fundamentals.get('circulating_supply'))}",
+        f"Toplam / azami arz: {_compact_amount(fundamentals.get('total_supply'))} / "
+        f"{_compact_amount(fundamentals.get('max_supply'))}",
+        f"ATH mesafesi: {_metric_pct(fundamentals.get('ath_change_pct'))}",
+    ]
+    reasons = fundamentals.get("reasons") or []
+    if reasons:
+        lines.extend(["", "Olumlu kanıt:", *[f"• {reason}" for reason in reasons[:4]]])
+    risks = fundamentals.get("risk_flags") or []
+    if risks:
+        lines.extend(["", "Risk bayrakları:", *[f"• {risk}" for risk in risks[:4]]])
+    lines.extend([
+        "",
+        "Bu kart piyasa-temel verisidir; ekip, kontrat güvenliği ve token açılım "
+        "takvimi ayrıca doğrulanmadan işlem kararı üretmez.",
+    ])
+    return "\n".join(lines)
+
+
+def _fundamental_detail_keyboard(
+    value: Any,
+    state_mgr: StateManager,
+    *,
+    origin: str = "T",
+) -> dict:
+    pair = _normalize_mexc_watch_pair(value)
+    candidate = _mexc_candidate_by_pair(
+        state_mgr.get_meta("unified_radar_snapshot")
+    ).get(pair or "") or {}
+    fundamentals = (candidate.get("metadata") or {}).get("fundamentals") or {}
+    rows: list[list[dict[str, str]]] = []
+    source_url = str(fundamentals.get("source_url") or "")
+    if source_url.startswith("https://"):
+        rows.append([{"text": "🔗 CoinGecko kaynağını aç", "url": source_url}])
+    if pair:
+        safe_origin = _candidate_origin_command(origin)
+        origin_page = _candidate_origin_page(origin)
+        origin_code = _candidate_origin_code(safe_origin, origin_page)
+        rows.append([{
+            "text": "🔎 Aday detayına dön",
+            "callback_data": f"CANDIDATE {pair} {origin_code}",
+        }])
+    rows.append([{"text": "⬅️ Temel radar", "callback_data": "FUNDAMENTAL_RADAR"}])
+    return {"inline_keyboard": rows}
 
 
 def _friendly_social_stage(value: Any) -> str:
@@ -11515,7 +11703,12 @@ def _social_detail_text(value: Any, state_mgr: StateManager) -> str:
     return "\n".join(lines)
 
 
-def _social_detail_keyboard(value: Any, state_mgr: StateManager) -> dict:
+def _social_detail_keyboard(
+    value: Any,
+    state_mgr: StateManager,
+    *,
+    origin: str = "S",
+) -> dict:
     pair = _normalize_mexc_watch_pair(value)
     candidate = _mexc_candidate_by_pair(
         state_mgr.get_meta("unified_radar_snapshot")
@@ -11528,9 +11721,12 @@ def _social_detail_keyboard(value: Any, state_mgr: StateManager) -> dict:
             title = str(source.get("title") or source.get("provider") or "Kaynak")
             rows.append([{"text": f"📰 {title[:42]}", "url": url}])
     if pair:
+        safe_origin = _candidate_origin_command(origin)
+        origin_page = _candidate_origin_page(origin)
+        origin_code = _candidate_origin_code(safe_origin, origin_page)
         rows.append([{
             "text": "🔎 Aday detayına dön",
-            "callback_data": f"CANDIDATE {pair} S",
+            "callback_data": f"CANDIDATE {pair} {origin_code}",
         }])
     rows.append([{"text": "⬅️ Sosyal radar", "callback_data": "SOCIAL_RADAR"}])
     return {"inline_keyboard": rows}
@@ -11571,6 +11767,18 @@ def _mexc_candidate_detail_text(value: Any, state_mgr: StateManager) -> str:
         f"5dk hacim ivmesi: {acceleration:.1f}x · makas: {spread:.0f} bps",
         f"Fiyat: {price:g}",
     ]
+    fundamentals = metadata.get("fundamentals") or {}
+    if fundamentals.get("status") == "READY":
+        lines.extend([
+            "",
+            f"Temel: {int(fundamentals.get('fundamental_score') or 0)}/100 · "
+            f"{_friendly_fundamental_stage(fundamentals.get('stage'))}",
+            f"PD {_compact_amount(fundamentals.get('market_cap_usd'), currency=True)} · "
+            f"FDV {_compact_amount(fundamentals.get('fully_diluted_valuation_usd'), currency=True)} · "
+            f"Dolaşım {_metric_pct(fundamentals.get('circulation_pct'))}",
+        ])
+    elif fundamentals:
+        lines.append("\nTemel veri: ⚪ kimlik/veri teyidi bekleniyor")
     social = metadata.get("social") or {}
     if social and social.get("status") != "DATA_PENDING":
         lines.extend([
@@ -11606,6 +11814,12 @@ def _candidate_detail_keyboard(
         current = _mexc_candidate_by_pair(
             state_mgr.get_meta("unified_radar_snapshot")
         ).get(pair) or {}
+        fundamentals = (current.get("metadata") or {}).get("fundamentals") or {}
+        if fundamentals:
+            rows.append([{
+                "text": "🧬 Temel metrikleri aç",
+                "callback_data": f"FUND_DETAIL {pair} {origin_code}",
+            }])
         social = (current.get("metadata") or {}).get("social") or {}
         if social and social.get("status") != "DATA_PENDING":
             rows.append([{
@@ -11631,6 +11845,7 @@ def _candidate_detail_keyboard(
         "FILTERED_LISTINGS": "⬅️ İzleme havuzu",
         "WATCHLIST": "⬅️ Takip listem",
         "SOCIAL_RADAR": "⬅️ Sosyal radar",
+        "FUNDAMENTAL_RADAR": "⬅️ Temel radar",
     }.get(safe_origin, "⬅️ Fırsat merkezi")
     back_callback = f"{safe_origin} {origin_page}" if origin_page else safe_origin
     rows.append([{"text": back_text, "callback_data": back_callback}])
@@ -11829,6 +12044,7 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 "/positions — açık pozisyonlar (entry/stop/TP/PnL)\n"
                 "/listings — MEXC puan eşiğini geçen adaylar\n"
                 "/filtered — filtrede kalan MEXC adayları\n"
+                "/fundamentals — piyasa değeri, FDV, arz ve seyrelme\n"
                 "/social — sosyal ilgi ve fenomen potansiyeli\n"
                 "/watch — süresiz MEXC takip listem\n"
                 "/watch_add NOVA — coin takibe al\n"
@@ -12077,10 +12293,36 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                     reply_markup=_opportunity_back_keyboard(),
                 )
             else:
+                origin = parts[2] if len(parts) > 2 else "S"
                 _respond_telegram(
                     update,
                     _social_detail_text(parts[1], state_mgr),
-                    reply_markup=_social_detail_keyboard(parts[1], state_mgr),
+                    reply_markup=_social_detail_keyboard(
+                        parts[1], state_mgr, origin=origin
+                    ),
+                )
+        elif cmd in {"FUNDAMENTALS", "FUNDAMENTAL_RADAR"}:
+            snapshot = state_mgr.get_meta("unified_radar_snapshot") or {}
+            _respond_telegram(
+                update,
+                _format_fundamental_radar(snapshot),
+                reply_markup=_fundamental_radar_keyboard(snapshot, state_mgr),
+            )
+        elif cmd in {"FUNDAMENTAL_DETAIL", "FUND_DETAIL"}:
+            if len(parts) < 2:
+                _respond_telegram(
+                    update,
+                    "Temel radar adayı seçilemedi.",
+                    reply_markup=_opportunity_back_keyboard(),
+                )
+            else:
+                origin = parts[2] if len(parts) > 2 else "T"
+                _respond_telegram(
+                    update,
+                    _fundamental_detail_text(parts[1], state_mgr),
+                    reply_markup=_fundamental_detail_keyboard(
+                        parts[1], state_mgr, origin=origin
+                    ),
                 )
         elif cmd in {"WATCH", "WATCHLIST"}:
             _respond_telegram(
