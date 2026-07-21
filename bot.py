@@ -510,6 +510,16 @@ TP_HIGH_VOL_TP1_MULT = env_float("TP_HIGH_VOL_TP1_MULT", 0.80, min_value=0.1)
 TP_HIGH_VOL_TP2_MULT = env_float("TP_HIGH_VOL_TP2_MULT", 0.90, min_value=0.1)
 TP_LOW_VOL_TP1_MULT = env_float("TP_LOW_VOL_TP1_MULT", 1.20, min_value=0.1)
 TP_LOW_VOL_TP2_MULT = env_float("TP_LOW_VOL_TP2_MULT", 1.10, min_value=0.1)
+
+# Opportunity Scanner + CoinGecko supply data
+COINGECKO_BASE = os.getenv("COINGECKO_BASE", "https://api.coingecko.com/api/v3")
+COINGECKO_CACHE_FILE = os.getenv("COINGECKO_CACHE_FILE", "coingecko_cache.json")
+COINGECKO_CACHE_TTL_SECONDS = env_int("COINGECKO_CACHE_TTL_SECONDS", 3600, min_value=60)
+SCANNER_TOP_N = env_int("SCANNER_TOP_N", 60, min_value=10)
+SCANNER_MIN_VOLUME_USD = env_float("SCANNER_MIN_VOLUME_USD", 5_000_000, min_value=0)
+SCANNER_RESULT_TOP_K = env_int("SCANNER_RESULT_TOP_K", 5, min_value=1)
+SCANNER_MIN_SCORE = env_float("SCANNER_MIN_SCORE", 55.0)
+SCANNER_THROTTLE_MS = env_int("SCANNER_THROTTLE_MS", 80, min_value=0)
 PM_CORE_MAX_HOLD_MIN = env_int("PM_CORE_MAX_HOLD_MIN", 180, min_value=5)
 PM_HIGH_BETA_MAX_HOLD_MIN = env_int("PM_HIGH_BETA_MAX_HOLD_MIN", 90, min_value=5)
 
@@ -1641,13 +1651,14 @@ def get_session_context() -> SessionContext:
 # Telegram mesaj boyut limiti: 4096 karakter
 TELEGRAM_MAX_LEN = 4000  # Güvenli pay
 
-# Sabit reply keyboard: text input altında daima gorulur, sik kullanilan
-# komutlar tek tikla erisilebilir. is_persistent=True ile kullanici manuel
-# kapatsa bile yeniden gosterilir.
+# Sabit reply keyboard: text input altında daima gorulur, tematik gruplar:
+# Satir 1 = hizli durum, Satir 2 = firsatlar, Satir 3 = risk & rapor,
+# Satir 4 = onay islemleri. is_persistent=True ile kalici gozukur.
 MAIN_KEYBOARD: dict[str, Any] = {
     "keyboard": [
-        [{"text": "/status"}, {"text": "/positions"}, {"text": "/equity"}],
-        [{"text": "/report"}, {"text": "/regime"}, {"text": "/help"}],
+        [{"text": "/status"}, {"text": "/equity"}, {"text": "/positions"}],
+        [{"text": "/opportunities"}, {"text": "/regime"}],
+        [{"text": "/report"}, {"text": "/help"}],
         [{"text": "/pending"}, {"text": "/trade_pending"}],
     ],
     "resize_keyboard": True,
@@ -1659,10 +1670,11 @@ MAIN_KEYBOARD: dict[str, Any] = {
 # bot baslangicinda bir kez kaydedilir.
 BOT_COMMANDS: list[dict[str, str]] = [
     {"command": "status", "description": "Anlik saglik durumu + 24h ozet"},
-    {"command": "positions", "description": "Acik pozisyonlar (entry/stop/TP/PnL)"},
     {"command": "equity", "description": "Bakiye, gerceklesen PnL, win/loss"},
-    {"command": "report", "description": "Son 7 gun performans ozeti"},
+    {"command": "positions", "description": "Acik pozisyonlar (entry/stop/TP/PnL)"},
+    {"command": "opportunities", "description": "Top 5 LONG firsati (Genius Score)"},
     {"command": "regime", "description": "Anlik rejim + macro context"},
+    {"command": "report", "description": "Son 7 gun performans ozeti"},
     {"command": "pending", "description": "Bekleyen parametre onerileri"},
     {"command": "trade_pending", "description": "Bekleyen trade onaylari"},
     {"command": "help", "description": "Tum komutlar"},
@@ -10636,18 +10648,20 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
             )
         elif cmd == "HELP":
             send_message(
-                "Komutlar:\n"
-                "/start — bot uyandır, özet\n"
-                "/status — anlık sağlık durumu + 24h özet\n"
-                "/positions — açık pozisyonlar (entry/stop/TP/PnL)\n"
-                "/equity — bakiye, gerçekleşen PnL, win/loss\n"
-                "/report — son 7 gün performans özeti\n"
-                "/regime — anlık rejim + macro context\n"
-                "/help — bu mesaj\n"
-                "PENDING — bekleyen parametre önerisi\n"
-                "ACCEPT <id> — öneri kabul\n"
-                "DECLINE <id> — öneri red\n"
-                "TRADE_PENDING / TRADE_ACCEPT <id> / TRADE_DECLINE <id> — trade onay",
+                "📋 Komutlar\n\n"
+                "━ Hızlı Durum ━\n"
+                "/status — anlık sağlık + 24h özet\n"
+                "/equity — bakiye, PnL, win/loss\n"
+                "/positions — açık pozisyonlar detayı\n\n"
+                "━ Fırsatlar ━\n"
+                "/opportunities — top 5 LONG (Genius Score)\n"
+                "/regime — anlık rejim + macro\n\n"
+                "━ Risk & Rapor ━\n"
+                "/report — son 7 gün performans\n"
+                "/help — bu mesaj\n\n"
+                "━ Onay İşlemleri ━\n"
+                "/pending, ACCEPT <id>, DECLINE <id>\n"
+                "/trade_pending, TRADE_ACCEPT <id>, TRADE_DECLINE <id>",
                 reply_markup=MAIN_KEYBOARD,
             )
         elif cmd == "STATUS":
@@ -10805,6 +10819,16 @@ def process_telegram_commands(state_mgr: StateManager = _STATE_MGR) -> None:
                 f"News: {news}\n"
                 f"Zaman: {tr_now_text()}"
             )
+        elif cmd == "OPPORTUNITIES":
+            send_message("🔍 Tarayici çalisiyor... (top-N: {}, ~{}s)".format(
+                SCANNER_TOP_N, max(3, SCANNER_TOP_N // 8)
+            ))
+            try:
+                report = run_opportunity_scanner()
+                send_message(format_opportunity_report(report))
+            except Exception as e:
+                log.error("Scanner hata: %s", e)
+                send_message(f"⚠️ Tarayici hata: {type(e).__name__}")
         elif cmd == "PENDING":
             send_message(pending_parameter_suggestions_text())
         elif cmd == "ACCEPT" and len(parts) >= 2:
@@ -11965,6 +11989,383 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
 
     log.info("Bot loop durdu.")
 
+
+
+# ============================================================
+# OPPORTUNITY SCANNER — Top-100 likit coin + Genius Trader Score
+# ============================================================
+
+def _cg_market_data() -> dict[str, dict]:
+    """CoinGecko top-250 markets, TTL cache. Base symbol upper -> record."""
+    cached = _safe_read_json(COINGECKO_CACHE_FILE, {})
+    if cached.get("fetched_at", 0) + COINGECKO_CACHE_TTL_SECONDS > now_ts():
+        return cached.get("data", {}) or {}
+    try:
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": 250,
+            "page": 1,
+            "sparkline": "false",
+        }
+        raw = request_json(f"{COINGECKO_BASE}/coins/markets", params, timeout=25)
+    except Exception as e:
+        log.warning("CoinGecko fetch hatasi (%s), cache fallback", type(e).__name__)
+        return cached.get("data", {}) or {}
+    if not isinstance(raw, list):
+        return cached.get("data", {}) or {}
+    data: dict[str, dict] = {}
+    for r in raw:
+        if not isinstance(r, dict):
+            continue
+        sym = str(r.get("symbol") or "").upper()
+        if not sym:
+            continue
+        rank = r.get("market_cap_rank") or 999999
+        rec = {
+            "id": r.get("id"),
+            "market_cap_rank": rank,
+            "market_cap_usd": r.get("market_cap") or 0.0,
+            "current_price_usd": r.get("current_price") or 0.0,
+            "circulating_supply": r.get("circulating_supply"),
+            "total_supply": r.get("total_supply"),
+            "max_supply": r.get("max_supply"),
+            "fully_diluted_valuation": r.get("fully_diluted_valuation") or 0.0,
+            "price_change_percentage_24h": r.get("price_change_percentage_24h") or 0.0,
+            "ath_change_percentage": r.get("ath_change_percentage"),
+        }
+        # Aynı sembol icin en yüksek rank kazansin (BTC gibi çakismalar icin)
+        existing = data.get(sym)
+        if not existing or rec["market_cap_rank"] < existing.get("market_cap_rank", 999999):
+            data[sym] = rec
+    _safe_write_json(COINGECKO_CACHE_FILE, {"fetched_at": now_ts(), "data": data})
+    return data
+
+
+def _supply_metrics(symbol: str, market_data: Optional[dict] = None) -> dict:
+    """USDT sembolünden base coini cikar, supply metriklerini normalize et."""
+    if market_data is None:
+        market_data = _cg_market_data()
+    base = symbol[:-4] if symbol.endswith("USDT") else symbol
+    rec = market_data.get(base.upper())
+    if not rec:
+        return {"available": False, "base": base}
+    circ = float(rec.get("circulating_supply") or 0)
+    max_s = rec.get("max_supply")
+    max_s_f = float(max_s) if max_s else None
+    mcap = float(rec.get("market_cap_usd") or 0)
+    fdv = float(rec.get("fully_diluted_valuation") or 0) or mcap
+    # scarcity: dolasimdaki / max. Infinite supply -> 1.0 (dilüsyon riski scoring'de ayri ele alinir)
+    scarcity_ratio = (circ / max_s_f) if (max_s_f and max_s_f > 0) else 1.0
+    fdv_ratio = (fdv / mcap) if mcap > 0 else 1.0
+    inflation_risk = ((max_s_f - circ) / circ) if (max_s_f and circ > 0) else 0.0
+    return {
+        "available": True,
+        "base": base,
+        "market_cap_usd": mcap,
+        "market_cap_rank": rec.get("market_cap_rank"),
+        "circulating_supply": circ,
+        "max_supply": max_s_f,
+        "fdv_usd": fdv,
+        "scarcity_ratio": scarcity_ratio,
+        "fdv_ratio": fdv_ratio,
+        "inflation_risk": inflation_risk,
+        "ath_change_pct": rec.get("ath_change_percentage"),
+    }
+
+
+def _mexc_top_liquid_symbols(top_n: int = SCANNER_TOP_N, min_volume_usd: float = SCANNER_MIN_VOLUME_USD) -> list[dict]:
+    """MEXC 24h ticker: USDT paritelerinden USD hacme göre top-N. Leveraged/wrap toklarini ele.
+
+    Returns: [{"symbol", "base", "quote_volume_usd", "last_price", "price_change_pct_24h"}, ...]
+    """
+    try:
+        raw = request_json(f"{MEXC_SPOT_BASE}/api/v3/ticker/24hr", None, timeout=25)
+    except Exception as e:
+        log.warning("MEXC 24hr ticker hatasi: %s", type(e).__name__)
+        return []
+    if not isinstance(raw, list):
+        return []
+    excluded_suffixes = ("3L", "3S", "5L", "5S", "UP", "DOWN")
+    out: list[dict] = []
+    for r in raw:
+        if not isinstance(r, dict):
+            continue
+        sym = str(r.get("symbol") or "")
+        if not sym.endswith("USDT") or len(sym) <= 4:
+            continue
+        base = sym[:-4]
+        if any(base.endswith(suf) for suf in excluded_suffixes):
+            continue
+        try:
+            qvol = float(r.get("quoteVolume") or 0)
+        except (TypeError, ValueError):
+            continue
+        if qvol < min_volume_usd:
+            continue
+        try:
+            price = float(r.get("lastPrice") or 0)
+            change_pct = float(r.get("priceChangePercent") or 0)
+        except (TypeError, ValueError):
+            continue
+        out.append({
+            "symbol": sym,
+            "base": base,
+            "quote_volume_usd": qvol,
+            "last_price": price,
+            "price_change_pct_24h": change_pct,
+        })
+    out.sort(key=lambda x: -x["quote_volume_usd"])
+    return out[:top_n]
+
+
+def _genius_score(features: dict, supply: dict, btc_features: dict, group: str) -> dict:
+    """Genius Trader Score (0-100): 8 faktör konverjansi + FOMO cezalari.
+
+    Felsefe: erken pozisyon, gec FOMO degil. Momentum + hacim + goreceli
+    guc + supply saliginligi + volatilite tatli nokta + likidite konverjansi.
+    """
+    if not features:
+        return {"score": 0.0, "reason": "features_unavailable"}
+
+    breakdown: dict[str, float] = {}
+    penalties: list[str] = []
+
+    last = float(features.get("last") or 0)
+    ema9_1h = float(features.get("ema9_1h") or 0)
+    ema21_1h = float(features.get("ema21_1h") or 0)
+    ema50_1h = float(features.get("ema50_1h") or 0)
+    ema9_4h = float(features.get("ema9_4h") or 0)
+    ema21_4h = float(features.get("ema21_4h") or 0)
+    ema50_4h = float(features.get("ema50_4h") or 0)
+
+    # 1) Trend Alignment (max 18)
+    trend = 0.0
+    if last > 0 and ema50_1h > 0:
+        if ema9_4h > ema21_4h > 0:
+            trend += 6
+        if ema9_1h > ema21_1h > ema50_1h > 0:
+            trend += 8
+        if last > ema9_1h and last > ema9_4h:
+            trend += 4
+    breakdown["trend"] = min(trend, 18.0)
+
+    # 2) Momentum expansion (max 14)
+    ret_1h = float(features.get("ret_1h") or 0)
+    ret_4h_tf = float(features.get("ret_4h_tf") or 0)
+    ret_24h_tf = float(features.get("ret_24h_tf") or 0)
+    momentum = 0.0
+    if ret_24h_tf > 0.05:
+        momentum += 5
+    if ret_24h_tf > 0.10:
+        momentum += 3
+    if ret_4h_tf > 0.02:
+        momentum += 3
+    if ret_1h > 0.005:
+        momentum += 2
+    # Acceleration: 24h ivmesi 4h'in tekrarindan bagimsiz olarak buyukse
+    if ret_24h_tf > ret_4h_tf * 3 and ret_24h_tf > 0.03:
+        momentum += 1
+    breakdown["momentum"] = min(momentum, 14.0)
+
+    # 3) Volume expansion (max 14)
+    vol_ratio = float(features.get("vol_ratio") or 1.0)
+    volume = 0.0
+    if vol_ratio > 1.5:
+        volume += 5
+    if vol_ratio > 2.5:
+        volume += 5
+    if vol_ratio > 4.0:
+        volume += 4
+    breakdown["volume"] = min(volume, 14.0)
+
+    # 4) Relative Strength vs BTC (max 12)
+    rs = 0.0
+    btc_ret_24h = float((btc_features or {}).get("ret_24h_tf") or 0)
+    btc_ret_4h = float((btc_features or {}).get("ret_4h_tf") or 0)
+    if ret_24h_tf > btc_ret_24h + 0.02:
+        rs += 6
+    if ret_24h_tf > btc_ret_24h + 0.05:
+        rs += 4
+    if ret_4h_tf > btc_ret_4h + 0.01:
+        rs += 2
+    breakdown["relative_strength"] = min(rs, 12.0)
+
+    # 5) Breakout structure (max 10)
+    breakout = 0.0
+    if last > 0 and ema50_1h > 0 and last > ema50_1h * 1.02:
+        breakout += 4
+    if ema50_4h > 0 and last > ema50_4h * 1.03:
+        breakout += 4
+    if vol_ratio > 2.0 and ret_24h_tf > 0.03:
+        breakout += 2
+    breakdown["breakout"] = min(breakout, 10.0)
+
+    # 6) Volatility sweet-spot (max 8)
+    atr = float(features.get("atr_pct_1h") or 0)
+    normal_atr = _ATR_NORMAL_BY_GROUP.get(group, ATR_NORMAL_MAJOR_ALT)
+    vol_score = 0.0
+    if atr > 0 and normal_atr > 0:
+        ratio = atr / normal_atr
+        if 1.0 <= ratio <= 2.0:
+            vol_score = 8.0
+        elif 0.7 <= ratio < 1.0 or 2.0 < ratio <= 2.5:
+            vol_score = 4.0
+        elif ratio > 3.5:
+            penalties.append("extreme_volatility")
+    breakdown["volatility"] = vol_score
+
+    # 7) Supply dynamics (max 12)
+    supply_s = 0.0
+    if supply.get("available"):
+        scarcity = float(supply.get("scarcity_ratio") or 1.0)
+        fdv_ratio = float(supply.get("fdv_ratio") or 1.0)
+        if scarcity >= 0.9:
+            supply_s += 6
+        elif scarcity >= 0.7:
+            supply_s += 4
+        elif scarcity >= 0.5:
+            supply_s += 2
+        if 0 < fdv_ratio <= 1.5:
+            supply_s += 6
+        elif fdv_ratio <= 3.0:
+            supply_s += 3
+        elif fdv_ratio > 6.0:
+            penalties.append("high_fdv_dilution_risk")
+    breakdown["supply"] = min(supply_s, 12.0)
+
+    # 8) Liquidity (max 7)
+    liq = 0.0
+    qvol = float(features.get("_scanner_quote_volume_usd") or 0)
+    spread = float(features.get("spread_bps") or 999)
+    if qvol > 50_000_000:
+        liq += 4
+    elif qvol > 10_000_000:
+        liq += 2
+    if spread < 15:
+        liq += 3
+    elif spread < 30:
+        liq += 1
+    breakdown["liquidity"] = min(liq, 7.0)
+
+    # Penaltiler
+    penalty = 0.0
+    ret_5m = float(features.get("ret_5m") or 0)
+    if abs(ret_5m) > 0.10:
+        penalty += 15
+        penalties.append("fomo_or_flush_5m")
+    if ret_24h_tf > 0.30:
+        penalty += 10
+        penalties.append("overextended_24h")
+    if spread > 30:
+        penalty += 10
+        penalties.append("wide_spread")
+
+    total = sum(breakdown.values()) - penalty
+    total = max(0.0, min(100.0, total))
+    return {
+        "score": round(total, 2),
+        "breakdown": {k: round(v, 2) for k, v in breakdown.items()},
+        "penalties": penalties,
+        "penalty_total": penalty,
+    }
+
+
+def run_opportunity_scanner() -> dict:
+    """Top-N likit MEXC USDT coini tara, Genius Score, top-K getir."""
+    started = now_ts()
+    tickers = _mexc_top_liquid_symbols()
+    if not tickers:
+        return {"available": False, "reason": "mexc_ticker_empty"}
+    market_data = _cg_market_data()
+
+    try:
+        btc_features = get_features("BTCUSDT")
+    except Exception as e:
+        log.warning("Scanner BTC features hatasi: %s", type(e).__name__)
+        btc_features = {}
+
+    scored: list[dict] = []
+    throttle_s = SCANNER_THROTTLE_MS / 1000.0
+    for t in tickers:
+        if _STOP_EVENT.is_set():
+            break
+        sym = t["symbol"]
+        try:
+            f = get_features(sym)
+        except Exception:
+            if throttle_s > 0:
+                time.sleep(throttle_s)
+            continue
+        f["_scanner_quote_volume_usd"] = t["quote_volume_usd"]
+        group = COINS.get(sym, "MAJOR_ALT")
+        supply = _supply_metrics(sym, market_data)
+        gs = _genius_score(f, supply, btc_features, group)
+        if gs.get("score", 0) >= SCANNER_MIN_SCORE:
+            scored.append({
+                "symbol": sym,
+                "score": gs["score"],
+                "breakdown": gs["breakdown"],
+                "penalties": gs.get("penalties") or [],
+                "quote_volume_usd": t["quote_volume_usd"],
+                "price": t["last_price"],
+                "price_change_pct_24h": t["price_change_pct_24h"],
+                "market_cap_usd": supply.get("market_cap_usd"),
+                "market_cap_rank": supply.get("market_cap_rank"),
+                "scarcity_ratio": supply.get("scarcity_ratio"),
+                "fdv_ratio": supply.get("fdv_ratio"),
+                "atr_pct_1h": f.get("atr_pct_1h"),
+                "in_watchlist": sym in COINS,
+            })
+        if throttle_s > 0:
+            time.sleep(throttle_s)
+
+    scored.sort(key=lambda x: -x["score"])
+    top = scored[:SCANNER_RESULT_TOP_K]
+    return {
+        "available": True,
+        "scanned_at": tr_now_text(),
+        "scanned_count": len(tickers),
+        "qualified_count": len(scored),
+        "top": top,
+        "elapsed_ms": int((now_ts() - started) * 1000),
+    }
+
+
+def format_opportunity_report(report: dict) -> str:
+    """Telegram formatı — Genius Score top-K."""
+    if not report.get("available"):
+        return f"🔍 Tarayici çalismadi: {report.get('reason', 'unknown')}"
+    top = report.get("top") or []
+    header = (
+        f"🔍 FIRSAT TARAYICI — Top {len(top)}\n"
+        f"{report.get('scanned_at')}\n"
+        f"Tarandi: {report.get('scanned_count', 0)} | Eleşen: {report.get('qualified_count', 0)} "
+        f"(≥{SCANNER_MIN_SCORE:.0f})\n"
+    )
+    if not top:
+        return header + f"\nŞu an skor eşiğini geçen coin yok. Piyasa dar bir aralikta olabilir."
+    lines = [header]
+    for i, c in enumerate(top, 1):
+        b = c.get("breakdown") or {}
+        mcap = c.get("market_cap_usd") or 0
+        mcap_txt = f"${mcap/1e9:.2f}B" if mcap >= 1e9 else f"${mcap/1e6:.1f}M" if mcap > 0 else "?"
+        badge = "⭐" if c.get("in_watchlist") else ""
+        atr_pct = float(c.get("atr_pct_1h") or 0) * 100
+        rank = c.get("market_cap_rank") or "?"
+        lines.append(
+            f"\n{i}. {c['symbol']} {badge} — {c['score']:.1f}/100\n"
+            f"   Cap: {mcap_txt} (#{rank}) | Hacim: ${c['quote_volume_usd']/1e6:.1f}M/24h | 24h: {c['price_change_pct_24h']:+.2f}%\n"
+            f"   ATR 1h: %{atr_pct:.2f}\n"
+            f"   T{b.get('trend',0):.0f} M{b.get('momentum',0):.0f} V{b.get('volume',0):.0f} "
+            f"RS{b.get('relative_strength',0):.0f} B{b.get('breakout',0):.0f} "
+            f"Vol{b.get('volatility',0):.0f} S{b.get('supply',0):.0f} L{b.get('liquidity',0):.0f}"
+        )
+        if c.get("penalties"):
+            lines.append(f"   ⚠️ {', '.join(c['penalties'])}")
+    lines.append("\nLegend: T=trend M=momentum V=volume RS=BTC-göreli B=breakout Vol=volatilite S=supply L=likidite")
+    lines.append("⭐ = bot watchlist'inde takip ediliyor")
+    return "\n".join(lines)
 
 
 # ============================================================
