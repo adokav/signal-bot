@@ -27,6 +27,11 @@ NON_SYMBOLS = {
     "KICKSTARTER", "THE", "WILL", "LIST", "LISTING", "UTC", "GMT",
 }
 LEVERAGED_SUFFIXES = ("3L", "3S", "4L", "4S", "5L", "5S", "BULL", "BEAR")
+NON_SPOT_LISTING_RE = re.compile(
+    r"\b(?:futures?|perpetual|usdt[\s-]*m|coin[\s-]*m|contract|"
+    r"pre[\s-]*market|index|leveraged)\b",
+    flags=re.I,
+)
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -86,6 +91,18 @@ def extract_symbols_from_title(title: str) -> list[str]:
         if symbol not in result:
             result.append(symbol)
     return result
+
+
+def is_spot_listing_title(title: str) -> bool:
+    """Reject explicit derivatives/legacy headlines from the Spot window."""
+    value = str(title or "").strip()
+    if not value or NON_SPOT_LISTING_RE.search(value):
+        return False
+    return bool(re.search(
+        r"\b(?:will\s+list|to\s+list|lists?|listing|now\s+live|first\s+in\s+market)\b",
+        value,
+        flags=re.I,
+    ))
 
 
 def score_mexc_listing(
@@ -233,6 +250,9 @@ def partition_mexc_listings(
     trade_universe: dict[str, str],
     top_n: int = 5,
     min_score: int = 52,
+    max_drawdown_pct: float = -8.0,
+    require_open_spot: bool = False,
+    require_supply_data: bool = False,
 ) -> tuple[list[RadarCandidate], list[RadarCandidate]]:
     """Return both threshold-pass and rejected candidates with explanations."""
     passed: list[RadarCandidate] = []
@@ -244,6 +264,25 @@ def partition_mexc_listings(
         filter_reasons: list[str] = []
         if raw_candidate.stage == "CROWDED":
             filter_reasons.append("ilk hareket aşırı uzamış")
+        if float(raw_candidate.metadata.get("change_pct") or 0.0) <= max_drawdown_pct:
+            filter_reasons.append(
+                f"24s düşüş sınırı aşıldı (%{float(raw_candidate.metadata.get('change_pct') or 0.0):+.1f})"
+            )
+        if require_open_spot and raw_candidate.metadata.get("spot_status") != "OPEN":
+            filter_reasons.append("MEXC spot işlem henüz açık ve doğrulanmış değil")
+        fundamentals = raw_candidate.metadata.get("fundamentals") or {}
+        supply_ready = bool(
+            fundamentals.get("status") == "READY"
+            and fundamentals.get("circulating_supply") is not None
+            and (
+                fundamentals.get("total_supply") is not None
+                or fundamentals.get("max_supply") is not None
+            )
+        )
+        if require_supply_data and not supply_ready:
+            filter_reasons.append("dolaşan/toplam/azami arz verisi doğrulanmadı")
+        if fundamentals.get("stage") == "HIGH_RISK":
+            filter_reasons.append("temel metriklerde yüksek seyrelme/spekülasyon riski")
         if raw_candidate.score < min_score:
             filter_reasons.append(
                 f"puan eşiğine {min_score - raw_candidate.score} puan eksik"
@@ -279,11 +318,17 @@ def rank_mexc_listings(
     trade_universe: dict[str, str],
     top_n: int = 5,
     min_score: int = 52,
+    max_drawdown_pct: float = -8.0,
+    require_open_spot: bool = False,
+    require_supply_data: bool = False,
 ) -> list[RadarCandidate]:
     passed, _ = partition_mexc_listings(
         listings,
         trade_universe=trade_universe,
         top_n=top_n,
         min_score=min_score,
+        max_drawdown_pct=max_drawdown_pct,
+        require_open_spot=require_open_spot,
+        require_supply_data=require_supply_data,
     )
     return passed

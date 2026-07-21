@@ -51,6 +51,11 @@ def _pending(status: str = "DATA_PENDING", note: str | None = None) -> dict[str,
         "identity_confidence": 0,
         "coverage_pct": 0,
         "provider": "COINGECKO",
+        "circulating_supply": None,
+        "total_supply": None,
+        "max_supply": None,
+        "supply_data_complete": False,
+        "supply_disclosure": "UNVERIFIED",
         "reasons": [note or "temel veri henüz doğrulanmadı"],
         "risk_flags": [],
         "can_authorize_trade": False,
@@ -198,6 +203,16 @@ def score_fundamental_snapshot(
         stage = "SPECULATIVE"
 
     coin_id = str(row.get("id") or "").strip()
+    supply_data_complete = bool(
+        circulating is not None
+        and (total_supply is not None or max_supply is not None)
+    )
+    if supply_data_complete:
+        supply_disclosure = "VERIFIED"
+    elif circulating is not None:
+        supply_disclosure = "PARTIAL"
+    else:
+        supply_disclosure = "UNVERIFIED"
     return {
         "status": "READY",
         "stage": stage,
@@ -215,6 +230,8 @@ def score_fundamental_snapshot(
         "circulating_supply": circulating,
         "total_supply": total_supply,
         "max_supply": max_supply,
+        "supply_data_complete": supply_data_complete,
+        "supply_disclosure": supply_disclosure,
         "circulation_pct": round(circulation_pct, 2) if circulation_pct is not None else None,
         "market_cap_to_fdv_pct": round(mcap_to_fdv_pct, 2) if mcap_to_fdv_pct is not None else None,
         "volume_to_market_cap_pct": round(volume_to_mcap_pct, 2) if volume_to_mcap_pct is not None else None,
@@ -249,11 +266,11 @@ class FundamentalMetricsProvider:
         pro_api_key: str = "",
         timeout: int = 15,
         cache_ttl_seconds: int = 30 * 60,
-        max_assets: int = 20,
+        max_assets: int = 100,
     ):
         self.timeout = max(3, int(timeout))
         self.cache_ttl_seconds = max(300, int(cache_ttl_seconds))
-        self.max_assets = min(50, max(1, int(max_assets)))
+        self.max_assets = min(120, max(1, int(max_assets)))
         self.base_url = (
             "https://pro-api.coingecko.com/api/v3"
             if str(pro_api_key or "").strip()

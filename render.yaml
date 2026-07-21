@@ -33,8 +33,30 @@ services:
         value: "5"
       - key: UNIFIED_SCAN_INTERVAL_SECONDS
         value: "120"
+      - key: UNIFIED_LIQUID_UNIVERSE_SIZE
+        value: "100"
+      - key: UNIFIED_LIQUID_ENRICHMENT_SIZE
+        value: "100"
+      - key: UNIFIED_LIQUID_FUNDAMENTAL_SIZE
+        value: "100"
+      - key: UNIFIED_LIQUID_LONG_TOP_N
+        value: "5"
+      - key: UNIFIED_LIQUID_MAX_24H_DRAWDOWN_PCT
+        value: "-8"
+      - key: UNIFIED_LIQUID_REQUIRE_SUPPLY_DATA
+        value: "true"
+      - key: UNIFIED_FUNDAMENTAL_MAX_ASSETS
+        value: "100"
       - key: UNIFIED_LISTING_CANDIDATE_TTL_HOURS
         value: "72"
+      - key: UNIFIED_LISTING_CONFIRMATION_SCANS
+        value: "2"
+      - key: UNIFIED_LISTING_MAX_DRAWDOWN_PCT
+        value: "-8"
+      - key: UNIFIED_LISTING_REQUIRE_OPEN_SPOT
+        value: "true"
+      - key: UNIFIED_LISTING_REQUIRE_SUPPLY_DATA
+        value: "true"
       - key: LONG_SETUP_ENGINE_ENABLED
         value: "1"
       - key: LONG_CONFLUENCE_MIN_SETUP
