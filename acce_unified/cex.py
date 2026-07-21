@@ -19,7 +19,10 @@ STABLE_EXACT = {
     "EURI", "AEUR", "FRAX", "LUSD", "SUSD", "EUR", "GBP", "TRY",
 }
 STABLE_RE = re.compile(r"^(?:USD[A-Z0-9]*|[A-Z0-9]*USD|EUR[A-Z0-9]*|[A-Z0-9]*EUR)$")
-LEVERAGED_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR")
+LEVERAGED_SUFFIXES = (
+    "UP", "DOWN", "BULL", "BEAR",
+    "2L", "2S", "3L", "3S", "4L", "4S", "5L", "5S",
+)
 
 
 def _clamp(value: float, low: float, high: float) -> float:

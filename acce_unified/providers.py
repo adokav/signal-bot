@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
+import re
 import statistics
 import threading
 import time
@@ -17,7 +19,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .listings import extract_listing_titles, extract_symbols_from_title
+from .liquid_long import calculate_long_metrics
+from .listings import extract_listing_titles, extract_symbols_from_title, is_spot_listing_title
 from .models import CexTicker, MexcListing
 
 
@@ -29,6 +32,20 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _mexc_change_pct(row: dict[str, Any]) -> float:
+    """Convert MEXC's decimal change ratio to a true percentage.
+
+    The Spot v3 payload uses values such as ``0.0779`` for a 7.79% move.
+    Recomputing from open/last when available also guards against field-format
+    drift without applying the Binance convention to MEXC rows.
+    """
+    last_price = _safe_float(row.get("lastPrice"))
+    open_price = _safe_float(row.get("openPrice"))
+    if last_price > 0 and open_price > 0:
+        return (last_price / open_price - 1.0) * 100.0
+    return _safe_float(row.get("priceChangePercent")) * 100.0
 
 
 def _mexc_market_is_online(value: Any, default: bool = True) -> bool:
@@ -92,6 +109,9 @@ class MexcPublicProvider:
         if base_url.rstrip("/") != "https://api.mexc.com" and endpoints is None:
             self.endpoints = (("MEXC", f"{self.base_url}/api/v3/ticker/24hr"),)
         self.session = _session("SignalBot-ACCE-Unified/2.0")
+        self._active_market_base_url = self.base_url
+        self._long_cache: dict[str, tuple[int, dict[str, Any]]] = {}
+        self._long_lock = threading.RLock()
 
     def fetch_tickers(self) -> list[CexTicker]:
         failures: list[str] = []
@@ -109,6 +129,7 @@ class MexcPublicProvider:
                     raise RuntimeError("ticker yanıtı liste değil")
                 data = payload
                 venue = candidate_venue
+                self._active_market_base_url = url.split("/api/v3/", 1)[0].rstrip("/")
                 break
             except Exception as exc:
                 failures.append(f"{candidate_venue}:{type(exc).__name__}")
@@ -124,14 +145,74 @@ class MexcPublicProvider:
                     CexTicker(
                         symbol=str(row["symbol"]).upper(),
                         last_price=float(row["lastPrice"]),
-                        change_pct=float(row.get("priceChangePercent") or 0.0),
+                        change_pct=(
+                            _mexc_change_pct(row)
+                            if venue == "MEXC"
+                            else float(row.get("priceChangePercent") or 0.0)
+                        ),
                         quote_volume=float(row.get("quoteVolume") or 0.0),
                         venue=venue,
+                        bid_price=float(row.get("bidPrice") or 0.0),
+                        ask_price=float(row.get("askPrice") or 0.0),
+                        high_price=float(row.get("highPrice") or 0.0),
+                        low_price=float(row.get("lowPrice") or 0.0),
                     )
                 )
             except (KeyError, TypeError, ValueError):
                 continue
         return out
+
+    def _fetch_long_metrics_one(self, symbol: str) -> dict[str, Any]:
+        response = self.session.get(
+            f"{self._active_market_base_url}/api/v3/klines",
+            params={"symbol": symbol, "interval": "15m", "limit": 97},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise RuntimeError("kline yanıtı liste değil")
+        return calculate_long_metrics(payload)
+
+    def fetch_long_metrics(
+        self,
+        symbols: Any,
+    ) -> dict[str, dict[str, Any]]:
+        """Enrich a bounded shortlist; never fan out across all 100 pairs."""
+        ordered = list(dict.fromkeys(
+            str(symbol or "").strip().upper() for symbol in (symbols or []) if symbol
+        ))
+        now = int(time.time())
+        candle_bucket = now // (15 * 60)
+        result: dict[str, dict[str, Any]] = {}
+        pending: list[str] = []
+        with self._long_lock:
+            for symbol in ordered:
+                cached = self._long_cache.get(symbol)
+                if cached and cached[0] == candle_bucket:
+                    result[symbol] = dict(cached[1])
+                else:
+                    pending.append(symbol)
+        if pending:
+            with ThreadPoolExecutor(max_workers=min(10, len(pending))) as executor:
+                future_to_symbol = {
+                    executor.submit(self._fetch_long_metrics_one, symbol): symbol
+                    for symbol in pending
+                }
+                for future in as_completed(future_to_symbol):
+                    symbol = future_to_symbol[future]
+                    try:
+                        metrics = future.result()
+                    except Exception as exc:
+                        log.warning("Likit-100 kline alınamadı (%s): %s", symbol, exc)
+                        metrics = {
+                            "status": "PROVIDER_UNAVAILABLE",
+                            "can_authorize_trade": False,
+                        }
+                    result[symbol] = metrics
+                    with self._long_lock:
+                        self._long_cache[symbol] = (candle_bucket, dict(metrics))
+        return result
 
 
 class MexcNewListingProvider:
@@ -158,6 +239,8 @@ class MexcNewListingProvider:
         candidate_file: str | None = None,
         candidate_ttl_hours: int = 72,
         max_candidates: int = 20,
+        confirmation_scans: int = 2,
+        announcement_seen_file: str | None = None,
     ):
         self.timeout = timeout
         self.base_url = base_url.rstrip("/")
@@ -172,6 +255,12 @@ class MexcNewListingProvider:
         )
         self.candidate_ttl_seconds = max(1, candidate_ttl_hours) * 60 * 60
         self.max_candidates = max(1, max_candidates)
+        self.confirmation_scans = max(2, min(4, int(confirmation_scans)))
+        self.announcement_seen_file = (
+            Path(announcement_seen_file)
+            if announcement_seen_file
+            else self.seen_file.with_name("mexc_seen_spot_announcements.json")
+        )
         self.session = _session("SignalBot-PhenomenonX-MEXC/3.0")
         self._watch_lock = threading.RLock()
         self._watched_pairs: set[str] = set()
@@ -267,27 +356,132 @@ class MexcNewListingProvider:
             log.warning("MEXC listing kline alınamadı: %s", pair, exc_info=True)
             return 0.0
 
-    def _new_pairs_from_snapshot(self, current: set[str]) -> list[str]:
+    @staticmethod
+    def _announcement_fingerprint(title: str) -> str:
+        normalized = re.sub(r"\W+", " ", str(title or "").lower()).strip()
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def _new_spot_announcement_titles(self, titles: list[str]) -> list[str]:
+        eligible = [title for title in titles if is_spot_listing_title(title)]
+        fingerprints = {
+            self._announcement_fingerprint(title): title for title in eligible
+        }
+        initialized = False
         try:
-            previous = (
-                set(json.loads(self.seen_file.read_text("utf-8")))
-                if self.seen_file.exists()
-                else set()
-            )
+            payload = json.loads(self.announcement_seen_file.read_text("utf-8"))
+            if isinstance(payload, dict):
+                previous = set(payload.get("fingerprints") or [])
+                initialized = payload.get("initialized") is True
+            elif isinstance(payload, list):
+                previous = set(payload)
+                initialized = bool(payload)
+            else:
+                previous = set()
         except Exception:
             previous = set()
+        try:
+            self.announcement_seen_file.parent.mkdir(parents=True, exist_ok=True)
+            combined = sorted((previous | set(fingerprints)))[-2000:]
+            tmp = self.announcement_seen_file.with_name(
+                f".{self.announcement_seen_file.name}.{os.getpid()}.tmp"
+            )
+            tmp.write_text(json.dumps({
+                "version": 1,
+                "initialized": True,
+                "fingerprints": combined,
+            }, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, self.announcement_seen_file)
+        except Exception:
+            log.warning("MEXC duyuru hafızası yazılamadı", exc_info=True)
+        if not initialized:
+            # A fresh deploy baselines the page instead of relabelling months-old
+            # headlines as current opportunities.
+            return []
+        return [title for key, title in fingerprints.items() if key not in previous]
+
+    def _new_pairs_from_snapshot(
+        self,
+        current: set[str],
+        online: set[str],
+        *,
+        now: int,
+    ) -> list[str]:
+        legacy_snapshot = False
+        try:
+            payload = json.loads(self.seen_file.read_text("utf-8"))
+            if isinstance(payload, list):
+                legacy_snapshot = True
+                previous = {str(value).upper() for value in payload}
+                pending: dict[str, dict[str, int]] = {}
+            elif isinstance(payload, dict):
+                previous = {
+                    str(value).upper() for value in (payload.get("symbols") or [])
+                }
+                pending = {
+                    str(pair).upper(): dict(row)
+                    for pair, row in (payload.get("pending") or {}).items()
+                    if isinstance(row, dict)
+                }
+            else:
+                previous, pending = set(), {}
+        except Exception:
+            previous, pending = set(), {}
+
+        confirmed: list[str] = []
+        if not previous or legacy_snapshot:
+            # Lists written by the old provider contained only online markets;
+            # unioning the full exchangeInfo set prevents AVAX-like pause/reopen
+            # events from masquerading as a new listing after an upgrade.
+            previous |= current
+            pending = {}
+        else:
+            unseen = current - previous
+            recovery_limit = max(10, int(max(len(current), 1) * 0.02))
+            if len(unseen) > recovery_limit:
+                log.warning(
+                    "MEXC snapshot %d toplu ekleme gösterdi; olay üretmeden yeniden bazlandı",
+                    len(unseen),
+                )
+                previous |= current
+                pending = {}
+            else:
+                pending = {
+                    pair: row for pair, row in pending.items() if pair in current
+                }
+                for pair in unseen:
+                    row = pending.get(pair) or {
+                        "first_seen_at": now,
+                        "observations": 0,
+                    }
+                    row["observations"] = int(row.get("observations") or 0) + 1
+                    row["last_seen_at"] = now
+                    pending[pair] = row
+                for pair, row in list(pending.items()):
+                    if (
+                        pair in online
+                        and int(row.get("observations") or 0) >= self.confirmation_scans
+                    ):
+                        confirmed.append(pair)
+                        previous.add(pair)
+                        pending.pop(pair, None)
 
         try:
             self.seen_file.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.seen_file.with_name(f".{self.seen_file.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(sorted(current)), encoding="utf-8")
+            tmp.write_text(
+                json.dumps({
+                    "version": 2,
+                    "symbols": sorted(previous),
+                    "pending": pending,
+                    "updated_at": now,
+                }, sort_keys=True),
+                encoding="utf-8",
+            )
             os.replace(tmp, self.seen_file)
         except Exception:
             log.warning("MEXC sembol hafızası yazılamadı", exc_info=True)
 
-        if not previous:
-            return []
-        return sorted(current - previous)
+        return sorted(confirmed)
 
     def _load_candidate_catalog(self) -> dict[str, dict[str, Any]]:
         try:
@@ -304,7 +498,11 @@ class MexcNewListingProvider:
                 and isinstance(row, dict)
                 and isinstance(row.get("first_seen_at"), int)
             ):
-                catalog[normalized] = row
+                if (
+                    int(row.get("discovery_version") or 0) >= 2
+                    and row.get("listing_event_verified") is True
+                ):
+                    catalog[normalized] = row
         return catalog
 
     def _save_candidate_catalog(self, catalog: dict[str, dict[str, Any]]) -> None:
@@ -348,6 +546,8 @@ class MexcNewListingProvider:
                 "source": source or previous.get("source") or "ANNOUNCEMENT",
                 "first_seen_at": first_seen,
                 "last_seen_at": now,
+                "discovery_version": 2,
+                "listing_event_verified": True,
             }
             if pair not in discovered_pairs:
                 discovered_pairs.append(pair)
@@ -359,8 +559,9 @@ class MexcNewListingProvider:
             pair for pair, row in catalog.items()
             if int(row.get("first_seen_at") or 0) >= cutoff
         }
+        verified_watched = watched & set(catalog)
         ordered_pairs = [
-            *sorted(watched),
+            *sorted(verified_watched),
             *(pair for pair in discovered_pairs if pair in active_pairs and pair not in watched),
             *(
                 pair for pair, _ in sorted(
@@ -377,20 +578,12 @@ class MexcNewListingProvider:
         records: list[dict[str, Any]] = []
         auto_count = 0
         for pair in ordered_pairs:
-            manual = pair in watched
+            manual = pair in verified_watched
             if not manual and auto_count >= self.max_candidates:
                 continue
             row = dict(catalog.get(pair) or {})
             if not row:
-                row = {
-                    "symbol": pair[:-4],
-                    "pair": pair,
-                    "title": f"Manuel takip: {pair}",
-                    "rank": self.max_candidates,
-                    "source": "MANUAL_WATCH",
-                    "first_seen_at": now,
-                    "last_seen_at": now,
-                }
+                continue
             row["manually_watched"] = manual
             records.append(row)
             if not manual:
@@ -400,6 +593,7 @@ class MexcNewListingProvider:
     def fetch_listings(self) -> list[MexcListing]:
         scan_started_at = int(time.time())
         titles = self.fetch_listing_titles()
+        fresh_titles = self._new_spot_announcement_titles(titles)
         try:
             exchange = self.exchange_info()
         except Exception as exc:
@@ -415,20 +609,25 @@ class MexcNewListingProvider:
         # listed market, so it must not drive listing discovery. A symbol may
         # appear in exchangeInfo while its market is paused/offline; excluding
         # it preserves the later market-status -> online transition.
+        all_spot_pairs = set(exchange)
         open_spot_pairs = {
             pair
             for pair, info in exchange.items()
             if _mexc_market_is_online(info.get("status"), True)
         }
         additions = (
-            self._new_pairs_from_snapshot(open_spot_pairs)
+            self._new_pairs_from_snapshot(
+                all_spot_pairs,
+                open_spot_pairs,
+                now=scan_started_at,
+            )
             if exchange
             else []
         )
 
         discovered: list[tuple[str, str, int, str]] = []
         seen_symbols: set[str] = set()
-        for rank, title in enumerate(titles, 1):
+        for rank, title in enumerate(fresh_titles, 1):
             for symbol in extract_symbols_from_title(title):
                 if symbol not in seen_symbols:
                     seen_symbols.add(symbol)
@@ -459,10 +658,10 @@ class MexcNewListingProvider:
         # first so max_candidates trimming cannot discard the fallback signal.
         discovered = [*exchange_discoveries, *discovered]
 
-        if titles and not discovered:
-            raise RuntimeError("MEXC listing başlığı bulundu fakat sembol ayrıştırılamadı")
+        if fresh_titles and not discovered:
+            raise RuntimeError("Yeni MEXC Spot başlığı bulundu fakat sembol ayrıştırılamadı")
         records = self._candidate_records(discovered, now=scan_started_at)
-        if not records and not exchange:
+        if not records and not exchange and not titles:
             raise RuntimeError("MEXC duyuru ve Spot API kaynakları birlikte kullanılamıyor")
 
         observations: list[MexcListing] = []
@@ -494,7 +693,7 @@ class MexcNewListingProvider:
                     rank=rank,
                     spot_status=spot_status,
                     last_price=_safe_float(tick.get("lastPrice")),
-                    change_pct=_safe_float(tick.get("priceChangePercent")),
+                    change_pct=_mexc_change_pct(tick),
                     quote_volume=_safe_float(tick.get("quoteVolume")),
                     volume_acceleration=0.0,
                     discovery_source=source,

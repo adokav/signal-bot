@@ -88,12 +88,26 @@ class UnifiedConfig:
     scan_interval_seconds: int = 2 * 60
     cex_top_n: int = 12
     cex_min_quote_volume: float = 500_000.0
+    liquid_universe_size: int = 100
+    liquid_enrichment_size: int = 100
+    liquid_fundamental_size: int = 100
+    liquid_long_top_n: int = 5
+    liquid_min_quote_volume: float = 1_000_000.0
+    liquid_max_24h_drawdown_pct: float = -8.0
+    liquid_max_24h_gain_pct: float = 25.0
+    liquid_max_spread_bps: float = 35.0
+    liquid_min_long_score: int = 64
+    liquid_require_supply_data: bool = True
     listing_top_n: int = 5
     listing_min_score: int = 52
     listing_max_candidates: int = 20
     listing_seen_file: str = "mexc_seen_symbols.json"
     listing_candidate_file: str = "mexc_listing_candidates.json"
     listing_candidate_ttl_hours: int = 72
+    listing_confirmation_scans: int = 2
+    listing_max_drawdown_pct: float = -8.0
+    listing_require_open_spot: bool = True
+    listing_require_supply_data: bool = True
     social_enabled: bool = True
     social_reddit_enabled: bool = True
     social_gdelt_enabled: bool = True
@@ -108,7 +122,7 @@ class UnifiedConfig:
     social_alert_cooldown_seconds: int = 6 * 60 * 60
     fundamental_enabled: bool = True
     fundamental_cache_ttl_seconds: int = 30 * 60
-    fundamental_max_assets: int = 20
+    fundamental_max_assets: int = 100
     request_timeout_seconds: int = 15
 
     @classmethod
@@ -125,6 +139,37 @@ class UnifiedConfig:
             scan_interval_seconds=_env_int("UNIFIED_SCAN_INTERVAL_SECONDS", 2 * 60, 60),
             cex_top_n=_env_int("UNIFIED_CEX_TOP_N", 12, 1),
             cex_min_quote_volume=_env_float("UNIFIED_CEX_MIN_QUOTE_VOLUME", 500_000.0, 0.0),
+            liquid_universe_size=min(
+                200, _env_int("UNIFIED_LIQUID_UNIVERSE_SIZE", 100, 20)
+            ),
+            liquid_enrichment_size=min(
+                100, _env_int("UNIFIED_LIQUID_ENRICHMENT_SIZE", 100, 20)
+            ),
+            liquid_fundamental_size=min(
+                100, _env_int("UNIFIED_LIQUID_FUNDAMENTAL_SIZE", 100, 20)
+            ),
+            liquid_long_top_n=min(
+                10, _env_int("UNIFIED_LIQUID_LONG_TOP_N", 5, 1)
+            ),
+            liquid_min_quote_volume=_env_float(
+                "UNIFIED_LIQUID_MIN_QUOTE_VOLUME", 1_000_000.0, 0.0
+            ),
+            liquid_max_24h_drawdown_pct=min(
+                0.0,
+                _env_float("UNIFIED_LIQUID_MAX_24H_DRAWDOWN_PCT", -8.0, -100.0),
+            ),
+            liquid_max_24h_gain_pct=_env_float(
+                "UNIFIED_LIQUID_MAX_24H_GAIN_PCT", 25.0, 0.0
+            ),
+            liquid_max_spread_bps=_env_float(
+                "UNIFIED_LIQUID_MAX_SPREAD_BPS", 35.0, 1.0
+            ),
+            liquid_min_long_score=min(
+                100, _env_int("UNIFIED_LIQUID_MIN_LONG_SCORE", 64, 0)
+            ),
+            liquid_require_supply_data=_env_bool(
+                "UNIFIED_LIQUID_REQUIRE_SUPPLY_DATA", True
+            ),
             listing_top_n=min(10, _env_int("UNIFIED_LISTING_TOP_N", 5, 1)),
             listing_min_score=min(100, _env_int("UNIFIED_LISTING_MIN_SCORE", 52, 0)),
             listing_max_candidates=min(
@@ -139,6 +184,19 @@ class UnifiedConfig:
             listing_candidate_ttl_hours=min(
                 168,
                 _env_int("UNIFIED_LISTING_CANDIDATE_TTL_HOURS", 72, 1),
+            ),
+            listing_confirmation_scans=min(
+                4, _env_int("UNIFIED_LISTING_CONFIRMATION_SCANS", 2, 2)
+            ),
+            listing_max_drawdown_pct=min(
+                0.0,
+                _env_float("UNIFIED_LISTING_MAX_DRAWDOWN_PCT", -8.0, -100.0),
+            ),
+            listing_require_open_spot=_env_bool(
+                "UNIFIED_LISTING_REQUIRE_OPEN_SPOT", True
+            ),
+            listing_require_supply_data=_env_bool(
+                "UNIFIED_LISTING_REQUIRE_SUPPLY_DATA", True
             ),
             social_enabled=_env_bool("UNIFIED_SOCIAL_RADAR_ENABLED", True),
             social_reddit_enabled=_env_bool("UNIFIED_SOCIAL_REDDIT_ENABLED", True),
@@ -177,8 +235,8 @@ class UnifiedConfig:
                 "UNIFIED_FUNDAMENTAL_CACHE_TTL_SECONDS", 30 * 60, 300
             ),
             fundamental_max_assets=min(
-                50,
-                _env_int("UNIFIED_FUNDAMENTAL_MAX_ASSETS", 20, 1),
+                120,
+                _env_int("UNIFIED_FUNDAMENTAL_MAX_ASSETS", 100, 1),
             ),
             request_timeout_seconds=_env_int("UNIFIED_REQUEST_TIMEOUT_SECONDS", 15, 3),
         )

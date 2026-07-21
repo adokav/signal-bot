@@ -6,7 +6,8 @@ Bu depo artık diğer kripto botlarının **kod yığını değil, doğrulanmı�
 yeteneklerinin birleştiği tek sermaye otoritesidir**:
 
 - `signal-bot`: sinyal, rejim, risk, pozisyon planı ve tek işlem kapısı.
-- `pricemonitorx_bot`: geniş CEX evreninde erken fırsat keşfi; yalnızca ek kanıt.
+- `pricemonitorx_bot`: MEXC'in en likit 100 spot paritesini ve Long İlk 5'i
+  çıkaran çok-zaman-dilimli keşif; yalnızca ek kanıt.
 - `phenomenonx_bot`: MEXC resmî New Listings + Spot teyit radarı; yeni coinleri
   otomatik işlem evrenine eklemez.
 - `mm_trading`: t+1 icra, maliyet ve out-of-sample doğrulama disiplini.
@@ -21,8 +22,9 @@ RENDERUSDT, PYTHUSDT, BONKUSDT, POPCATUSDT
 
 Geniş radar adayları bu listeyi kendiliğinden büyütemez. Unified Engine
 varsayılan olarak `SHADOW` çalışır ve hiçbir radar adayı emir yetkisi taşımaz.
-Telegram'da `/radar` komutu PriceMonitorX piyasa radarı ile PhenomenonX MEXC
-yeni listeleme radarını birlikte; `/listings` Güçlü Adayları, `/filtered`
+Telegram'da `/longs` MEXC Likit 100 içinden Long İlk 5'i; `/radar` genel
+piyasa özeti ile PhenomenonX MEXC yeni listeleme radarını birlikte; `/listings`
+doğrulanmış yeni adayları, `/filtered`
 İzleme Havuzunu, `/fundamentals` temel metrikleri ve `/watch` süresiz takip
 listesini gösterir.
 
@@ -32,11 +34,25 @@ UNIFIED_ENGINE_MODE=SHADOW
 UNIFIED_CEX_RADAR_ENABLED=1
 UNIFIED_LISTING_RADAR_ENABLED=1
 UNIFIED_SCAN_INTERVAL_SECONDS=120
+UNIFIED_LIQUID_UNIVERSE_SIZE=100
+UNIFIED_LIQUID_ENRICHMENT_SIZE=100
+UNIFIED_LIQUID_FUNDAMENTAL_SIZE=100
+UNIFIED_LIQUID_LONG_TOP_N=5
+UNIFIED_LIQUID_MIN_QUOTE_VOLUME=1000000
+UNIFIED_LIQUID_MAX_24H_DRAWDOWN_PCT=-8
+UNIFIED_LIQUID_MAX_24H_GAIN_PCT=25
+UNIFIED_LIQUID_MAX_SPREAD_BPS=35
+UNIFIED_LIQUID_MIN_LONG_SCORE=64
+UNIFIED_LIQUID_REQUIRE_SUPPLY_DATA=true
 UNIFIED_LISTING_TOP_N=5
 UNIFIED_LISTING_MIN_SCORE=52
 UNIFIED_LISTING_MAX_CANDIDATES=20
 UNIFIED_LISTING_SEEN_FILE=mexc_seen_symbols.json
 UNIFIED_LISTING_CANDIDATE_FILE=mexc_listing_candidates.json
+UNIFIED_LISTING_CONFIRMATION_SCANS=2
+UNIFIED_LISTING_MAX_DRAWDOWN_PCT=-8
+UNIFIED_LISTING_REQUIRE_OPEN_SPOT=true
+UNIFIED_LISTING_REQUIRE_SUPPLY_DATA=true
 UNIFIED_SOCIAL_RADAR_ENABLED=true
 UNIFIED_SOCIAL_REDDIT_ENABLED=true
 UNIFIED_SOCIAL_GDELT_ENABLED=true
@@ -53,10 +69,10 @@ UNIFIED_SOCIAL_ALERT_COOLDOWN_SECONDS=21600
 X_BEARER_TOKEN=
 REDDIT_CLIENT_ID=
 REDDIT_CLIENT_SECRET=
-REDDIT_USER_AGENT=server:adokav-signal-bot:v4.7 (by /u/adokav)
+REDDIT_USER_AGENT=server:adokav-signal-bot:v4.8 (by /u/adokav)
 UNIFIED_FUNDAMENTAL_RADAR_ENABLED=true
 UNIFIED_FUNDAMENTAL_CACHE_TTL_SECONDS=1800
-UNIFIED_FUNDAMENTAL_MAX_ASSETS=20
+UNIFIED_FUNDAMENTAL_MAX_ASSETS=100
 # Optional: keyless CoinGecko works at lower limits.
 COINGECKO_DEMO_API_KEY=
 COINGECKO_PRO_API_KEY=
@@ -75,7 +91,8 @@ Reply keyboard değişmeyen dört ana bölüme ayrılır:
 Değişken eylemler mesaj altındaki inline kontrol yüzeyinde açılır:
 
 ```text
-🔥 Güçlü N | 🟡 İzleme N
+💧 Likit 100 · Long İlk 5 (N)
+🆕 Yeni · Güçlü N | 🟡 Yeni · İzleme N
 🧬 Temel N | 📣 Sosyal N
 ⭐ Takibim N | 🧭 Piyasa
 🔄 Şimdi tara
@@ -87,8 +104,9 @@ sayfalama daha düşük
 sıralı adayları da erişilebilir tutar. Coin seçilince tek bir detay ekranı
 açılır; kalıcı takibe alma/çıkarma yalnız bu ekranda yapılır. Callback
 navigasyonu yeni mesaj göndermek yerine mevcut kontrol mesajını düzenler.
-Yeni adaylar 72 saat boyunca yeniden puanlanır; `/watch_add NOVA` ve
-`/watch_remove NOVA` butonların komut karşılıklarıdır.
+Yeni adaylar 72 saat boyunca yeniden puanlanır. Kalıcı takip yalnız doğrulanmış
+yeni adayın detayından veya o aday için `/watch_add NOVA` ile açılır; eski bir
+spot coin bu yolla Yeni Listeleme penceresine sokulamaz.
 Takipteki aday filtreyi geçtiğinde veya `BUILDING/HOT` aşamasına yükseldiğinde
 bildirim, varsayılan olarak yalnız gerçek topluluk kanıtı `PASS` ise üretilir.
 En az dört görüş, üç benzersiz yazar ve bir topluluk platformu aranır. Yetersiz
@@ -104,10 +122,24 @@ yoğunluğu ve yazar yoğunlaşmasıyla değerlendirir. GDELT sonuçları ayrı 
 `0/100 · Sessiz` puanı üretmez; eksikliği açıkça gösterir.
 
 `🧬 Temel Radar` CoinGecko'nun tek toplu sorgusundan piyasa değeri, FDV,
-dolaşımdaki/azami arz, global hacim/PD, ATH mesafesi ve MEXC hacim yoğunlaşması
+dolaşımdaki/toplam/azami arz, global hacim/PD, ATH mesafesi ve MEXC hacim yoğunlaşması
 ölçümlerini çıkarır. Aynı sembollü birden fazla proje başlıktan kesin
-eşleştirilemiyorsa bot birini tahmin etmez; `AMBIGUOUS` gösterir. Temel puan
-fırsat puanını veya filtre sonucunu değiştirmez.
+eşleştirilemiyorsa bot birini tahmin etmez; `AMBIGUOUS` gösterir. Arz verisi
+Long İlk 5 ve güçlü Yeni Listeleme için zorunlu kapıdır; veri eksikse aday
+gerekçesiyle bekletilir.
+
+## İki ayrı fırsat penceresi
+
+- **Likit 100 / Long İlk 5:** yalnız MEXC spot hacmiyle ilk 100'ün tamamı;
+  15 dakikalık mumlar mum dönemi boyunca önbelleğe alınır. Günlük büyük
+  düşüş, uzamış hareket, geniş makas, aşağı 1s/4s momentum, bozuk EMA yapısı,
+  aşırı RSI/ATR ve eksik arz önce elenir. Kalanlar teknik `%65`, arz kalitesi
+  `%25`, piyasa rejimi `%10` ile sıralanır.
+- **Yeni Listeleme:** yalnız yeni resmî Spot başlığı veya iki ardışık
+  `exchangeInfo` gözlemi. İlk kurulum eski başlıkları/snapshot'ı baz alır;
+  futures, perpetual, pause→reopen ve eski katalog kayıtları yeni olay sayılmaz.
+
+İki pencere de araştırma amaçlıdır ve otomatik emir yetkisi taşımaz.
 
 `Güvenlik` merkezi çalışma modunu, gerçek emir kapısını, API hata sayısını ve
 bekleyen onayları görünür tutar. Telegram üzerinden tek dokunuşla LIVE veya

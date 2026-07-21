@@ -13,8 +13,16 @@ from typing import Any
 from .cex import rank_cex_tickers
 from .config import UnifiedConfig
 from .fundamentals import FundamentalMetricsProvider
+from .liquid_long import (
+    build_market_context,
+    rank_liquid_longs,
+    score_technical_long,
+    select_enrichment_universe,
+    select_liquid_universe,
+    supply_gate_ready,
+)
 from .listings import partition_mexc_listings
-from .models import RadarSnapshot
+from .models import MexcListing, RadarSnapshot
 from .providers import MexcNewListingProvider, MexcPublicProvider
 from .social import SocialIntelligenceProvider
 
@@ -44,6 +52,7 @@ class UnifiedRadarEngine:
             candidate_file=config.listing_candidate_file,
             candidate_ttl_hours=config.listing_candidate_ttl_hours,
             max_candidates=config.listing_max_candidates,
+            confirmation_scans=config.listing_confirmation_scans,
         )
         self.social_provider = social_provider or SocialIntelligenceProvider(
             x_bearer_token=os.getenv("X_BEARER_TOKEN", ""),
@@ -51,7 +60,7 @@ class UnifiedRadarEngine:
             reddit_client_secret=os.getenv("REDDIT_CLIENT_SECRET", ""),
             reddit_user_agent=os.getenv(
                 "REDDIT_USER_AGENT",
-                "server:adokav-signal-bot:v4.7 (by /u/adokav)",
+                "server:adokav-signal-bot:v4.8 (by /u/adokav)",
             ),
             reddit_enabled=config.social_reddit_enabled,
             gdelt_enabled=config.social_gdelt_enabled,
@@ -80,6 +89,11 @@ class UnifiedRadarEngine:
     def scan_once(self, *, now: int | None = None) -> RadarSnapshot:
         timestamp = int(now if now is not None else time.time())
         cex_candidates = []
+        liquid_long_candidates = []
+        liquid_universe_size = 0
+        liquid_enriched_size = 0
+        liquid_supply_ready_size = 0
+        liquid_market_context: dict[str, Any] = {}
         listing_candidates = []
         listing_filtered_candidates = []
         social_candidates = []
@@ -87,12 +101,129 @@ class UnifiedRadarEngine:
         errors: list[str] = []
         if self.config.cex_enabled:
             try:
+                tickers = self.cex_provider.fetch_tickers()
                 cex_candidates = rank_cex_tickers(
-                    self.cex_provider.fetch_tickers(),
+                    tickers,
                     trade_universe=self.trade_universe,
                     top_n=self.config.cex_top_n,
                     min_quote_volume=self.config.cex_min_quote_volume,
                 )
+                try:
+                    metrics_fetcher = getattr(
+                        self.cex_provider, "fetch_long_metrics", None
+                    )
+                    if not callable(metrics_fetcher):
+                        raise NotImplementedError("provider has no long metrics")
+                    liquid_universe = select_liquid_universe(
+                        tickers,
+                        size=self.config.liquid_universe_size,
+                        min_quote_volume=self.config.liquid_min_quote_volume,
+                        required_venue="MEXC",
+                    )
+                    liquid_universe_size = len(liquid_universe)
+                    if not liquid_universe:
+                        raise RuntimeError("MEXC_LIQUID_UNIVERSE_UNAVAILABLE")
+                    market_context = build_market_context(liquid_universe)
+                    liquid_market_context = dict(market_context)
+                    enrichment_rows = select_enrichment_universe(
+                        liquid_universe,
+                        size=self.config.liquid_enrichment_size,
+                        max_drawdown_pct=self.config.liquid_max_24h_drawdown_pct,
+                        max_gain_pct=self.config.liquid_max_24h_gain_pct,
+                        max_spread_bps=self.config.liquid_max_spread_bps,
+                    )
+                    metrics_by_symbol = metrics_fetcher(
+                        [item.symbol for item in enrichment_rows]
+                    )
+                    liquid_enriched_size = sum(
+                        (metrics_by_symbol.get(item.symbol) or {}).get("status")
+                        == "READY"
+                        for item in enrichment_rows
+                    )
+
+                    liquidity_ranks = {
+                        item.symbol: index
+                        for index, item in enumerate(liquid_universe, 1)
+                    }
+                    technically_ready = []
+                    for item in enrichment_rows:
+                        technical = score_technical_long(
+                            item,
+                            metrics_by_symbol.get(item.symbol),
+                            liquidity_rank=liquidity_ranks.get(item.symbol, 100),
+                            max_drawdown_pct=(
+                                self.config.liquid_max_24h_drawdown_pct
+                            ),
+                            max_gain_pct=self.config.liquid_max_24h_gain_pct,
+                            max_spread_bps=self.config.liquid_max_spread_bps,
+                        )
+                        if technical.get("status") == "READY":
+                            technically_ready.append((item, technical))
+                    technically_ready.sort(
+                        key=lambda row: (
+                            int(row[1].get("score") or 0),
+                            row[0].quote_volume,
+                        ),
+                        reverse=True,
+                    )
+                    fundamental_rows = [
+                        MexcListing(
+                            symbol=item.symbol[:-4],
+                            pair=item.symbol,
+                            title=(
+                                f"MEXC Likit 100: {item.symbol[:-4]} "
+                                f"({item.symbol[:-4]})"
+                            ),
+                            rank=liquidity_ranks.get(item.symbol, 100),
+                            spot_status="OPEN",
+                            last_price=item.last_price,
+                            change_pct=item.change_pct,
+                            quote_volume=item.quote_volume,
+                            volume_acceleration=float(
+                                (metrics_by_symbol.get(item.symbol) or {}).get(
+                                    "volume_ratio"
+                                )
+                                or 0.0
+                            ),
+                            discovery_source="LIQUID_100",
+                        )
+                        for item, _ in technically_ready[
+                            : self.config.liquid_fundamental_size
+                        ]
+                    ]
+                    fundamentals_by_symbol: dict[str, dict[str, Any]] = {}
+                    if self.config.fundamental_enabled and fundamental_rows:
+                        raw_fundamentals = self.fundamental_provider.fetch_many(
+                            fundamental_rows
+                        )
+                        fundamentals_by_symbol = {
+                            item.pair: dict(raw_fundamentals.get(item.pair) or {})
+                            for item in fundamental_rows
+                        }
+                    liquid_supply_ready_size = sum(
+                        supply_gate_ready(value)
+                        for value in fundamentals_by_symbol.values()
+                    )
+                    liquid_long_candidates = rank_liquid_longs(
+                        liquid_universe,
+                        metrics_by_symbol,
+                        fundamentals_by_symbol,
+                        market_context=market_context,
+                        trade_universe=self.trade_universe,
+                        top_n=self.config.liquid_long_top_n,
+                        min_score=self.config.liquid_min_long_score,
+                        max_drawdown_pct=(
+                            self.config.liquid_max_24h_drawdown_pct
+                        ),
+                        max_gain_pct=self.config.liquid_max_24h_gain_pct,
+                        max_spread_bps=self.config.liquid_max_spread_bps,
+                        require_supply_data=self.config.liquid_require_supply_data,
+                    )
+                except NotImplementedError:
+                    pass
+                except Exception as exc:
+                    errors.append(f"LIQUID_LONG:{type(exc).__name__}")
+                    log.warning("MEXC Likit-100 Long radar failed: %s", exc)
             except Exception as exc:
                 errors.append(f"CEX:{type(exc).__name__}")
                 log.warning("Unified CEX radar failed: %s", exc)
@@ -130,6 +261,9 @@ class UnifiedRadarEngine:
                     trade_universe=self.trade_universe,
                     top_n=self.config.listing_top_n,
                     min_score=self.config.listing_min_score,
+                    max_drawdown_pct=self.config.listing_max_drawdown_pct,
+                    require_open_spot=self.config.listing_require_open_spot,
+                    require_supply_data=self.config.listing_require_supply_data,
                 )
                 social_candidates = sorted(
                     (
@@ -175,6 +309,11 @@ class UnifiedRadarEngine:
             generated_at=timestamp,
             mode=self.config.mode,
             cex_candidates=tuple(cex_candidates),
+            liquid_long_candidates=tuple(liquid_long_candidates),
+            liquid_universe_size=liquid_universe_size,
+            liquid_enriched_size=liquid_enriched_size,
+            liquid_supply_ready_size=liquid_supply_ready_size,
+            liquid_market_context=liquid_market_context,
             listing_candidates=tuple(listing_candidates),
             listing_filtered_candidates=tuple(listing_filtered_candidates),
             social_candidates=tuple(social_candidates),
@@ -209,6 +348,7 @@ class UnifiedRadarRuntime:
                         self._latest is None
                         or not completed.errors
                         or completed.cex_candidates
+                        or completed.liquid_long_candidates
                         or completed.listing_candidates
                         or completed.listing_filtered_candidates
                     ):
@@ -243,6 +383,9 @@ def attach_snapshot_to_results(results: list[dict], snapshot: RadarSnapshot | No
     if snapshot is None:
         return
     by_symbol = {candidate.symbol: candidate for candidate in snapshot.cex_candidates}
+    liquid_longs_by_symbol = {
+        candidate.symbol: candidate for candidate in snapshot.liquid_long_candidates
+    }
     listings_by_symbol = {
         candidate.symbol: candidate
         for candidate in (
@@ -257,6 +400,11 @@ def attach_snapshot_to_results(results: list[dict], snapshot: RadarSnapshot | No
             "mode": snapshot.mode,
             "can_change_trade_decision": False,
             "candidate": candidate.to_dict() if candidate else None,
+            "liquid_100_long": (
+                liquid_longs_by_symbol[symbol].to_dict()
+                if symbol in liquid_longs_by_symbol
+                else None
+            ),
             "new_listing": (
                 listings_by_symbol[symbol].to_dict()
                 if symbol in listings_by_symbol
@@ -276,6 +424,7 @@ def format_snapshot_brief(snapshot: RadarSnapshot | dict | None) -> str:
         return "Unified Radar: ilk gölge tarama bekleniyor."
     data = snapshot.to_dict() if isinstance(snapshot, RadarSnapshot) else snapshot
     cex = (data.get("cex_candidates") or [None])[0]
+    liquid_long = (data.get("liquid_long_candidates") or [None])[0]
     listing = (data.get("listing_candidates") or [None])[0]
     filtered_count = len(data.get("listing_filtered_candidates") or [])
     fundamental_count = len(data.get("fundamental_candidates") or [])
@@ -284,11 +433,78 @@ def format_snapshot_brief(snapshot: RadarSnapshot | dict | None) -> str:
     return (
         f"Unified Radar [{data.get('mode', 'SHADOW')}]: "
         f"PriceMonitorX {_candidate_line(cex)} | "
+        f"Likit100 Long {_candidate_line(liquid_long)} | "
         f"PhenomenonX/MEXC Yeni {_candidate_line(listing)}"
         f" | filtrede {filtered_count}"
         f" | temel veri {fundamental_count}"
         f" | trade yetkisi: YOK{error_text}"
     )
+
+
+def format_liquid_long_report(
+    snapshot: RadarSnapshot | dict | None,
+    *,
+    limit: int = 5,
+) -> str:
+    """Telegram-ready view of the MEXC top-liquidity long shortlist."""
+    if snapshot is None:
+        return "💧 MEXC LİKİT 100 — LONG İLK 5\n\nİlk tarama henüz tamamlanmadı."
+    data = snapshot.to_dict() if isinstance(snapshot, RadarSnapshot) else snapshot
+    rows = data.get("liquid_long_candidates") or []
+    universe_size = int(data.get("liquid_universe_size") or 0)
+    enriched_size = int(data.get("liquid_enriched_size") or 0)
+    supply_ready_size = int(data.get("liquid_supply_ready_size") or 0)
+    market_context = data.get("liquid_market_context") or {}
+    if not rows:
+        return (
+            "💧 MEXC LİKİT 100 — LONG İLK 5\n\n"
+            f"MEXC hacim evreni: {universe_size}/100 · teknik: {enriched_size} · "
+            f"arz: {supply_ready_size}\n"
+            f"Rejim: {market_context.get('regime') or '?'} · "
+            f"pozitif genişlik %{float(market_context.get('positive_breadth_pct') or 0):.1f}\n"
+            "Şu an düşüş, trend, momentum, oynaklık ve doğrulanmış arz "
+            "kapılarının tamamını geçen Long adayı yok."
+        )
+
+    stage_labels = {
+        "A_PLUS": "🏆 A+",
+        "STRONG_LONG": "🟢 Güçlü Long",
+        "WATCH_LONG": "🟡 Long İzle",
+    }
+    lines = [
+        "💧 MEXC LİKİT 100 — LONG İLK 5",
+        f"Hacim evreni {universe_size}/100 · teknik {enriched_size} · "
+        f"arz doğrulanan {supply_ready_size}",
+        "Sıralama: trend + momentum + katılım + likidite + arz + rejim",
+        "",
+    ]
+    for index, item in enumerate(rows[: max(1, limit)], 1):
+        metadata = item.get("metadata") or {}
+        metrics = metadata.get("long_metrics") or {}
+        context = metadata.get("market_context") or {}
+        fundamentals = metadata.get("fundamentals") or {}
+        lines.extend([
+            f"{index}. {str(item.get('symbol') or '?').removesuffix('USDT')} — "
+            f"{int(item.get('score') or 0)}/100 · "
+            f"{stage_labels.get(str(item.get('stage') or ''), item.get('stage') or '-')}",
+            f"   Likidite #{int(metadata.get('liquidity_rank') or 0)} | "
+            f"Teknik {int(metadata.get('technical_score') or 0)} | "
+            f"Arz {int(metadata.get('supply_score') or 0)} | "
+            f"Rejim {context.get('regime') or '?'}",
+            f"   24s %{float(metadata.get('change_pct') or 0):+.1f} | "
+            f"1s %{float(metrics.get('change_1h_pct') or 0):+.1f} | "
+            f"4s %{float(metrics.get('change_4h_pct') or 0):+.1f} | "
+            f"RSI {float(metrics.get('rsi14') or 0):.0f}",
+            f"   Hacim ivmesi {float(metrics.get('volume_ratio') or 0):.1f}x | "
+            f"ATR %{float(metrics.get('atr_pct') or 0):.1f} | "
+            f"MEXC 24s {_money(metadata.get('quote_volume'))}",
+            f"   Arz: dolaşan {_quantity(fundamentals.get('circulating_supply'))} | "
+            f"toplam {_quantity(fundamentals.get('total_supply'))} | "
+            f"max {_quantity(fundamentals.get('max_supply'), missing='açıklanmamış/sınırsız')}",
+            "",
+        ])
+    lines.append("Araştırma sıralamasıdır; otomatik emir oluşturmaz.")
+    return "\n".join(lines)
 
 
 def _money(value: Any) -> str:
@@ -303,6 +519,22 @@ def _money(value: Any) -> str:
     if number >= 1_000:
         return f"${number / 1_000:.0f}K"
     return f"${number:.0f}"
+
+
+def _quantity(value: Any, *, missing: str = "açıklanmamış") -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return missing
+    if number >= 1_000_000_000_000:
+        return f"{number / 1_000_000_000_000:.2f}T"
+    if number >= 1_000_000_000:
+        return f"{number / 1_000_000_000:.2f}B"
+    if number >= 1_000_000:
+        return f"{number / 1_000_000:.2f}M"
+    if number >= 1_000:
+        return f"{number / 1_000:.2f}K"
+    return f"{number:g}"
 
 
 def _stage_label(stage: Any) -> str:
@@ -334,7 +566,10 @@ def _fundamental_report_line(metadata: dict[str, Any]) -> str:
         f"   🧬 Temel {int(fundamentals.get('fundamental_score') or 0)}/100 | "
         f"PD {_money(fundamentals.get('market_cap_usd'))} | "
         f"FDV {_money(fundamentals.get('fully_diluted_valuation_usd'))} | "
-        f"dolaşım {circulation_text}"
+        f"dolaşım {circulation_text}\n"
+        f"   Arz: dolaşan {_quantity(fundamentals.get('circulating_supply'))} | "
+        f"toplam {_quantity(fundamentals.get('total_supply'))} | "
+        f"max {_quantity(fundamentals.get('max_supply'), missing='açıklanmamış/sınırsız')}"
     )
 
 
@@ -345,21 +580,21 @@ def format_listing_report(
 ) -> str:
     """Human-readable Telegram report for PhenomenonX MEXC candidates."""
     if snapshot is None:
-        return "🔥 MEXC — GÜÇLÜ ADAYLAR\n\nİlk tarama henüz tamamlanmadı."
+        return "🆕 YENİ LİSTELEME — GÜÇLÜ ADAYLAR\n\nİlk tarama henüz tamamlanmadı."
     data = snapshot.to_dict() if isinstance(snapshot, RadarSnapshot) else snapshot
     rows = data.get("listing_candidates") or []
     if not rows:
         errors = [str(item) for item in (data.get("errors") or []) if str(item).startswith("LISTING:")]
         suffix = f"\nKaynak durumu: {', '.join(errors)}" if errors else ""
         return (
-            "🔥 MEXC — GÜÇLÜ ADAYLAR\n\n"
+            "🆕 YENİ LİSTELEME — GÜÇLÜ ADAYLAR\n\n"
             "Şu an güçlü aday seviyesine ulaşan yeni listeleme yok."
             f"{suffix}"
         )
 
     lines = [
-        "🔥 MEXC — GÜÇLÜ ADAYLAR",
-        "Resmî duyuru + MEXC Spot teyidi | emir yetkisi yok",
+        "🆕 YENİ LİSTELEME FIRSAT PENCERESİ",
+        "Yeni olay + MEXC Spot teyidi + arz doğrulaması | emir yetkisi yok",
         "",
     ]
     for index, item in enumerate(rows[: max(1, limit)], 1):
@@ -405,14 +640,14 @@ def format_filtered_listing_report(
 ) -> str:
     """Explain candidates hidden by the quality/chase filter."""
     if snapshot is None:
-        return "🟡 MEXC — İZLEME HAVUZU\n\nİlk tarama henüz tamamlanmadı."
+        return "🟡 YENİ LİSTELEME — İZLEME\n\nİlk tarama henüz tamamlanmadı."
     data = snapshot.to_dict() if isinstance(snapshot, RadarSnapshot) else snapshot
     rows = data.get("listing_filtered_candidates") or []
     if not rows:
-        return "🟡 MEXC — İZLEME HAVUZU\n\nŞu an izleme havuzunda aday yok."
+        return "🟡 YENİ LİSTELEME — İZLEME\n\nŞu an izleme havuzunda aday yok."
 
     lines = [
-        "🟡 MEXC — İZLEME HAVUZU",
+        "🟡 YENİ LİSTELEME — İZLEME HAVUZU",
         "Henüz güçlü değil; gerekçesiyle izlenir ve yeniden puanlanır.",
         "",
     ]

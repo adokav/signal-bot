@@ -49,12 +49,13 @@ from acce_unified import (
     attach_snapshot_to_results,
     build_trade_universe,
     format_filtered_listing_report,
+    format_liquid_long_report,
     format_listing_report,
     format_snapshot_brief,
 )
 from acce_unified.validation import ValidationPolicy, evaluate_promotion
 
-__version__ = "4.7.0-community-opinion-gate"
+__version__ = "4.8.0-liquid-100-long-radar"
 
 # ============================================================
 # LOGGING
@@ -1695,6 +1696,8 @@ _KEYBOARD_COMMAND_LABELS: dict[str, str] = {
     "🛡️ Güvenlik": "SAFETY",
     # Inline merkez etiketleri düz mesaj olarak gelirse de çalışsın.
     "🔥 Güçlü Adaylar": "LISTINGS",
+    "💧 Likit 100 Long": "LIQUID_LONG",
+    "🆕 Yeni Listelemeler": "LISTINGS",
     "🟡 İzleme Havuzu": "FILTERED_LISTINGS",
     "📣 Sosyal Radar": "SOCIAL_RADAR",
     "🧬 Temel Radar": "FUNDAMENTAL_RADAR",
@@ -1763,6 +1766,7 @@ MAIN_KEYBOARD = _reply_keyboard(
 BOT_COMMANDS: list[dict[str, str]] = [
     {"command": "panel", "description": "Dört bölümlü kontrol paneli"},
     {"command": "opportunities", "description": "MEXC fırsat merkezi"},
+    {"command": "longs", "description": "MEXC Likit 100 içinden Long İlk 5"},
     {"command": "safety", "description": "Güvenlik ve icra merkezi"},
     {"command": "status", "description": "Anlık sağlık ve 24 saatlik durum"},
     {"command": "positions", "description": "Açık pozisyonlar, stop, TP ve PnL"},
@@ -10871,6 +10875,32 @@ def _mexc_candidate_by_pair(snapshot: Any) -> dict[str, dict]:
     }
 
 
+def _liquid_long_rows(snapshot: Any) -> list[dict]:
+    if snapshot is None:
+        return []
+    data = snapshot.to_dict() if hasattr(snapshot, "to_dict") else snapshot
+    if not isinstance(data, dict):
+        return []
+    return [
+        row for row in (data.get("liquid_long_candidates") or [])
+        if isinstance(row, dict)
+    ]
+
+
+def _liquid_long_by_pair(snapshot: Any) -> dict[str, dict]:
+    return {
+        str(row.get("symbol") or "").upper(): row
+        for row in _liquid_long_rows(snapshot)
+        if _normalize_mexc_watch_pair(row.get("symbol"))
+    }
+
+
+def _research_candidate_by_pair(snapshot: Any) -> dict[str, dict]:
+    combined = _mexc_candidate_by_pair(snapshot)
+    combined.update(_liquid_long_by_pair(snapshot))
+    return combined
+
+
 def add_mexc_watch(
     value: Any,
     state_mgr: StateManager = _STATE_MGR,
@@ -10880,12 +10910,17 @@ def add_mexc_watch(
         return False, "Geçersiz coin. Örnek: /watch_add NOVA"
     watchlist = _mexc_watchlist(state_mgr)
     already = pair in watchlist
-    row = watchlist.get(pair) or {}
-    row.setdefault("added_at", now_ts())
-    row["updated_at"] = now_ts()
     current = _mexc_candidate_by_pair(
         state_mgr.get_meta("unified_radar_snapshot")
     ).get(pair)
+    if not already and not current:
+        return False, (
+            f"{pair} doğrulanmış Yeni Listeleme adayları içinde değil. "
+            "Mevcut ve likit coinleri 💧 Likit 100 ekranından izle."
+        )
+    row = watchlist.get(pair) or {}
+    row.setdefault("added_at", now_ts())
+    row["updated_at"] = now_ts()
     if current:
         row["last_candidate"] = current
         row["last_seen_at"] = now_ts()
@@ -11023,25 +11058,32 @@ def _friendly_listing_stage(value: Any) -> str:
 
 def _mexc_center_text(snapshot: Any, state_mgr: StateManager) -> str:
     data = snapshot if isinstance(snapshot, dict) else {}
+    liquid_longs = len(data.get("liquid_long_candidates") or [])
+    liquid_universe = int(data.get("liquid_universe_size") or 0)
+    liquid_enriched = int(data.get("liquid_enriched_size") or 0)
+    liquid_supply = int(data.get("liquid_supply_ready_size") or 0)
     passed = len(data.get("listing_candidates") or [])
     filtered = len(data.get("listing_filtered_candidates") or [])
     social = len(data.get("social_candidates") or [])
-    fundamentals = len(data.get("fundamental_candidates") or [])
+    fundamentals = len(_fundamental_radar_rows(data))
     watched = len(_mexc_watchlist(state_mgr))
     generated_at = int(data.get("generated_at") or 0)
     age = max(0, now_ts() - generated_at) if generated_at else None
     freshness = f"{age} sn önce" if age is not None else "ilk tarama bekleniyor"
     return (
-        "🚀 MEXC ERKEN FIRSAT MERKEZİ\n\n"
-        f"🔥 Güçlü aday: {passed}\n"
-        f"🟡 İzleme havuzu: {filtered}\n"
+        "🔎 MEXC FIRSAT MERKEZİ\n\n"
+        "1) 💧 LİKİT 100 — mevcut ve likit coinler\n"
+        f"   Evren: {liquid_universe}/100 · teknik: {liquid_enriched} · "
+        f"arz: {liquid_supply} · Long: {liquid_longs}\n\n"
+        "2) 🆕 YENİ LİSTELEME — yalnız doğrulanmış yeni olaylar\n"
+        f"   Güçlü aday: {passed} · İzleme: {filtered}\n\n"
         f"📣 Sosyal sinyal: {social}\n"
         f"🧬 Temel verisi hazır: {fundamentals}\n"
         f"⭐ Takip listem: {watched}\n"
         f"🕒 Son veri: {freshness}\n\n"
-        f"İzleme havuzundaki adaylar {UNIFIED_CONFIG.listing_candidate_ttl_hours} "
-        "saat yeniden puanlanır. Bir coine dokunarak detayını açabilir, "
-        "oradan kalıcı takibe alabilirsin."
+        "AVAX gibi eski coinler yalnız Likit 100 ekranında bulunabilir; yeni "
+        "listeleme ekranına alınmaz. Yeni adaylar "
+        f"{UNIFIED_CONFIG.listing_candidate_ttl_hours} saat yeniden puanlanır."
     )
 
 
@@ -11069,6 +11111,7 @@ def _dashboard_text(state_mgr: StateManager) -> str:
     radar = state_mgr.get_meta("unified_radar_snapshot", {}) or {}
     strong = len(radar.get("listing_candidates") or [])
     pool = len(radar.get("listing_filtered_candidates") or [])
+    longs = len(radar.get("liquid_long_candidates") or [])
     watched = len(_mexc_watchlist(state_mgr))
     pending = sum(
         1 for row in _pending_trade_approvals(state_mgr).values()
@@ -11083,7 +11126,8 @@ def _dashboard_text(state_mgr: StateManager) -> str:
         f"Sistem: {health}\n"
         f"Emir modu: {execution}\n"
         f"Açık pozisyon: {open_trades} · Onay bekleyen: {pending}\n"
-        f"MEXC: {strong} güçlü · {pool} izleme · {watched} takip\n\n"
+        f"MEXC: {longs} Long · {strong} yeni güçlü · {pool} yeni izleme · "
+        f"{watched} takip\n\n"
         "Sabit menü yalnız ana bölümleri açar. Ayrıntılı işlemler bu mesajın "
         "altındaki bağlamsal butonlarda görünür."
     )
@@ -11107,16 +11151,21 @@ def _dashboard_keyboard() -> dict:
 
 def _mexc_center_keyboard(snapshot: Any, state_mgr: StateManager) -> dict:
     data = snapshot if isinstance(snapshot, dict) else {}
+    liquid_longs = len(data.get("liquid_long_candidates") or [])
     strong = len(data.get("listing_candidates") or [])
     pool = len(data.get("listing_filtered_candidates") or [])
     social = len(data.get("social_candidates") or [])
-    fundamentals = len(data.get("fundamental_candidates") or [])
+    fundamentals = len(_fundamental_radar_rows(data))
     watched = len(_mexc_watchlist(state_mgr))
     return {
         "inline_keyboard": [
+            [{
+                "text": f"💧 Likit 100 · Long İlk 5 ({liquid_longs})",
+                "callback_data": "LIQUID_LONG",
+            }],
             [
-                {"text": f"🔥 Güçlü {strong}", "callback_data": "LISTINGS"},
-                {"text": f"🟡 İzleme {pool}", "callback_data": "FILTERED_LISTINGS"},
+                {"text": f"🆕 Yeni · Güçlü {strong}", "callback_data": "LISTINGS"},
+                {"text": f"🟡 Yeni · İzleme {pool}", "callback_data": "FILTERED_LISTINGS"},
             ],
             [
                 {"text": f"🧬 Temel {fundamentals}", "callback_data": "FUNDAMENTAL_RADAR"},
@@ -11132,6 +11181,128 @@ def _mexc_center_keyboard(snapshot: Any, state_mgr: StateManager) -> dict:
             [{"text": "⬅️ Kontrol paneli", "callback_data": "DASHBOARD"}],
         ]
     }
+
+
+def _liquid_long_keyboard(snapshot: Any) -> dict:
+    rows: list[list[dict[str, str]]] = []
+    medals = ("🥇", "🥈", "🥉", "4️⃣", "5️⃣")
+    for index, candidate in enumerate(_liquid_long_rows(snapshot)[:5]):
+        pair = _normalize_mexc_watch_pair(candidate.get("symbol"))
+        if not pair:
+            continue
+        metadata = candidate.get("metadata") or {}
+        rows.append([{
+            "text": (
+                f"{medals[index]} {pair.removesuffix('USDT')} · Long "
+                f"{int(candidate.get('score') or 0)} · "
+                f"Arz {int(metadata.get('supply_score') or 0)}"
+            ),
+            "callback_data": f"LIQUID_DETAIL {pair}",
+        }])
+    rows.extend([
+        [{"text": "🔄 Likit 100'ü yenile", "callback_data": "MEXC_REFRESH"}],
+        [{"text": "⬅️ Fırsat merkezi", "callback_data": "MEXC_MENU"}],
+        [{"text": "🏠 Kontrol paneli", "callback_data": "DASHBOARD"}],
+    ])
+    return {"inline_keyboard": rows}
+
+
+def _supply_amount(value: Any, *, maximum: bool = False) -> str:
+    if value is None:
+        return "açıklanmamış/sınırsız" if maximum else "açıklanmamış"
+    return _compact_amount(value)
+
+
+def _liquid_long_detail_text(value: Any, state_mgr: StateManager) -> str:
+    pair = _normalize_mexc_watch_pair(value)
+    if not pair:
+        return "⚠️ Geçersiz Likit 100 adayı."
+    snapshot = state_mgr.get_meta("unified_radar_snapshot") or {}
+    candidate = _liquid_long_by_pair(snapshot).get(pair) or {}
+    if not candidate:
+        return (
+            f"💧 {pair.removesuffix('USDT')}\n\n"
+            "Coin güncel Long İlk 5 içinde değil. Bir sonraki taramada kriterleri "
+            "yeniden geçtiğinde tekrar görünür."
+        )
+    metadata = candidate.get("metadata") or {}
+    metrics = metadata.get("long_metrics") or {}
+    context = metadata.get("market_context") or {}
+    fundamentals = metadata.get("fundamentals") or {}
+    components = metadata.get("technical_components") or {}
+    lines = [
+        f"💧 {pair.removesuffix('USDT')} — LİKİT 100 LONG KARTI",
+        "",
+        f"Long puanı: {int(candidate.get('score') or 0)}/100 · "
+        f"{str(candidate.get('stage') or '-').replace('_', ' ')}",
+        f"MEXC likidite sırası: #{int(metadata.get('liquidity_rank') or 0)} · "
+        f"24s hacim: {format_money(metadata.get('quote_volume'))}",
+        f"Teknik: {int(metadata.get('technical_score') or 0)}/100 · "
+        f"Arz kalitesi: {int(metadata.get('supply_score') or 0)}/100",
+        "",
+        "SKOR BİLEŞENLERİ",
+        f"Trend {int(components.get('trend') or 0)} · "
+        f"Momentum {int(components.get('momentum') or 0)} · "
+        f"Katılım {int(components.get('participation') or 0)}",
+        f"Likidite {int(components.get('liquidity') or 0)} · "
+        f"Risk/FOMO {int(components.get('risk_fomo') or 0)}",
+        "",
+        "FİYAT VE MOMENTUM",
+        f"24s %{float(metadata.get('change_pct') or 0):+.1f} · "
+        f"1s %{float(metrics.get('change_1h_pct') or 0):+.1f} · "
+        f"4s %{float(metrics.get('change_4h_pct') or 0):+.1f}",
+        f"EMA20 {_compact_amount(metrics.get('ema20'))} · "
+        f"EMA50 {_compact_amount(metrics.get('ema50'))} · "
+        f"EMA uzaklık {_metric_pct(metrics.get('ema20_distance_pct'))}",
+        f"RSI {float(metrics.get('rsi14') or 0):.1f} · "
+        f"ATR {_metric_pct(metrics.get('atr_pct'))} · "
+        f"hacim ivmesi {float(metrics.get('volume_ratio') or 0):.1f}x",
+        f"Makas: {float(metadata.get('spread_bps') or 0):.1f} bps",
+        "",
+        "PİYASA REJİMİ",
+        f"{context.get('regime') or '?'} · pozitif genişlik "
+        f"{_metric_pct(context.get('positive_breadth_pct'))} · "
+        f"BTC 24s {_metric_pct(context.get('btc_change_pct'))}",
+        "",
+        "ARZ VE DEĞERLEME",
+        f"Dolaşan arz: {_supply_amount(fundamentals.get('circulating_supply'))}",
+        f"Toplam arz: {_supply_amount(fundamentals.get('total_supply'))}",
+        f"Azami arz: {_supply_amount(fundamentals.get('max_supply'), maximum=True)}",
+        f"Dolaşım oranı: {_metric_pct(fundamentals.get('circulation_pct'))} · "
+        f"PD/FDV: {_metric_pct(fundamentals.get('market_cap_to_fdv_pct'))}",
+        f"Piyasa değeri: "
+        f"{_compact_amount(fundamentals.get('market_cap_usd'), currency=True)} · "
+        f"FDV: {_compact_amount(fundamentals.get('fully_diluted_valuation_usd'), currency=True)}",
+    ]
+    risks = candidate.get("risk_flags") or []
+    if risks:
+        lines.extend(["", "Risk:", *[f"• {risk}" for risk in risks[:3]]])
+    lines.extend([
+        "",
+        "Bu kart araştırma sıralamasıdır. Emir, kaldıraç veya pozisyon büyüklüğü oluşturmaz.",
+    ])
+    return "\n".join(lines)
+
+
+def _liquid_long_detail_keyboard(value: Any, state_mgr: StateManager) -> dict:
+    pair = _normalize_mexc_watch_pair(value)
+    snapshot = state_mgr.get_meta("unified_radar_snapshot") or {}
+    candidate = _liquid_long_by_pair(snapshot).get(pair or "") or {}
+    fundamentals = (candidate.get("metadata") or {}).get("fundamentals") or {}
+    rows: list[list[dict[str, str]]] = []
+    source_url = str(fundamentals.get("source_url") or "")
+    if source_url.startswith("https://"):
+        rows.append([{"text": "🔗 Arz kaynağını aç", "url": source_url}])
+    if pair:
+        rows.append([{
+            "text": "🔄 Kartı yenile",
+            "callback_data": f"LIQUID_DETAIL {pair}",
+        }])
+    rows.extend([
+        [{"text": "⬅️ Long İlk 5", "callback_data": "LIQUID_LONG"}],
+        [{"text": "🏠 Kontrol paneli", "callback_data": "DASHBOARD"}],
+    ])
+    return {"inline_keyboard": rows}
 
 
 def _more_tools_keyboard() -> dict:
@@ -11477,10 +11648,28 @@ def _metric_pct(value: Any) -> str:
 
 def _fundamental_radar_rows(snapshot: Any) -> list[dict]:
     data = snapshot if isinstance(snapshot, dict) else {}
-    return [
-        row for row in (data.get("fundamental_candidates") or [])
-        if isinstance(row, dict)
+    rows = [
+        *(data.get("fundamental_candidates") or []),
+        *(data.get("liquid_long_candidates") or []),
     ]
+    unique: dict[str, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        pair = _normalize_mexc_watch_pair(row.get("symbol"))
+        fundamentals = (row.get("metadata") or {}).get("fundamentals") or {}
+        if pair and fundamentals.get("status") == "READY":
+            unique.setdefault(pair, row)
+    return sorted(
+        unique.values(),
+        key=lambda row: (
+            int(((row.get("metadata") or {}).get("fundamentals") or {}).get(
+                "fundamental_score"
+            ) or 0),
+            int(row.get("score") or 0),
+        ),
+        reverse=True,
+    )
 
 
 def _format_fundamental_radar(snapshot: Any, *, limit: int = 8) -> str:
@@ -11494,7 +11683,7 @@ def _format_fundamental_radar(snapshot: Any, *, limit: int = 8) -> str:
         )
     lines = [
         "🧬 TEMEL METRİK RADARI",
-        "Piyasa değeri, FDV, dolaşım ve küresel devir birlikte ölçülür.",
+        "Piyasa değeri, FDV, dolaşan/toplam/azami arz ve küresel devir ölçülür.",
         "",
     ]
     for index, row in enumerate(rows[:limit], 1):
@@ -11508,9 +11697,16 @@ def _format_fundamental_radar(snapshot: Any, *, limit: int = 8) -> str:
             f"Dolaşım {_metric_pct(fundamentals.get('circulation_pct'))}",
             f"   Hacim/PD {_metric_pct(fundamentals.get('volume_to_market_cap_pct'))} · "
             f"veri %{int(fundamentals.get('coverage_pct') or 0)}",
+            f"   Arz: {_supply_amount(fundamentals.get('circulating_supply'))} / "
+            f"{_supply_amount(fundamentals.get('total_supply'))} / "
+            f"{_supply_amount(fundamentals.get('max_supply'), maximum=True)} "
+            "(dolaşan/toplam/max)",
             "",
         ])
-    lines.append("Temel puan fırsat puanını değiştirmez ve işlem yetkisi vermez.")
+    lines.append(
+        "Temel/arz verisi araştırma filtresi ve Long sırasına girer; "
+        "işlem yetkisi vermez."
+    )
     return "\n".join(lines)
 
 
@@ -11540,7 +11736,7 @@ def _fundamental_detail_text(value: Any, state_mgr: StateManager) -> str:
     pair = _normalize_mexc_watch_pair(value)
     if not pair:
         return "⚠️ Geçersiz temel radar adayı."
-    candidate = _mexc_candidate_by_pair(
+    candidate = _research_candidate_by_pair(
         state_mgr.get_meta("unified_radar_snapshot")
     ).get(pair) or {}
     fundamentals = (candidate.get("metadata") or {}).get("fundamentals") or {}
@@ -11571,9 +11767,9 @@ def _fundamental_detail_text(value: Any, state_mgr: StateManager) -> str:
         f"MEXC / global hacim: {_metric_pct(fundamentals.get('mexc_volume_share_pct'))}",
         f"Dolaşım oranı: {_metric_pct(fundamentals.get('circulation_pct'))}",
         f"Piyasa değeri / FDV: {_metric_pct(fundamentals.get('market_cap_to_fdv_pct'))}",
-        f"Dolaşan arz: {_compact_amount(fundamentals.get('circulating_supply'))}",
-        f"Toplam / azami arz: {_compact_amount(fundamentals.get('total_supply'))} / "
-        f"{_compact_amount(fundamentals.get('max_supply'))}",
+        f"Dolaşan arz: {_supply_amount(fundamentals.get('circulating_supply'))}",
+        f"Toplam arz: {_supply_amount(fundamentals.get('total_supply'))}",
+        f"Azami arz: {_supply_amount(fundamentals.get('max_supply'), maximum=True)}",
         f"ATH mesafesi: {_metric_pct(fundamentals.get('ath_change_pct'))}",
     ]
     reasons = fundamentals.get("reasons") or []
@@ -11597,7 +11793,7 @@ def _fundamental_detail_keyboard(
     origin: str = "T",
 ) -> dict:
     pair = _normalize_mexc_watch_pair(value)
-    candidate = _mexc_candidate_by_pair(
+    candidate = _research_candidate_by_pair(
         state_mgr.get_meta("unified_radar_snapshot")
     ).get(pair or "") or {}
     fundamentals = (candidate.get("metadata") or {}).get("fundamentals") or {}
@@ -11605,7 +11801,13 @@ def _fundamental_detail_keyboard(
     source_url = str(fundamentals.get("source_url") or "")
     if source_url.startswith("https://"):
         rows.append([{"text": "🔗 CoinGecko kaynağını aç", "url": source_url}])
-    if pair:
+    is_liquid_long = candidate.get("source") == "LIQUID_100_LONG_RADAR"
+    if pair and is_liquid_long:
+        rows.append([{
+            "text": "💧 Long kartına dön",
+            "callback_data": f"LIQUID_DETAIL {pair}",
+        }])
+    elif pair:
         safe_origin = _candidate_origin_command(origin)
         origin_page = _candidate_origin_page(origin)
         origin_code = _candidate_origin_code(safe_origin, origin_page)
@@ -11881,6 +12083,10 @@ def _mexc_candidate_detail_text(value: Any, state_mgr: StateManager) -> str:
             f"PD {_compact_amount(fundamentals.get('market_cap_usd'), currency=True)} · "
             f"FDV {_compact_amount(fundamentals.get('fully_diluted_valuation_usd'), currency=True)} · "
             f"Dolaşım {_metric_pct(fundamentals.get('circulation_pct'))}",
+            f"Arz dolaşan/toplam/max: "
+            f"{_supply_amount(fundamentals.get('circulating_supply'))} / "
+            f"{_supply_amount(fundamentals.get('total_supply'))} / "
+            f"{_supply_amount(fundamentals.get('max_supply'), maximum=True)}",
         ])
     elif fundamentals:
         lines.append("\nTemel veri: ⚪ kimlik/veri teyidi bekleniyor")
@@ -12140,6 +12346,26 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 _mexc_center_text(snapshot, state_mgr),
                 reply_markup=_mexc_center_keyboard(snapshot, state_mgr),
             )
+        elif cmd in {"LONGS", "LIQUID_LONG"}:
+            snapshot = state_mgr.get_meta("unified_radar_snapshot") or {}
+            _respond_telegram(
+                update,
+                format_liquid_long_report(snapshot, limit=5),
+                reply_markup=_liquid_long_keyboard(snapshot),
+            )
+        elif cmd == "LIQUID_DETAIL":
+            if len(parts) < 2:
+                _respond_telegram(
+                    update,
+                    "Likit 100 adayı seçilemedi.",
+                    reply_markup=_opportunity_back_keyboard(),
+                )
+            else:
+                _respond_telegram(
+                    update,
+                    _liquid_long_detail_text(parts[1], state_mgr),
+                    reply_markup=_liquid_long_detail_keyboard(parts[1], state_mgr),
+                )
         elif cmd in {"MORE", "MORE_MENU"}:
             _respond_telegram(
                 update,
@@ -12153,11 +12379,12 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 "/start — bot uyandır, özet\n"
                 "/panel — kontrol paneli\n"
                 "/opportunities — MEXC fırsat merkezi\n"
+                "/longs — MEXC Likit 100 içinden Long İlk 5\n"
                 "/safety — güvenlik ve icra merkezi\n"
                 "/status — anlık sağlık durumu + 24h özet\n"
                 "/positions — açık pozisyonlar (entry/stop/TP/PnL)\n"
-                "/listings — MEXC puan eşiğini geçen adaylar\n"
-                "/filtered — filtrede kalan MEXC adayları\n"
+                "/listings — doğrulanmış yeni listeleme adayları\n"
+                "/filtered — yeni listeleme izleme havuzu\n"
                 "/fundamentals — piyasa değeri, FDV, arz ve seyrelme\n"
                 "/social — sosyal ilgi ve fenomen potansiyeli\n"
                 "/watch — süresiz MEXC takip listem\n"
@@ -12358,8 +12585,9 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 "🧭 UNIFIED RADAR\n\n"
                 f"{format_snapshot_brief(snapshot)}\n\n"
                 f"{format_unified_validation_brief(state_mgr)}\n\n"
-                "PriceMonitorX geniş MEXC piyasa hareketini; PhenomenonX yalnız "
-                "MEXC yeni listelemelerini izler. İkisi de tek başına emir veremez.",
+                "Likit 100 mevcut MEXC coinlerini Long yönünde sıralar; "
+                "PhenomenonX yalnız doğrulanmış yeni listelemeleri izler. "
+                "İki radar birbirine karışmaz ve emir veremez.",
                 reply_markup=_opportunity_back_keyboard(),
             )
         elif cmd in {"LISTINGS", "MEXC", "NEW_LISTINGS"}:
@@ -12523,7 +12751,7 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
             _respond_telegram(
                 update,
                 "🔄 MEXC taraması başlatıldı. Sonuç birkaç saniye içinde "
-                "Güçlü Adaylar ve İzleme Havuzu ekranlarına yansıyacak.",
+                "Likit 100 ile Yeni Listeleme ekranlarına yansıyacak.",
                 reply_markup=_mexc_center_keyboard(snapshot, state_mgr),
             )
         elif cmd == "SAFETY":
