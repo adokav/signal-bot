@@ -28,10 +28,35 @@ services:
       - key: ACCOUNT_SIZE_USD
         value: "400"
 
-      # ─── Trade Universe (LINK cikarildi: backtest tutarli kayip) ──
-      # BTC, ETH, SOL, ONDO, RENDER, PYTH, BONK, POPCAT (8 coin)
+      # ─── Trade Universe (Wide, 20 coin — dinamik universe icin havuz) ──
+      # LINK CIKARIK: onceki backtest tutarli kayip (2024-03 PF 0.53, 2023-10 PF 0.09)
+      # CORE (2):      BTC, ETH
+      # MAJOR_ALT (8): SOL, ADA, DOT, ATOM, XRP, LTC, UNI, LDO
+      # HIGH_BETA (6): AVAX, MATIC, NEAR, INJ, ONDO, RENDER
+      # MEME (4):      DOGE, SHIB, BONK, POPCAT
       - key: TRADE_UNIVERSE
-        value: "BTCUSDT,ETHUSDT,SOLUSDT,ONDOUSDT,RENDERUSDT,PYTHUSDT,BONKUSDT,POPCATUSDT"
+        value: "BTCUSDT:CORE,ETHUSDT:CORE,SOLUSDT:MAJOR_ALT,ADAUSDT:MAJOR_ALT,DOTUSDT:MAJOR_ALT,ATOMUSDT:MAJOR_ALT,XRPUSDT:MAJOR_ALT,LTCUSDT:MAJOR_ALT,UNIUSDT:MAJOR_ALT,LDOUSDT:MAJOR_ALT,AVAXUSDT:HIGH_BETA,MATICUSDT:HIGH_BETA,NEARUSDT:HIGH_BETA,INJUSDT:HIGH_BETA,ONDOUSDT:HIGH_BETA,RENDERUSDT:HIGH_BETA,DOGEUSDT:MEME,SHIBUSDT:MEME,BONKUSDT:MEME,POPCATUSDT:MEME"
+
+      # ─── Dinamik Universe (Genius Score bazli havuz — Sprint DU-v1) ──
+      # Bot her 24h'da bir /longs skorlarina bakip aktif havuz olusturur.
+      # Sabit cekirdek BTC+ETH her zaman aktif. Dinamik havuz max 8 coin.
+      - key: DYNAMIC_UNIVERSE_ENABLED
+        value: "1"
+      - key: DYNAMIC_UNIVERSE_MIN_SCORE
+        value: "72"
+      - key: DYNAMIC_UNIVERSE_TOP_N
+        value: "8"
+      - key: DYNAMIC_UNIVERSE_REFRESH_HOURS
+        value: "24"
+      - key: DYNAMIC_UNIVERSE_OBSERVATION_DAYS
+        value: "3"
+      - key: DYNAMIC_UNIVERSE_ORPHANED_TTL_DAYS
+        value: "7"
+      - key: DYNAMIC_UNIVERSE_STATE_FILE
+        value: "/data/dynamic_universe.json"
+      # Backtest'te dinamik filtre kapali: sabit 20 coin evren karsilastirmasi icin
+      - key: HISTORICAL_REPLAY_DYNAMIC_UNIVERSE_ENABLED
+        value: "0"
 
       # ─── Position Management ────────────────────────────
       - key: PM_SCALE_IN_ENABLED
