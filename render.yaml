@@ -4,9 +4,17 @@ services:
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
+    # Persistent disk — /data mount'unda 1GB. State dosyalari deploy sonrasi
+    # korunur. Kritik dosyalar env override ile /data altina yonlendirilir.
+    disk:
+      name: signal-bot-data
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+
+      # ─── Execution & Portfolio ────────────────────────────
       - key: EXECUTION_MODE
         value: PAPER
       - key: ENABLE_LIVE_TRADING
@@ -17,8 +25,29 @@ services:
         value: "1"
       - key: ACCE_COLLATERAL_ASSET
         value: USDT
+      - key: ACCOUNT_SIZE_USD
+        value: "400"
+
+      # ─── Trade Universe (LINK cikarildi: backtest tutarli kayip) ──
+      # BTC, ETH, SOL, ONDO, RENDER, PYTH, BONK, POPCAT (8 coin)
+      - key: TRADE_UNIVERSE
+        value: "BTCUSDT,ETHUSDT,SOLUSDT,ONDOUSDT,RENDERUSDT,PYTHUSDT,BONKUSDT,POPCATUSDT"
+
+      # ─── Position Management ────────────────────────────
       - key: PM_SCALE_IN_ENABLED
         value: "0"
+
+      # ─── Multi-Position Gate (Sprint 17 — aktif) ────────
+      - key: ACCE_MULTI_POSITION_ENABLED
+        value: "1"
+      - key: ACCE_ALLOW_SECOND_WITH_SAFE_STOP
+        value: "1"
+      - key: ACCE_MAX_ACTIVE_POSITIONS
+        value: "4"
+      - key: ACCE_MAX_OPEN_RISK_POSITIONS
+        value: "2"
+
+      # ─── Telegram ────────────────────────────
       - key: TELEGRAM_REPORT_STYLE
         value: HUMAN
       - key: TELEGRAM_FULL_HEARTBEAT
@@ -27,10 +56,14 @@ services:
         value: "1"
       - key: TELEGRAM_FORCE_HEARTBEAT_SECONDS
         value: "0"
-      - key: SCAN_INTERVAL
-        value: "300"
       - key: TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS
         value: "5"
+
+      # ─── Scan Cadence ────────────────────────────
+      - key: SCAN_INTERVAL
+        value: "300"
+
+      # ─── Unified Radar (acce_unified) ────────────────────────────
       - key: UNIFIED_SCAN_INTERVAL_SECONDS
         value: "120"
       - key: UNIFIED_LIQUID_UNIVERSE_SIZE
@@ -57,6 +90,8 @@ services:
         value: "true"
       - key: UNIFIED_LISTING_REQUIRE_SUPPLY_DATA
         value: "true"
+
+      # ─── Long Setup Engine ────────────────────────────
       - key: LONG_SETUP_ENGINE_ENABLED
         value: "1"
       - key: LONG_CONFLUENCE_MIN_SETUP
@@ -67,7 +102,8 @@ services:
         value: "1"
       - key: LONG_MEME_MIN_VOLUME_RATIO
         value: "1.8"
-      # ATR-aware position management (sprint: PM v2)
+
+      # ─── ATR-Aware PM v2 ────────────────────────────
       - key: ATR_ENABLED
         value: "1"
       - key: ATR_PERIOD
@@ -78,7 +114,8 @@ services:
         value: "2.5"
       - key: TP_ADAPTIVE_ENABLED
         value: "1"
-      # MEXC Cross Margin konservatif kaldirac tavanlari (live'da kullanilacak)
+
+      # ─── MEXC Cross Margin (live'da kullanilacak) ────
       - key: LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE
         value: "5"
       - key: LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA
@@ -88,8 +125,54 @@ services:
       - key: LEVERAGE_POLICY_EXTRA_LIQ_BUFFER_PCT
         value: "0.01"
 
-# Sprint 17 additional env:
-# ACCE_MULTI_POSITION_ENABLED=1
-# ACCE_ALLOW_SECOND_WITH_SAFE_STOP=1
-# ACCE_MAX_ACTIVE_POSITIONS=4
-# ACCE_MAX_OPEN_RISK_POSITIONS=2
+      # ─── Persistent State Paths (deploy sonrasi korunur) ────────
+      # Ana state
+      - key: STATE_FILE
+        value: "/data/state.json"
+      # Paper trading kayitlari
+      - key: PAPER_ORDERS_FILE
+        value: "/data/paper_orders.jsonl"
+      - key: PAPER_POSITIONS_FILE
+        value: "/data/paper_positions.json"
+      - key: PAPER_EXECUTION_REPORT_FILE
+        value: "/data/paper_execution_report.json"
+      # Risk Governor
+      - key: RISK_GOVERNOR_REPORT_FILE
+        value: "/data/risk_governor_report.json"
+      - key: RISK_GOVERNOR_LOG_FILE
+        value: "/data/risk_governor_log.jsonl"
+      # Position Management
+      - key: POSITION_MANAGEMENT_LOG_FILE
+        value: "/data/position_management_log.jsonl"
+      - key: LONG_BLOCK_REASONS_FILE
+        value: "/data/long_block_reasons.jsonl"
+      # Regime dashboard
+      - key: REGIME_DASHBOARD_REPORT_FILE
+        value: "/data/regime_performance_dashboard.json"
+      # ML validation
+      - key: ML_VIRTUAL_POSITIONS_FILE
+        value: "/data/ml_virtual_positions.json"
+      - key: ML_VIRTUAL_LOG_FILE
+        value: "/data/ml_virtual_trades.jsonl"
+      - key: ML_VALIDATION_REPORT_FILE
+        value: "/data/ml_validation_report.json"
+      # Live readiness
+      - key: LIVE_READINESS_REPORT_FILE
+        value: "/data/live_readiness_report.json"
+      # Unified radar listing state (ilk kurulum baselining icin kritik)
+      - key: UNIFIED_LISTING_SEEN_FILE
+        value: "/data/mexc_seen_symbols.json"
+      - key: UNIFIED_LISTING_CANDIDATE_FILE
+        value: "/data/mexc_listing_candidates.json"
+      # Adaptive config + parametre suggestions
+      - key: ADAPTIVE_CONFIG_FILE
+        value: "/data/adaptive_config.json"
+      - key: PARAMETER_SUGGESTIONS_FILE
+        value: "/data/parameter_suggestions.json"
+      - key: PARAMETER_CHANGE_LOG_FILE
+        value: "/data/parameter_change_log.jsonl"
+      - key: WEIGHT_LEARNING_SUGGESTIONS_FILE
+        value: "/data/weight_suggestions.json"
+      # Execution log
+      - key: EXECUTION_LOG_FILE
+        value: "/data/execution_log.jsonl"
