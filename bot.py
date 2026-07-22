@@ -1779,6 +1779,8 @@ BOT_COMMANDS: list[dict[str, str]] = [
     {"command": "watch_remove", "description": "Takipten çıkar: /watch_remove COIN"},
     {"command": "radar", "description": "PriceMonitorX + MEXC yeni liste radarı"},
     {"command": "regime", "description": "Piyasa rejimi ve makro bağlam"},
+    {"command": "universe", "description": "Aktif dinamik universe + gözlem/orphaned"},
+    {"command": "universe_history", "description": "Son 7 günde universe değişimleri"},
     {"command": "equity", "description": "Portföy, gerçekleşen PnL ve başarı"},
     {"command": "approvals", "description": "Trade ve parametre onay merkezi"},
     {"command": "report", "description": "Son 7 günlük performans özeti"},
@@ -9080,6 +9082,11 @@ def can_open_new_trade(result: dict, state_mgr: StateManager) -> tuple[bool, str
             "kapanana kadar izlenebilir."
         )
 
+    # Dinamik universe gate: cekirdek + aktif havuz + gozlem penceresi kontrolu
+    du_allowed, du_reason = can_open_new_position_universe(symbol)
+    if not du_allowed:
+        return False, f"Dinamik universe: {du_reason}"
+
     acce = acce_trade_eligibility(result, state_mgr)
     result["acce_trade_gate"] = acce
     if not acce.get("allowed", True):
@@ -12394,6 +12401,8 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 "/equity — bakiye, gerçekleşen PnL, win/loss\n"
                 "/report — son 7 gün performans özeti\n"
                 "/regime — anlık rejim + macro context\n"
+                "/universe — aktif dinamik universe (havuz + gözlem)\n"
+                "/universe_history — son 7 gün universe değişimleri\n"
                 "/approvals — trade ve parametre onay merkezi\n"
                 "/menu — ana komuta menüsünü yeniden aç\n"
                 "/help — bu mesaj\n"
@@ -12576,6 +12585,18 @@ def _process_telegram_commands_locked(state_mgr: StateManager = _STATE_MGR) -> N
                 f"Macro: {macro_regime} (score: {macro_score})\n"
                 f"News: {news}\n"
                 f"Zaman: {tr_now_text()}",
+                reply_markup=_more_tools_keyboard(),
+            )
+        elif cmd == "UNIVERSE":
+            _respond_telegram(
+                update,
+                format_dynamic_universe_report(state_mgr),
+                reply_markup=_more_tools_keyboard(),
+            )
+        elif cmd == "UNIVERSE_HISTORY":
+            _respond_telegram(
+                update,
+                format_dynamic_universe_history(limit=7),
                 reply_markup=_more_tools_keyboard(),
             )
         elif cmd == "RADAR":
@@ -13897,6 +13918,15 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
             # çalışır. Bu ilk tick işi başlatır; sonuç aşağıda toplanır.
             _tick_unified_radar([], state_mgr)
 
+            # Dinamik universe refresh (24h TTL, force=False). Unified radar
+            # snapshot'inin dolmasi icin ilk turda cekirdek + acik pozisyonlar
+            # taranir; sonraki turlarda dinamik havuz eklenir.
+            if DYNAMIC_UNIVERSE_ENABLED:
+                try:
+                    refresh_dynamic_universe(state_mgr)
+                except Exception as e:
+                    log.warning("Dynamic universe refresh hatasi: %s", type(e).__name__)
+
             # BTC ve ETH features (referans, başarısızsa tur atla)
             try:
                 btc = get_features("BTCUSDT")
@@ -13924,7 +13954,9 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
             # coinler arası paralelizm scan turunu dramatik kısaltır.
             features_cache: dict[str, dict] = {"BTCUSDT": btc, "ETHUSDT": eth}
             legacy_position_groups = _legacy_open_position_groups(state_mgr)
-            scan_symbol_groups = dict(COINS)
+            # Dinamik universe aktifse tarama havuzu daralir; cekirdek + havuz + orphaned
+            active_universe = get_active_universe(state_mgr)
+            scan_symbol_groups = dict(active_universe)
             scan_symbol_groups.update(legacy_position_groups)
             other_symbols = [s for s in scan_symbol_groups if s not in features_cache]
 
@@ -13947,7 +13979,9 @@ def bot_loop(stop_event: threading.Event = _STOP_EVENT) -> None:
             state_mgr.set_meta("last_risk_governor", risk_governor_snapshot(state_mgr, global_regime))
 
             results: list[dict] = []
-            for symbol in COINS:
+            # Sadece aktif universe icindeki coinleri isle (dinamik havuz + cekirdek).
+            # Legacy (evrenden cikarilmis, acik pozisyonu olan) semboller ayri islenir.
+            for symbol in active_universe:
                 features = features_cache.get(symbol)
                 if features is None:
                     continue
@@ -14927,6 +14961,265 @@ def shutdown_resources() -> None:
 def _signal_handler(*_args) -> None:
     shutdown_resources()
     raise SystemExit(0)
+
+
+# ============================================================
+# DYNAMIC UNIVERSE (Sprint DU-v1) — Genius Score bazli havuz
+# ============================================================
+# Trade evreni sabit degil: acce_unified /liquid_long_candidates
+# skorlarindan Genius Score >= threshold olan top-N coin havuza girer.
+# Sabit cekirdek (BTC/ETH) her zaman aktif. Yeni giren coin 3 gun gozlem
+# penceresinde, orphaned coinler acik pozisyon devam eder ama yeni entry yok.
+
+DYNAMIC_UNIVERSE_ENABLED = os.getenv("DYNAMIC_UNIVERSE_ENABLED", "1") == "1"
+DYNAMIC_UNIVERSE_MIN_SCORE = env_int("DYNAMIC_UNIVERSE_MIN_SCORE", 72, min_value=0)
+DYNAMIC_UNIVERSE_TOP_N = env_int("DYNAMIC_UNIVERSE_TOP_N", 8, min_value=1)
+DYNAMIC_UNIVERSE_REFRESH_HOURS = env_int("DYNAMIC_UNIVERSE_REFRESH_HOURS", 24, min_value=1)
+DYNAMIC_UNIVERSE_OBSERVATION_DAYS = env_int("DYNAMIC_UNIVERSE_OBSERVATION_DAYS", 3, min_value=0)
+DYNAMIC_UNIVERSE_ORPHANED_TTL_DAYS = env_int("DYNAMIC_UNIVERSE_ORPHANED_TTL_DAYS", 7, min_value=1)
+DYNAMIC_UNIVERSE_STATE_FILE = os.getenv("DYNAMIC_UNIVERSE_STATE_FILE", "dynamic_universe.json")
+DYNAMIC_UNIVERSE_STATIC_CORE: set[str] = {"BTCUSDT", "ETHUSDT"}
+HISTORICAL_REPLAY_DYNAMIC_UNIVERSE_ENABLED = os.getenv(
+    "HISTORICAL_REPLAY_DYNAMIC_UNIVERSE_ENABLED", "0"
+) == "1"
+
+
+def _du_default_state() -> dict:
+    return {
+        "active": [],
+        "observation": {},
+        "orphaned": {},
+        "history": [],
+        "last_refresh_ts": 0,
+    }
+
+
+def _du_load_state() -> dict:
+    state = _safe_read_json(DYNAMIC_UNIVERSE_STATE_FILE, _du_default_state())
+    default = _du_default_state()
+    for k, v in default.items():
+        state.setdefault(k, v)
+    return state
+
+
+def _du_save_state(state: dict) -> None:
+    _safe_write_json(DYNAMIC_UNIVERSE_STATE_FILE, state)
+
+
+def _du_extract_top_candidates(state_mgr: StateManager) -> list[dict]:
+    """acce_unified snapshot'tan Genius Score >= min_score olan top-N."""
+    if not UNIFIED_CONFIG.enabled:
+        return []
+    snapshot = state_mgr.get_meta("unified_radar_snapshot") or {}
+    candidates = snapshot.get("liquid_long_candidates") or []
+    qualified: list[dict] = []
+    for c in candidates:
+        if not isinstance(c, dict):
+            continue
+        score = c.get("score")
+        symbol = c.get("symbol")
+        if not (isinstance(score, (int, float)) and symbol):
+            continue
+        if score >= DYNAMIC_UNIVERSE_MIN_SCORE:
+            qualified.append({"symbol": str(symbol).upper(), "score": float(score)})
+    qualified.sort(key=lambda x: -x["score"])
+    return qualified[:DYNAMIC_UNIVERSE_TOP_N]
+
+
+def _du_infer_group(symbol: str) -> str:
+    """COINS'te varsa oradan, yoksa MAJOR_ALT default."""
+    if symbol in COINS:
+        return COINS[symbol]
+    return "MAJOR_ALT"
+
+
+def refresh_dynamic_universe(state_mgr: StateManager, *, force: bool = False) -> dict:
+    """24h'da bir cagrilir; havuzu yeniden hesaplar, degisimleri Telegram'a bildirir."""
+    if not DYNAMIC_UNIVERSE_ENABLED:
+        return {}
+    now = now_ts()
+    state = _du_load_state()
+    last = int(state.get("last_refresh_ts") or 0)
+    if not force and now - last < DYNAMIC_UNIVERSE_REFRESH_HOURS * 3600:
+        return state
+
+    top = _du_extract_top_candidates(state_mgr)
+    new_symbols = {c["symbol"] for c in top}
+    # Sadece COINS'te tanimli sembolleri kabul et (grup bilgisi gerekli)
+    new_symbols = {s for s in new_symbols if s in COINS}
+    old_symbols = set(state.get("active") or [])
+
+    added = new_symbols - old_symbols
+    removed = old_symbols - new_symbols
+
+    for sym in added:
+        state["observation"][sym] = now
+    for sym in removed:
+        state["orphaned"][sym] = now
+
+    obs_cutoff = now - DYNAMIC_UNIVERSE_OBSERVATION_DAYS * 86400
+    state["observation"] = {s: ts for s, ts in state["observation"].items() if ts >= obs_cutoff}
+    orph_cutoff = now - DYNAMIC_UNIVERSE_ORPHANED_TTL_DAYS * 86400
+    state["orphaned"] = {s: ts for s, ts in state["orphaned"].items() if ts >= orph_cutoff}
+
+    state["active"] = sorted(new_symbols)
+    state["last_refresh_ts"] = now
+
+    if added or removed or not state.get("history"):
+        state["history"].insert(0, {
+            "ts": now,
+            "ts_tr": tr_now_text(),
+            "added": sorted(added),
+            "removed": sorted(removed),
+            "top": [{"symbol": c["symbol"], "score": round(c["score"], 1)} for c in top],
+        })
+        state["history"] = state["history"][:30]
+
+    _du_save_state(state)
+
+    if added or removed:
+        try:
+            _du_send_change_alert(added, removed, top)
+        except Exception as e:
+            log.warning("Dynamic universe alert gonderim hatasi: %s", type(e).__name__)
+
+    log.info("Dynamic Universe refresh: aktif=%d, +%d, -%d",
+             len(new_symbols), len(added), len(removed))
+    return state
+
+
+def get_active_universe(state_mgr: StateManager) -> dict[str, str]:
+    """Sabit cekirdek + dinamik havuz + acik pozisyonu olan orphaned coinler."""
+    if not DYNAMIC_UNIVERSE_ENABLED:
+        return dict(COINS)
+    universe: dict[str, str] = {}
+    for sym in DYNAMIC_UNIVERSE_STATIC_CORE:
+        if sym in COINS:
+            universe[sym] = COINS[sym]
+    state = _du_load_state()
+    for sym in state.get("active", []):
+        if sym in COINS:
+            universe[sym] = COINS[sym]
+    # Acik pozisyonlu orphaned'lar tarama listesine (cikis islemleri icin)
+    try:
+        snap = state_mgr.snapshot()
+        trades = snap.get("trades", {}) or {}
+        for t in trades.values():
+            if not isinstance(t, dict) or t.get("result") is not None:
+                continue
+            sym = t.get("symbol")
+            if sym and sym in COINS and sym not in universe:
+                universe[sym] = COINS[sym]
+    except Exception:
+        pass
+    return universe
+
+
+def is_in_observation_window(symbol: str) -> bool:
+    if not DYNAMIC_UNIVERSE_ENABLED or DYNAMIC_UNIVERSE_OBSERVATION_DAYS <= 0:
+        return False
+    if symbol in DYNAMIC_UNIVERSE_STATIC_CORE:
+        return False
+    state = _du_load_state()
+    ts = state.get("observation", {}).get(symbol)
+    if not ts:
+        return False
+    return now_ts() - int(ts) < DYNAMIC_UNIVERSE_OBSERVATION_DAYS * 86400
+
+
+def can_open_new_position_universe(symbol: str) -> tuple[bool, str]:
+    """Universe-based gate: yeni pozisyon acilabilir mi?"""
+    if not DYNAMIC_UNIVERSE_ENABLED:
+        return True, "dinamik universe kapali"
+    if symbol in DYNAMIC_UNIVERSE_STATIC_CORE:
+        return True, "cekirdek uye"
+    state = _du_load_state()
+    active = set(state.get("active", []))
+    orphaned = state.get("orphaned", {})
+    if symbol not in active:
+        if symbol in orphaned:
+            return False, f"{symbol} havuzdan cikarildi; yeni pozisyon yok"
+        return False, f"{symbol} aktif universe'te degil"
+    if is_in_observation_window(symbol):
+        obs_ts = int(state["observation"].get(symbol) or 0)
+        remaining_h = max(0, DYNAMIC_UNIVERSE_OBSERVATION_DAYS * 24 - (now_ts() - obs_ts) / 3600)
+        return False, f"{symbol} gozlem penceresinde ({remaining_h:.0f}h kaldi)"
+    return True, "OK"
+
+
+def _du_send_change_alert(added: set, removed: set, top: list[dict]) -> None:
+    lines = ["🔄 DINAMIK UNIVERSE GUNCELLENDI\n"]
+    if added:
+        lines.append(f"➕ Eklenen: {', '.join(sorted(added))} (3 gun gozlem)")
+    if removed:
+        lines.append(f"➖ Cikarilan: {', '.join(sorted(removed))} (acik pozisyon devam eder)")
+    lines.append(f"\n📊 Yeni havuz (Genius Score ≥ {DYNAMIC_UNIVERSE_MIN_SCORE}):")
+    for c in top:
+        badge = "🆕" if c["symbol"] in added else "✅"
+        lines.append(f"  {badge} {c['symbol']}: {c['score']:.1f}")
+    send_message("\n".join(lines))
+
+
+def format_dynamic_universe_report(state_mgr: StateManager) -> str:
+    if not DYNAMIC_UNIVERSE_ENABLED:
+        return "Dinamik Universe kapali (DYNAMIC_UNIVERSE_ENABLED=0)."
+    state = _du_load_state()
+    universe = get_active_universe(state_mgr)
+    lines = ["🌐 AKTIF UNIVERSE\n"]
+    lines.append(f"Cekirdek (kalici): {', '.join(sorted(DYNAMIC_UNIVERSE_STATIC_CORE))}\n")
+    active = sorted(state.get("active", []))
+    if not active:
+        lines.append(f"Dinamik havuz: BOS (Genius Score >= {DYNAMIC_UNIVERSE_MIN_SCORE} yok)")
+    else:
+        lines.append(f"Dinamik havuz (Genius Score >= {DYNAMIC_UNIVERSE_MIN_SCORE}):")
+        for sym in active:
+            obs_note = ""
+            if is_in_observation_window(sym):
+                obs_ts = int(state["observation"].get(sym) or 0)
+                remaining_h = max(0, DYNAMIC_UNIVERSE_OBSERVATION_DAYS * 24 - (now_ts() - obs_ts) / 3600)
+                obs_note = f" 🕐 gozlem ({remaining_h:.0f}h)"
+            grup = _du_infer_group(sym)
+            lines.append(f"  • {sym} [{grup}]{obs_note}")
+    orphaned = state.get("orphaned", {})
+    if orphaned:
+        lines.append("\n⚠️ Orphaned (pozisyon acik, yeni entry yok):")
+        for sym, ts in sorted(orphaned.items()):
+            days_ago = (now_ts() - int(ts)) / 86400
+            lines.append(f"  • {sym} ({days_ago:.1f}g once cikarildi)")
+    last_refresh = int(state.get("last_refresh_ts") or 0)
+    if last_refresh:
+        hours = (now_ts() - last_refresh) / 3600
+        next_refresh = max(0, DYNAMIC_UNIVERSE_REFRESH_HOURS - hours)
+        lines.append(f"\n⏱ Son refresh: {hours:.1f}h once | Sonraki: {next_refresh:.1f}h sonra")
+    else:
+        lines.append("\n⏱ Henuz hic refresh olmadi")
+    lines.append(f"Toplam aktif tarama: {len(universe)} sembol")
+    return "\n".join(lines)
+
+
+def format_dynamic_universe_history(limit: int = 7) -> str:
+    if not DYNAMIC_UNIVERSE_ENABLED:
+        return "Dinamik Universe kapali."
+    state = _du_load_state()
+    history = state.get("history") or []
+    if not history:
+        return "🌐 Universe degisim gecmisi bos (henuz refresh olmadi)."
+    lines = [f"🕰 UNIVERSE DEGISIM GECMISI (son {min(limit, len(history))})\n"]
+    for entry in history[:limit]:
+        ts_txt = entry.get("ts_tr") or "?"
+        added = entry.get("added") or []
+        removed = entry.get("removed") or []
+        top = entry.get("top") or []
+        lines.append(f"📅 {ts_txt}")
+        if added:
+            lines.append(f"  ➕ {', '.join(added)}")
+        if removed:
+            lines.append(f"  ➖ {', '.join(removed)}")
+        if top:
+            top_str = ", ".join(f"{c['symbol']}({c['score']:.0f})" for c in top[:5])
+            lines.append(f"  📊 Top: {top_str}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def main() -> None:
