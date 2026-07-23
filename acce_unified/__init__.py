@@ -6,6 +6,8 @@ MEXC new-listing radars can only add evidence while the integration is in
 shadow mode.
 """
 
+import logging
+
 from .config import DEFAULT_TRADE_UNIVERSE, UnifiedConfig, build_trade_universe
 from .engine import (
     UnifiedRadarEngine,
@@ -34,3 +36,19 @@ __all__ = [
     "format_listing_report",
     "format_snapshot_brief",
 ]
+
+
+def _start_optional_robinhood_radar() -> None:
+    """Start the push-only sidecar once when Signal Bot imports this package."""
+
+    try:
+        from robinhood_radar import start_background_radar
+
+        start_background_radar()
+    except Exception as exc:  # optional discovery must never block the main bot
+        logging.getLogger(__name__).warning(
+            "Robinhood radar sidecar could not start: %s", exc
+        )
+
+
+_start_optional_robinhood_radar()
