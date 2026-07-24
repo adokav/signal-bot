@@ -39,15 +39,15 @@ __all__ = [
 
 
 def _start_optional_robinhood_radar() -> None:
-    """Start the push-only sidecar once when Signal Bot imports this package."""
+    """Start the MEXC-gated push-only sidecar once on package import."""
 
     try:
-        from robinhood_radar import start_background_radar
+        from robinhood_mexc_radar import start_background_radar
 
         start_background_radar()
     except Exception as exc:  # optional discovery must never block the main bot
         logging.getLogger(__name__).warning(
-            "Robinhood radar sidecar could not start: %s", exc
+            "Robinhood x MEXC radar sidecar could not start: %s", exc
         )
 
 
