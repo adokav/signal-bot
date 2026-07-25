@@ -5,7 +5,15 @@ radar is started automatically. The application entry point owns lifecycle.
 """
 
 from .config import DEFAULT_TRADE_UNIVERSE, UnifiedConfig, build_trade_universe
-from .engine import UnifiedRadarEngine, UnifiedRadarRuntime
+from .engine import (
+    UnifiedRadarEngine,
+    UnifiedRadarRuntime,
+    attach_snapshot_to_results,
+    format_filtered_listing_report,
+    format_liquid_long_report,
+    format_listing_report,
+    format_snapshot_brief,
+)
 from .models import CexTicker, MexcListing, RadarCandidate, RadarSnapshot
 
 __all__ = [
@@ -17,5 +25,10 @@ __all__ = [
     "UnifiedConfig",
     "UnifiedRadarEngine",
     "UnifiedRadarRuntime",
+    "attach_snapshot_to_results",
     "build_trade_universe",
+    "format_filtered_listing_report",
+    "format_liquid_long_report",
+    "format_listing_report",
+    "format_snapshot_brief",
 ]
