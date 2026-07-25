@@ -1,11 +1,9 @@
 services:
   - type: web
-    name: signal-bot-acce
+    name: signal-bot-v5-core
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
-    # Persistent disk — /data mount'unda 1GB. State dosyalari deploy sonrasi
-    # korunur. Kritik dosyalar env override ile /data altina yonlendirilir.
     disk:
       name: signal-bot-data
       mountPath: /data
@@ -14,83 +12,27 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.9
 
-      # ─── Execution & Portfolio ────────────────────────────
-      - key: EXECUTION_MODE
-        value: PAPER
-      - key: ENABLE_LIVE_TRADING
-        value: "0"
-      - key: ACCE_TRADE_BRAIN_ENABLED
+      # Core lifecycle
+      - key: CORE_STATE_FILE
+        value: /data/core_state.json
+      - key: CORE_SEND_STARTUP_MESSAGE
         value: "1"
-      - key: ACCE_LONG_ONLY
-        value: "1"
-      - key: ACCE_COLLATERAL_ASSET
-        value: USDT
-      - key: ACCOUNT_SIZE_USD
-        value: "400"
-
-      # ─── Trade Universe (Wide, 20 coin — dinamik universe icin havuz) ──
-      # LINK CIKARIK: onceki backtest tutarli kayip (2024-03 PF 0.53, 2023-10 PF 0.09)
-      # CORE (2):      BTC, ETH
-      # MAJOR_ALT (8): SOL, ADA, DOT, ATOM, XRP, LTC, UNI, LDO
-      # HIGH_BETA (6): AVAX, MATIC, NEAR, INJ, ONDO, RENDER
-      # MEME (4):      DOGE, SHIB, BONK, POPCAT
-      - key: TRADE_UNIVERSE
-        value: "BTCUSDT:CORE,ETHUSDT:CORE,SOLUSDT:MAJOR_ALT,ADAUSDT:MAJOR_ALT,DOTUSDT:MAJOR_ALT,ATOMUSDT:MAJOR_ALT,XRPUSDT:MAJOR_ALT,LTCUSDT:MAJOR_ALT,UNIUSDT:MAJOR_ALT,LDOUSDT:MAJOR_ALT,AVAXUSDT:HIGH_BETA,MATICUSDT:HIGH_BETA,NEARUSDT:HIGH_BETA,INJUSDT:HIGH_BETA,ONDOUSDT:HIGH_BETA,RENDERUSDT:HIGH_BETA,DOGEUSDT:MEME,SHIBUSDT:MEME,BONKUSDT:MEME,POPCATUSDT:MEME"
-
-      # ─── Dinamik Universe (Genius Score bazli havuz — Sprint DU-v1) ──
-      # Bot her 24h'da bir /longs skorlarina bakip aktif havuz olusturur.
-      # Sabit cekirdek BTC+ETH her zaman aktif. Dinamik havuz max 8 coin.
-      - key: DYNAMIC_UNIVERSE_ENABLED
-        value: "1"
-      - key: DYNAMIC_UNIVERSE_MIN_SCORE
-        value: "72"
-      - key: DYNAMIC_UNIVERSE_TOP_N
-        value: "8"
-      - key: DYNAMIC_UNIVERSE_REFRESH_HOURS
-        value: "24"
-      - key: DYNAMIC_UNIVERSE_OBSERVATION_DAYS
-        value: "3"
-      - key: DYNAMIC_UNIVERSE_ORPHANED_TTL_DAYS
-        value: "7"
-      - key: DYNAMIC_UNIVERSE_STATE_FILE
-        value: "/data/dynamic_universe.json"
-      # Backtest'te dinamik filtre kapali: sabit 20 coin evren karsilastirmasi icin
-      - key: HISTORICAL_REPLAY_DYNAMIC_UNIVERSE_ENABLED
-        value: "0"
-
-      # ─── Position Management ────────────────────────────
-      - key: PM_SCALE_IN_ENABLED
-        value: "0"
-
-      # ─── Multi-Position Gate (Sprint 17 — aktif) ────────
-      - key: ACCE_MULTI_POSITION_ENABLED
-        value: "1"
-      - key: ACCE_ALLOW_SECOND_WITH_SAFE_STOP
-        value: "1"
-      - key: ACCE_MAX_ACTIVE_POSITIONS
-        value: "4"
-      - key: ACCE_MAX_OPEN_RISK_POSITIONS
-        value: "2"
-
-      # ─── Telegram ────────────────────────────
-      - key: TELEGRAM_REPORT_STYLE
-        value: HUMAN
-      - key: TELEGRAM_FULL_HEARTBEAT
-        value: "0"
-      - key: TELEGRAM_DECISION_CHANGE_ONLY
-        value: "1"
-      - key: TELEGRAM_FORCE_HEARTBEAT_SECONDS
-        value: "0"
       - key: TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS
         value: "5"
 
-      # ─── Scan Cadence ────────────────────────────
-      - key: SCAN_INTERVAL
-        value: "300"
-
-      # ─── Unified Radar (acce_unified) ────────────────────────────
+      # Exactly two MEXC opportunity engines
+      - key: UNIFIED_ENGINE_ENABLED
+        value: "1"
+      - key: UNIFIED_ENGINE_MODE
+        value: SHADOW
+      - key: UNIFIED_CEX_RADAR_ENABLED
+        value: "1"
+      - key: UNIFIED_LISTING_RADAR_ENABLED
+        value: "1"
       - key: UNIFIED_SCAN_INTERVAL_SECONDS
         value: "120"
+
+      # Liquid 100 — Long Top 3
       - key: UNIFIED_LIQUID_UNIVERSE_SIZE
         value: "100"
       - key: UNIFIED_LIQUID_ENRICHMENT_SIZE
@@ -98,13 +40,27 @@ services:
       - key: UNIFIED_LIQUID_FUNDAMENTAL_SIZE
         value: "100"
       - key: UNIFIED_LIQUID_LONG_TOP_N
-        value: "5"
+        value: "3"
+      - key: UNIFIED_LIQUID_MIN_QUOTE_VOLUME
+        value: "1000000"
       - key: UNIFIED_LIQUID_MAX_24H_DRAWDOWN_PCT
         value: "-8"
+      - key: UNIFIED_LIQUID_MAX_24H_GAIN_PCT
+        value: "25"
+      - key: UNIFIED_LIQUID_MAX_SPREAD_BPS
+        value: "35"
+      - key: UNIFIED_LIQUID_MIN_LONG_SCORE
+        value: "64"
       - key: UNIFIED_LIQUID_REQUIRE_SUPPLY_DATA
         value: "true"
-      - key: UNIFIED_FUNDAMENTAL_MAX_ASSETS
-        value: "100"
+
+      # Verified MEXC new listings
+      - key: UNIFIED_LISTING_TOP_N
+        value: "5"
+      - key: UNIFIED_LISTING_MIN_SCORE
+        value: "52"
+      - key: UNIFIED_LISTING_MAX_CANDIDATES
+        value: "20"
       - key: UNIFIED_LISTING_CANDIDATE_TTL_HOURS
         value: "72"
       - key: UNIFIED_LISTING_CONFIRMATION_SCANS
@@ -115,89 +71,35 @@ services:
         value: "true"
       - key: UNIFIED_LISTING_REQUIRE_SUPPLY_DATA
         value: "true"
-
-      # ─── Long Setup Engine ────────────────────────────
-      - key: LONG_SETUP_ENGINE_ENABLED
-        value: "1"
-      - key: LONG_CONFLUENCE_MIN_SETUP
-        value: "45"
-      - key: LONG_CONFLUENCE_MIN_TRADE
-        value: "68"
-      - key: LONG_LATE_ENTRY_FILTER_ENABLED
-        value: "1"
-      - key: LONG_MEME_MIN_VOLUME_RATIO
-        value: "1.8"
-
-      # ─── ATR-Aware PM v2 ────────────────────────────
-      - key: ATR_ENABLED
-        value: "1"
-      - key: ATR_PERIOD
-        value: "14"
-      - key: STOP_ATR_MULTIPLIER
-        value: "1.5"
-      - key: STOP_ATR_CAP_MULTIPLIER
-        value: "2.5"
-      - key: TP_ADAPTIVE_ENABLED
-        value: "1"
-
-      # ─── MEXC Cross Margin (live'da kullanilacak) ────
-      - key: LEVERAGE_POLICY_EXCHANGE_MAX_LEV_CORE
-        value: "5"
-      - key: LEVERAGE_POLICY_EXCHANGE_MAX_LEV_HIGH_BETA
-        value: "3"
-      - key: LEVERAGE_POLICY_MIN_LIQ_TO_STOP
-        value: "3.0"
-      - key: LEVERAGE_POLICY_EXTRA_LIQ_BUFFER_PCT
-        value: "0.01"
-
-      # ─── Persistent State Paths (deploy sonrasi korunur) ────────
-      # Ana state
-      - key: STATE_FILE
-        value: "/data/state.json"
-      # Paper trading kayitlari
-      - key: PAPER_ORDERS_FILE
-        value: "/data/paper_orders.jsonl"
-      - key: PAPER_POSITIONS_FILE
-        value: "/data/paper_positions.json"
-      - key: PAPER_EXECUTION_REPORT_FILE
-        value: "/data/paper_execution_report.json"
-      # Risk Governor
-      - key: RISK_GOVERNOR_REPORT_FILE
-        value: "/data/risk_governor_report.json"
-      - key: RISK_GOVERNOR_LOG_FILE
-        value: "/data/risk_governor_log.jsonl"
-      # Position Management
-      - key: POSITION_MANAGEMENT_LOG_FILE
-        value: "/data/position_management_log.jsonl"
-      - key: LONG_BLOCK_REASONS_FILE
-        value: "/data/long_block_reasons.jsonl"
-      # Regime dashboard
-      - key: REGIME_DASHBOARD_REPORT_FILE
-        value: "/data/regime_performance_dashboard.json"
-      # ML validation
-      - key: ML_VIRTUAL_POSITIONS_FILE
-        value: "/data/ml_virtual_positions.json"
-      - key: ML_VIRTUAL_LOG_FILE
-        value: "/data/ml_virtual_trades.jsonl"
-      - key: ML_VALIDATION_REPORT_FILE
-        value: "/data/ml_validation_report.json"
-      # Live readiness
-      - key: LIVE_READINESS_REPORT_FILE
-        value: "/data/live_readiness_report.json"
-      # Unified radar listing state (ilk kurulum baselining icin kritik)
       - key: UNIFIED_LISTING_SEEN_FILE
-        value: "/data/mexc_seen_symbols.json"
+        value: /data/mexc_seen_symbols.json
       - key: UNIFIED_LISTING_CANDIDATE_FILE
-        value: "/data/mexc_listing_candidates.json"
-      # Adaptive config + parametre suggestions
-      - key: ADAPTIVE_CONFIG_FILE
-        value: "/data/adaptive_config.json"
-      - key: PARAMETER_SUGGESTIONS_FILE
-        value: "/data/parameter_suggestions.json"
-      - key: PARAMETER_CHANGE_LOG_FILE
-        value: "/data/parameter_change_log.jsonl"
-      - key: WEIGHT_LEARNING_SUGGESTIONS_FILE
-        value: "/data/weight_suggestions.json"
-      # Execution log
-      - key: EXECUTION_LOG_FILE
-        value: "/data/execution_log.jsonl"
+        value: /data/mexc_listing_candidates.json
+
+      # Internal enrichment only; no standalone Telegram menus
+      - key: UNIFIED_FUNDAMENTAL_RADAR_ENABLED
+        value: "true"
+      - key: UNIFIED_FUNDAMENTAL_CACHE_TTL_SECONDS
+        value: "1800"
+      - key: UNIFIED_FUNDAMENTAL_MAX_ASSETS
+        value: "100"
+      - key: UNIFIED_SOCIAL_RADAR_ENABLED
+        value: "true"
+      - key: UNIFIED_SOCIAL_REDDIT_ENABLED
+        value: "true"
+      - key: UNIFIED_SOCIAL_GDELT_ENABLED
+        value: "true"
+      - key: UNIFIED_SOCIAL_CACHE_TTL_SECONDS
+        value: "600"
+      - key: UNIFIED_SOCIAL_MAX_ASSETS
+        value: "6"
+      - key: UNIFIED_SOCIAL_WINDOW_HOURS
+        value: "6"
+      - key: UNIFIED_SOCIAL_MIN_MENTIONS
+        value: "4"
+      - key: UNIFIED_SOCIAL_MIN_UNIQUE_AUTHORS
+        value: "3"
+      - key: UNIFIED_SOCIAL_MIN_PLATFORMS
+        value: "1"
+      - key: UNIFIED_SOCIAL_MIN_SENTIMENT
+        value: "-10"
