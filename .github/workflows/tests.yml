@@ -20,13 +20,15 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: python -m pip install -r requirements.txt -r requirements-dev.txt
-      - name: Run active core tests
-        run: >-
-          python -m pytest -q
-          tests/test_core_bot.py
-          tests/test_liquid_long.py
-          tests/test_unified_engine.py
-          tests/test_unified_providers.py
-          tests/test_social_radar.py
+      - name: Core entry point
+        run: python -m pytest -q tests/test_core_bot.py
+      - name: Liquid 100 scoring
+        run: python -m pytest -q tests/test_liquid_long.py
+      - name: Unified engine
+        run: python -m pytest -q tests/test_unified_engine.py
+      - name: MEXC providers
+        run: python -m pytest -q tests/test_unified_providers.py
+      - name: New listing social enrichment
+        run: python -m pytest -q tests/test_social_radar.py
       - name: Compile active Python sources
         run: python -m compileall -q bot.py acce_unified tests/test_core_bot.py
