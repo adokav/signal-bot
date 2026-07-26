@@ -149,6 +149,9 @@ labelled_at
 5. Feature, policy, model, cost and label schemas are versioned.
 6. Outcomes are append-only and must not mutate the original decision.
 7. Replaying the same inputs and versions must reproduce the same decision.
+8. `ENGAGE` requires a conservative edge lower bound above all estimated costs.
+9. `ENGAGE` cannot depend on evidence marked missing, stale or invalid.
+10. All decision timestamps are timezone-aware and persisted in UTC.
 
 ## Historical replay
 
@@ -177,34 +180,49 @@ At each step it must:
 
 ## Initial storage choice
 
-The first implementation should use SQLite because it is deterministic,
-portable, inspectable and sufficient for the current scan volume. Storage
-interfaces must avoid SQLite-specific logic in domain models so that a later
-migration does not alter research semantics.
+The first implementation uses SQLite because it is deterministic, portable,
+inspectable and sufficient for the current scan volume. Storage interfaces avoid
+exchange dependencies so a later migration does not alter research semantics.
 
-Recommended tables:
+The first physical table is `opportunities`. Market state, evidence, costs and
+reason codes are written as deterministic JSON snapshots. This optimizes for
+exact audit replay before analytical convenience. UPDATE and DELETE triggers
+make the journal append-only.
+
+Future normalized tables remain:
 
 ```text
 market_state_snapshots
 feature_snapshots
 cost_snapshots
-opportunities
 decision_journal
 outcome_labels
 model_versions
 replay_runs
 ```
 
-## First implementation sequence
+## Implemented slice
 
-1. Domain dataclasses and enums with no database dependency.
-2. SQLite schema and repository interfaces.
-3. Append-only decision journal.
-4. Scanner adapter that records every candidate and rejection reason.
-5. Deterministic replay clock.
-6. Outcome label generator.
-7. Research report with counts, expectancy, confidence interval, drawdown and
-   regime breakdown.
+`acce_unified.research` provides:
+
+- immutable `Evidence`, `MarketState`, `CostEstimate` and `Opportunity` records;
+- `Decision`, `Direction` and `EvidenceStatus` enums;
+- validation against future evidence and future market state;
+- explicit missing/stale/invalid evidence handling;
+- conservative cost-adjusted `ENGAGE` permission;
+- `ResearchStore`, an append-only SQLite journal;
+- chronological `list_as_of` access for replay-safe queries.
+
+`tests/test_research_core.py` verifies the point-in-time, cost, missing-data,
+uniqueness and append-only invariants. CI runs and compiles this new slice.
+
+## Next implementation sequence
+
+1. Outcome labels as separate append-only facts.
+2. Deterministic replay clock and provider interfaces.
+3. Scanner adapter that records every candidate and rejection reason.
+4. Feature registry with provenance, unit and lookback declarations.
+5. Research report with expectancy, uncertainty, drawdown and regime breakdown.
 
 ## Acceptance criteria for Research Core v1
 
