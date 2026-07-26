@@ -23,6 +23,8 @@ from .research import (
     EvidenceStatus,
     MarketState,
     Opportunity,
+    OutcomeLabel,
+    ReplayClock,
     ResearchStore,
 )
 
@@ -37,8 +39,10 @@ __all__ = [
     "MarketState",
     "MexcListing",
     "Opportunity",
+    "OutcomeLabel",
     "RadarCandidate",
     "RadarSnapshot",
+    "ReplayClock",
     "ResearchStore",
     "UnifiedConfig",
     "UnifiedRadarEngine",
