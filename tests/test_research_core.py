@@ -12,6 +12,8 @@ from acce_unified.research import (
     EvidenceStatus,
     MarketState,
     Opportunity,
+    OutcomeLabel,
+    ReplayClock,
     ResearchStore,
 )
 
@@ -59,6 +61,23 @@ def _opportunity(**overrides) -> Opportunity:
     }
     values.update(overrides)
     return Opportunity(**values)
+
+
+def _outcome(opportunity_id: str, **overrides) -> OutcomeLabel:
+    values = {
+        "opportunity_id": opportunity_id,
+        "horizon": timedelta(hours=4),
+        "labelled_at": NOW + timedelta(hours=4),
+        "entry_reference": 100.0,
+        "exit_reference": 102.0,
+        "max_favourable_excursion": 0.03,
+        "max_adverse_excursion": -0.01,
+        "net_return": 0.018,
+        "return_r": 0.9,
+        "realised_volatility": 0.012,
+    }
+    values.update(overrides)
+    return OutcomeLabel(**values)
 
 
 def test_future_evidence_is_rejected():
@@ -148,3 +167,70 @@ def test_duplicate_opportunity_id_is_rejected_instead_of_overwritten():
 def test_naive_datetimes_are_rejected():
     with pytest.raises(ValueError, match="timezone-aware"):
         _opportunity(decision_at=datetime(2026, 1, 1, 12, 0))
+
+
+def test_replay_clock_never_moves_backward_or_exposes_future_data():
+    clock = ReplayClock(NOW)
+    with pytest.raises(ValueError, match="cannot move backward"):
+        clock.advance_to(NOW - timedelta(seconds=1))
+    with pytest.raises(ValueError, match="not available"):
+        clock.require_available(NOW + timedelta(seconds=1))
+
+    assert clock.advance_by(timedelta(minutes=15)) == NOW + timedelta(minutes=15)
+    clock.require_available(NOW + timedelta(minutes=15))
+
+
+def test_replay_clock_reports_horizon_maturity_deterministically():
+    clock = ReplayClock(NOW + timedelta(hours=3, minutes=59))
+    assert clock.horizon_matured(NOW, timedelta(hours=4)) is False
+    clock.advance_by(timedelta(minutes=1))
+    assert clock.horizon_matured(NOW, timedelta(hours=4)) is True
+
+
+def test_outcome_cannot_be_written_before_horizon_matures():
+    store = ResearchStore()
+    opportunity = _opportunity(opportunity_id="early-label")
+    store.append(opportunity)
+
+    with pytest.raises(ValueError, match="before horizon maturity"):
+        store.append_outcome(
+            _outcome(
+                opportunity.opportunity_id,
+                labelled_at=NOW + timedelta(hours=3, minutes=59),
+            )
+        )
+    assert store.list_outcomes(opportunity.opportunity_id) == []
+    store.close()
+
+
+def test_mature_outcome_is_append_only_and_versioned():
+    store = ResearchStore()
+    opportunity = _opportunity(opportunity_id="mature-label")
+    store.append(opportunity)
+    label = _outcome(opportunity.opportunity_id)
+    store.append_outcome(label)
+
+    rows = store.list_outcomes(opportunity.opportunity_id)
+    assert len(rows) == 1
+    assert rows[0]["horizon_seconds"] == 4 * 60 * 60
+    assert rows[0]["label_version"] == "outcome-v1"
+
+    with pytest.raises(Exception, match="append-only"):
+        store.connection.execute(
+            "UPDATE outcome_labels SET net_return = 99 WHERE label_id = ?",
+            (label.label_id,),
+        )
+    store.close()
+
+
+def test_outcome_requires_existing_opportunity_and_unique_version():
+    store = ResearchStore()
+    with pytest.raises(ValueError, match="existing opportunity"):
+        store.append_outcome(_outcome("missing"))
+
+    opportunity = _opportunity(opportunity_id="unique-label")
+    store.append(opportunity)
+    store.append_outcome(_outcome(opportunity.opportunity_id, label_id="first"))
+    with pytest.raises(Exception):
+        store.append_outcome(_outcome(opportunity.opportunity_id, label_id="second"))
+    store.close()
