@@ -15,13 +15,35 @@ from .engine import (
     format_snapshot_brief,
 )
 from .models import CexTicker, MexcListing, RadarCandidate, RadarSnapshot
+from .research import (
+    CostEstimate,
+    Decision,
+    Direction,
+    Evidence,
+    EvidenceStatus,
+    MarketState,
+    Opportunity,
+    OutcomeLabel,
+    ReplayClock,
+    ResearchStore,
+)
 
 __all__ = [
     "CexTicker",
+    "CostEstimate",
     "DEFAULT_TRADE_UNIVERSE",
+    "Decision",
+    "Direction",
+    "Evidence",
+    "EvidenceStatus",
+    "MarketState",
     "MexcListing",
+    "Opportunity",
+    "OutcomeLabel",
     "RadarCandidate",
     "RadarSnapshot",
+    "ReplayClock",
+    "ResearchStore",
     "UnifiedConfig",
     "UnifiedRadarEngine",
     "UnifiedRadarRuntime",
