@@ -21,6 +21,7 @@ import requests
 from flask import Flask, jsonify
 
 from acce_unified import UnifiedConfig, UnifiedRadarEngine
+from acce_unified.listing_fundamentals import ListingFundamentalMetricsProvider
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -36,7 +37,14 @@ POLL_SECONDS = max(2, int(os.getenv("TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS", "5
 STARTUP_MESSAGE = os.getenv("CORE_SEND_STARTUP_MESSAGE", "1") == "1"
 
 CONFIG = UnifiedConfig.from_env()
-ENGINE = UnifiedRadarEngine(CONFIG, {})
+FUNDAMENTAL_PROVIDER = ListingFundamentalMetricsProvider(
+    demo_api_key=os.getenv("COINGECKO_DEMO_API_KEY", ""),
+    pro_api_key=os.getenv("COINGECKO_PRO_API_KEY", ""),
+    timeout=CONFIG.request_timeout_seconds,
+    cache_ttl_seconds=CONFIG.fundamental_cache_ttl_seconds,
+    max_assets=CONFIG.fundamental_max_assets,
+)
+ENGINE = UnifiedRadarEngine(CONFIG, {}, fundamental_provider=FUNDAMENTAL_PROVIDER)
 APP = Flask(__name__)
 HTTP = requests.Session()
 LOCK = threading.RLock()
@@ -135,6 +143,36 @@ def _money(value: Any) -> str:
     return f"${amount:.0f}"
 
 
+def _quantity(value: Any, *, missing: str = "yok") -> str:
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return missing
+    for threshold, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(amount) >= threshold:
+            return f"{amount / threshold:.2f}{suffix}"
+    return f"{amount:g}"
+
+
+def _price(value: Any) -> str:
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return "veri yok"
+    if amount >= 1:
+        return f"${amount:,.4f}".rstrip("0").rstrip(".")
+    if amount >= 0.01:
+        return f"${amount:.6f}".rstrip("0").rstrip(".")
+    return f"${amount:.10f}".rstrip("0").rstrip(".")
+
+
+def _pct(value: Any, *, missing: str = "?") -> str:
+    try:
+        return f"%{float(value):+.1f}"
+    except (TypeError, ValueError):
+        return missing
+
+
 def format_longs(snapshot: dict[str, Any] | None) -> str:
     if not snapshot:
         return "💧 MEXC LİKİT 100 — LONG İLK 3\n\nİlk tarama bekleniyor."
@@ -167,8 +205,17 @@ def format_new(snapshot: dict[str, Any] | None) -> str:
         return "🆕 MEXC NEW LISTING\n\nİlk tarama bekleniyor."
     strong = snapshot.get("listing_candidates") or []
     watch = snapshot.get("listing_filtered_candidates") or []
-    rows = [*strong, *watch][:8]
-    lines = ["🆕 MEXC NEW LISTING — PATLAMA RADARI", ""]
+    combined = [*strong, *watch]
+    rows = sorted(
+        combined,
+        key=lambda item: (
+            int(item.get("score") or 0),
+            float((item.get("metadata") or {}).get("quote_volume") or 0),
+            str(item.get("symbol") or ""),
+        ),
+        reverse=True,
+    )[:5]
+    lines = ["🆕 MEXC NEW LISTING — EN YÜKSEK SKORLU 5", ""]
     if not rows:
         lines.append("Son 72 saatte doğrulanmış aktif aday yok.")
     for i, item in enumerate(rows, 1):
@@ -178,11 +225,22 @@ def format_new(snapshot: dict[str, Any] | None) -> str:
         lines.extend([
             f"{i}. {item.get('symbol', '?')} — {int(item.get('score') or 0)}/100 · {item.get('stage') or '-'}",
             f"   24s %{float(meta.get('change_pct') or 0):+.1f} · MEXC hacim {_money(meta.get('quote_volume'))} · İvme {float(meta.get('volume_acceleration') or 0):.1f}x",
-            f"   Arz {fundamental.get('status') or '?'} · Sosyal kapı {social.get('community_gate') or social.get('status') or '?'}",
+        ])
+        if fundamental.get("status") == "READY":
+            lines.extend([
+                f"   Arz: dolaşan {_quantity(fundamental.get('circulating_supply'))} · toplam {_quantity(fundamental.get('total_supply'))} · max {_quantity(fundamental.get('max_supply'), missing='açıklanmamış/sınırsız')}",
+                f"   ATH {_price(fundamental.get('ath_price_usd'))} ({_pct(fundamental.get('ath_change_pct'))}) · ATL {_price(fundamental.get('atl_price_usd'))} ({_pct(fundamental.get('atl_change_pct'))})",
+            ])
+        else:
+            lines.append(
+                f"   Arz ve ATH/ATL: {fundamental.get('status') or 'DATA_PENDING'}"
+            )
+        lines.extend([
+            f"   Sosyal kapı {social.get('community_gate') or social.get('status') or '?'}",
             f"   Risk: {', '.join(item.get('risk_flags') or []) or 'belirgin sert risk yok'}",
             "",
         ])
-    lines.append("Yeni listing işlemleri normal long riskinin en fazla yarısıyla değerlendirilmelidir.")
+    lines.append("Araştırma sıralamasıdır; otomatik işlem veya sermaye yetkisi vermez.")
     return "\n".join(lines)
 
 
