@@ -30,7 +30,8 @@ jobs:
             tests/test_unified_engine.py \
             tests/test_unified_providers.py \
             tests/test_social_radar.py \
-            tests/test_research_core.py > pytest-output.txt 2>&1
+            tests/test_research_core.py \
+            tests/test_listing_report_details.py > pytest-output.txt 2>&1
           rc=$?
           cat pytest-output.txt
           exit $rc
@@ -41,4 +42,4 @@ jobs:
           name: pytest-output
           path: pytest-output.txt
       - name: Compile active Python sources
-        run: python -m compileall -q bot.py acce_unified tests/test_core_bot.py tests/test_research_core.py
+        run: python -m compileall -q bot.py acce_unified tests/test_core_bot.py tests/test_research_core.py tests/test_listing_report_details.py
