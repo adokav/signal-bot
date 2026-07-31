@@ -22,6 +22,10 @@ from .observation_archive import (
     ObservationArchivingCexProvider,
     ObservationArchivingRadarEngine,
 )
+from .observation_runtime import (
+    CadencedObservationArchivingCexProvider,
+    ProductionUnifiedRadarEngine,
+)
 from .research import (
     CostEstimate,
     Decision,
@@ -35,9 +39,10 @@ from .research import (
     ResearchStore,
 )
 
-UnifiedRadarEngine = ObservationArchivingRadarEngine
+UnifiedRadarEngine = ProductionUnifiedRadarEngine
 
 __all__ = [
+    "CadencedObservationArchivingCexProvider",
     "CexTicker",
     "CoreUnifiedRadarEngine",
     "CostEstimate",
@@ -55,6 +60,7 @@ __all__ = [
     "ObservationArchivingRadarEngine",
     "Opportunity",
     "OutcomeLabel",
+    "ProductionUnifiedRadarEngine",
     "RadarCandidate",
     "RadarSnapshot",
     "ReplayClock",
