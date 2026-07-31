@@ -41,8 +41,13 @@ class CadencedObservationArchivingCexProvider(ObservationArchivingCexProvider):
         due = self.interval_seconds == 0 or now >= self._next_archive_due
         if due:
             self._archive_current_scan = True
+            try:
+                tickers = super().fetch_tickers()
+            except Exception:
+                self._archive_current_scan = False
+                raise
             self._next_archive_due = now + self.interval_seconds
-            return super().fetch_tickers()
+            return tickers
         self._archive_current_scan = False
         return list(self.provider.fetch_tickers())
 
