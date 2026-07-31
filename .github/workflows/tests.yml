@@ -33,7 +33,8 @@ jobs:
             tests/test_research_core.py \
             tests/test_listing_report_details.py \
             tests/test_new_listing_anti_trap.py \
-            tests/test_liquid_observation_archive.py > pytest-output.txt 2>&1
+            tests/test_liquid_observation_archive.py \
+            tests/test_observation_archive_cadence.py > pytest-output.txt 2>&1
           rc=$?
           cat pytest-output.txt
           exit $rc
@@ -44,4 +45,4 @@ jobs:
           name: pytest-output
           path: pytest-output.txt
       - name: Compile active Python sources
-        run: python -m compileall -q bot.py acce_unified tests/test_core_bot.py tests/test_research_core.py tests/test_listing_report_details.py tests/test_new_listing_anti_trap.py tests/test_liquid_observation_archive.py
+        run: python -m compileall -q bot.py acce_unified tests/test_core_bot.py tests/test_research_core.py tests/test_listing_report_details.py tests/test_new_listing_anti_trap.py tests/test_liquid_observation_archive.py tests/test_observation_archive_cadence.py
