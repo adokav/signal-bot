@@ -27,6 +27,7 @@ jobs:
           python -m pytest -q \
             tests/test_core_bot.py \
             tests/test_liquid_long.py \
+            tests/test_long_opportunity.py \
             tests/test_unified_engine.py \
             tests/test_unified_providers.py \
             tests/test_social_radar.py \
@@ -45,4 +46,4 @@ jobs:
           name: pytest-output
           path: pytest-output.txt
       - name: Compile active Python sources
-        run: python -m compileall -q bot.py acce_unified tests/test_core_bot.py tests/test_research_core.py tests/test_listing_report_details.py tests/test_new_listing_anti_trap.py tests/test_liquid_observation_archive.py tests/test_observation_archive_cadence.py
+        run: python -m compileall -q bot.py acce_unified tests/test_core_bot.py tests/test_long_opportunity.py tests/test_research_core.py tests/test_listing_report_details.py tests/test_new_listing_anti_trap.py tests/test_liquid_observation_archive.py tests/test_observation_archive_cadence.py

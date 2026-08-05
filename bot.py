@@ -1,11 +1,7 @@
-"""Signal Bot v5 Core — MEXC Liquid-100 and New Listing radar only.
+"""Signal Bot v5 Core: MEXC Liquid-100 Long and verified new listings.
 
-This process intentionally has two jobs:
-1) rank the best three long candidates inside MEXC's 100 most liquid USDT spot markets;
-2) detect and score verified MEXC new spot listings.
-
-It never places orders. Execution will be reintroduced only behind a separately
-validated risk/execution interface.
+The process is deliberately advisory. It scans, reports and alerts; it has no
+exchange credentials, portfolio authority or order path.
 """
 from __future__ import annotations
 
@@ -50,7 +46,6 @@ HTTP = requests.Session()
 LOCK = threading.RLock()
 STATE: dict[str, Any] = {
     "offset": 0,
-    "last_scan_at": 0,
     "snapshot": None,
     "last_error": None,
 }
@@ -58,7 +53,7 @@ STATE: dict[str, Any] = {
 COMMANDS = [
     {"command": "panel", "description": "Sade kontrol paneli"},
     {"command": "longs", "description": "MEXC Likit 100 Long İlk 3"},
-    {"command": "new", "description": "MEXC yeni listeleme adayları"},
+    {"command": "new", "description": "Doğrulanmış MEXC yeni listeleri"},
     {"command": "status", "description": "Tarama sağlığı ve veri durumu"},
     {"command": "scan", "description": "Şimdi yeniden tara"},
 ]
@@ -67,12 +62,13 @@ COMMANDS = [
 def _load_state() -> None:
     try:
         payload = json.loads(STATE_FILE.read_text("utf-8"))
-        if isinstance(payload, dict):
-            STATE.update(payload)
     except FileNotFoundError:
         return
     except Exception as exc:
         log.warning("State okunamadı: %s", exc)
+        return
+    if isinstance(payload, dict):
+        STATE.update({key: payload.get(key) for key in STATE if key in payload})
 
 
 def _save_state() -> None:
@@ -185,12 +181,12 @@ def format_longs(snapshot: dict[str, Any] | None) -> str:
     ]
     if not rows:
         lines.append("Şu anda bütün kalite ve risk kapılarını geçen aday yok.")
-    for i, item in enumerate(rows, 1):
+    for index, item in enumerate(rows, 1):
         meta = item.get("metadata") or {}
         metrics = meta.get("long_metrics") or {}
         fundamentals = meta.get("fundamentals") or {}
         lines.extend([
-            f"{i}. {item.get('symbol', '?')} — {int(item.get('score') or 0)}/100 · {item.get('stage') or '-'}",
+            f"{index}. {item.get('symbol', '?')} — {int(item.get('score') or 0)}/100 · {item.get('stage') or '-'}",
             f"   1s %{float(metrics.get('change_1h_pct') or 0):+.1f} · 4s %{float(metrics.get('change_4h_pct') or 0):+.1f} · RSI {float(metrics.get('rsi14') or 0):.0f}",
             f"   Hacim ivmesi {float(metrics.get('volume_ratio') or 0):.1f}x · Spread {float(meta.get('spread_bps') or 0):.1f} bp",
             f"   MEXC 24s {_money(meta.get('quote_volume'))} · Dolaşım %{float(fundamentals.get('circulation_pct') or 0):.1f}",
@@ -203,11 +199,11 @@ def format_longs(snapshot: dict[str, Any] | None) -> str:
 def format_new(snapshot: dict[str, Any] | None) -> str:
     if not snapshot:
         return "🆕 MEXC NEW LISTING\n\nİlk tarama bekleniyor."
-    strong = snapshot.get("listing_candidates") or []
-    watch = snapshot.get("listing_filtered_candidates") or []
-    combined = [*strong, *watch]
+
+    # Public output is fail-closed. Rejected/watch rows are diagnostics and may
+    # never be promoted back into the visible ranking merely to fill five slots.
     rows = sorted(
-        combined,
+        snapshot.get("listing_candidates") or [],
         key=lambda item: (
             int(item.get("score") or 0),
             float((item.get("metadata") or {}).get("quote_volume") or 0),
@@ -215,15 +211,15 @@ def format_new(snapshot: dict[str, Any] | None) -> str:
         ),
         reverse=True,
     )[:5]
-    lines = ["🆕 MEXC NEW LISTING — EN YÜKSEK SKORLU 5", ""]
+    lines = ["🆕 MEXC NEW LISTING — DOĞRULANMIŞ ADAYLAR", ""]
     if not rows:
         lines.append("Son 72 saatte doğrulanmış aktif aday yok.")
-    for i, item in enumerate(rows, 1):
+    for index, item in enumerate(rows, 1):
         meta = item.get("metadata") or {}
         social = meta.get("social") or {}
         fundamental = meta.get("fundamentals") or {}
         lines.extend([
-            f"{i}. {item.get('symbol', '?')} — {int(item.get('score') or 0)}/100 · {item.get('stage') or '-'}",
+            f"{index}. {item.get('symbol', '?')} — {int(item.get('score') or 0)}/100 · {item.get('stage') or '-'}",
             f"   24s %{float(meta.get('change_pct') or 0):+.1f} · MEXC hacim {_money(meta.get('quote_volume'))} · İvme {float(meta.get('volume_acceleration') or 0):.1f}x",
         ])
         if fundamental.get("status") == "READY":
@@ -232,9 +228,7 @@ def format_new(snapshot: dict[str, Any] | None) -> str:
                 f"   ATH {_price(fundamental.get('ath_price_usd'))} ({_pct(fundamental.get('ath_change_pct'))}) · ATL {_price(fundamental.get('atl_price_usd'))} ({_pct(fundamental.get('atl_change_pct'))})",
             ])
         else:
-            lines.append(
-                f"   Arz ve ATH/ATL: {fundamental.get('status') or 'DATA_PENDING'}"
-            )
+            lines.append(f"   Arz ve ATH/ATL: {fundamental.get('status') or 'DATA_PENDING'}")
         lines.extend([
             f"   Sosyal kapı {social.get('community_gate') or social.get('status') or '?'}",
             f"   Risk: {', '.join(item.get('risk_flags') or []) or 'belirgin sert risk yok'}",
@@ -248,15 +242,17 @@ def format_status(snapshot: dict[str, Any] | None) -> str:
     errors = (snapshot or {}).get("errors") or []
     generated = int((snapshot or {}).get("generated_at") or 0)
     age = max(0, int(time.time()) - generated) if generated else 0
+    last_error = str(STATE.get("last_error") or "")
+    error_text = ", ".join(errors) if errors else last_error or "yok"
     return "\n".join([
         "📊 SIGNAL BOT v5 CORE",
         "Mod: SHADOW / RADAR ONLY",
         f"Son tarama: {age} sn önce" if generated else "Son tarama: henüz yok",
         f"Likit evren: {int((snapshot or {}).get('liquid_universe_size') or 0)}/100",
         f"Long aday: {len((snapshot or {}).get('liquid_long_candidates') or [])}/3",
-        f"Yeni güçlü: {len((snapshot or {}).get('listing_candidates') or [])}",
-        f"Yeni izleme: {len((snapshot or {}).get('listing_filtered_candidates') or [])}",
-        f"Hata: {', '.join(errors) if errors else 'yok'}",
+        f"Doğrulanmış yeni aday: {len((snapshot or {}).get('listing_candidates') or [])}",
+        f"Tanı amaçlı elenen yeni aday: {len((snapshot or {}).get('listing_filtered_candidates') or [])}",
+        f"Hata: {error_text}",
         "Emir yetkisi: YOK",
     ])
 
@@ -264,18 +260,17 @@ def format_status(snapshot: dict[str, Any] | None) -> str:
 def scan_once() -> dict[str, Any] | None:
     try:
         snapshot = ENGINE.scan_once().to_dict()
-        with LOCK:
-            STATE["snapshot"] = snapshot
-            STATE["last_scan_at"] = snapshot.get("generated_at")
-            STATE["last_error"] = None
-            _save_state()
-        return snapshot
     except Exception as exc:
         log.exception("Tarama başarısız")
         with LOCK:
             STATE["last_error"] = f"{type(exc).__name__}: {exc}"
             _save_state()
         return None
+    with LOCK:
+        STATE["snapshot"] = snapshot
+        STATE["last_error"] = None
+        _save_state()
+    return snapshot
 
 
 def scanner_loop() -> None:
@@ -307,11 +302,11 @@ def handle(action: str) -> None:
         send(format_status(snapshot), keyboard=panel_keyboard())
     elif action == "SCAN":
         send("🔄 Tarama başlatıldı.", keyboard=panel_keyboard())
-        snapshot = scan_once()
-        send(format_status(snapshot or _snapshot()), keyboard=panel_keyboard())
+        refreshed = scan_once()
+        send(format_status(refreshed or _snapshot()), keyboard=panel_keyboard())
     else:
         send(
-            "🎯 SIGNAL BOT v5 CORE\n\nYalnız iki fırsat motoru aktiftir:\n• MEXC Likit 100 Long İlk 3\n• MEXC New Listing Patlama Radarı",
+            "🎯 SIGNAL BOT v5 CORE\n\nAktif araştırma motorları:\n• MEXC Likit 100 Long İlk 3\n• Doğrulanmış MEXC yeni listelemeleri",
             keyboard=panel_keyboard(),
         )
 
@@ -326,16 +321,27 @@ def telegram_loop() -> None:
         log.warning("Bot komutları ayarlanamadı: %s", exc)
     while True:
         try:
-            offset = int(STATE.get("offset") or 0)
-            updates = _api("getUpdates", {"offset": offset, "timeout": 20, "allowed_updates": ["message", "callback_query"]}) or []
+            updates = _api(
+                "getUpdates",
+                {
+                    "offset": int(STATE.get("offset") or 0),
+                    "timeout": 20,
+                    "allowed_updates": ["message", "callback_query"],
+                },
+            ) or []
             for update in updates:
-                STATE["offset"] = max(int(STATE.get("offset") or 0), int(update.get("update_id") or 0) + 1)
+                STATE["offset"] = max(
+                    int(STATE.get("offset") or 0),
+                    int(update.get("update_id") or 0) + 1,
+                )
                 callback = update.get("callback_query") or {}
                 message = update.get("message") or callback.get("message") or {}
                 chat = str((message.get("chat") or {}).get("id") or "")
                 if chat != CHAT_ID:
                     continue
-                action = str(callback.get("data") or "") or _command(str(message.get("text") or ""))
+                action = str(callback.get("data") or "") or _command(
+                    str(message.get("text") or "")
+                )
                 if callback.get("id"):
                     _api("answerCallbackQuery", {"callback_query_id": callback["id"]})
                 handle(action)
@@ -349,10 +355,11 @@ def telegram_loop() -> None:
 def health() -> Any:
     snapshot = _snapshot() or {}
     return jsonify({
-        "ok": True,
+        "ok": STATE.get("last_error") is None,
         "service": "signal-bot-v5-core",
         "last_scan_at": snapshot.get("generated_at"),
         "errors": snapshot.get("errors") or [],
+        "last_error": STATE.get("last_error"),
         "can_authorize_trade": False,
     })
 
@@ -363,7 +370,7 @@ def main() -> None:
     threading.Thread(target=telegram_loop, name="telegram-command-loop", daemon=True).start()
     if STARTUP_MESSAGE:
         try:
-            send("✅ Signal Bot v5 Core başladı. Eski karmaşık ajan devre dışı.", keyboard=panel_keyboard())
+            send("✅ Signal Bot v5 Core başladı.", keyboard=panel_keyboard())
         except Exception:
             log.warning("Başlangıç mesajı gönderilemedi", exc_info=True)
     APP.run(host="0.0.0.0", port=PORT, threaded=True)
