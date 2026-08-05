@@ -41,7 +41,15 @@ def _snapshot():
                 },
             }
         ],
-        "listing_filtered_candidates": [],
+        "listing_filtered_candidates": [
+            {
+                "symbol": "OLDUSDT",
+                "score": 99,
+                "stage": "FILTERED",
+                "risk_flags": ["eski market"],
+                "metadata": {"quote_volume": 1_000_000_000},
+            }
+        ],
         "liquid_market_context": {"regime": "RISK_ON", "positive_breadth_pct": 64},
     }
 
@@ -64,15 +72,31 @@ def test_long_report_is_top_three_and_shadow_only():
     assert "işlem emri değildir" in text
 
 
-def test_new_listing_report_contains_internal_enrichment():
+def test_new_listing_report_contains_only_accepted_enriched_rows():
     text = bot.format_new(_snapshot())
-    assert "EN YÜKSEK SKORLU 5" in text
+    assert "DOĞRULANMIŞ ADAYLAR" in text
     assert "NEWUSDT" in text
+    assert "OLDUSDT" not in text
     assert "Sosyal kapı PASS" in text
 
 
+def test_status_surfaces_last_scan_error():
+    previous = bot.STATE.get("last_error")
+    try:
+        bot.STATE["last_error"] = "RuntimeError: provider down"
+        text = bot.format_status(None)
+        assert "RuntimeError: provider down" in text
+    finally:
+        bot.STATE["last_error"] = previous
+
+
 def test_health_declares_no_trade_authority():
-    client = bot.APP.test_client()
-    payload = client.get("/").get_json()
-    assert payload["ok"] is True
-    assert payload["can_authorize_trade"] is False
+    previous = bot.STATE.get("last_error")
+    try:
+        bot.STATE["last_error"] = None
+        payload = bot.APP.test_client().get("/").get_json()
+        assert payload["ok"] is True
+        assert payload["can_authorize_trade"] is False
+        assert "last_error" in payload
+    finally:
+        bot.STATE["last_error"] = previous
