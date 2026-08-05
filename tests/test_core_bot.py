@@ -66,7 +66,7 @@ def test_long_report_is_top_three_and_shadow_only():
 
 def test_new_listing_report_contains_internal_enrichment():
     text = bot.format_new(_snapshot())
-    assert "PATLAMA RADARI" in text
+    assert "EN YÜKSEK SKORLU 5" in text
     assert "NEWUSDT" in text
     assert "Sosyal kapı PASS" in text
 
