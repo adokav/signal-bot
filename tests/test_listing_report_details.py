@@ -52,7 +52,7 @@ def test_price_extremes_are_preserved_from_provider_row():
     assert signal["atl_change_pct"] == 2420.0
 
 
-def test_new_listing_report_returns_highest_scoring_five_with_supply_and_extremes():
+def test_new_listing_report_ranks_only_accepted_rows_with_supply_and_extremes():
     snapshot = {
         "listing_candidates": [
             _candidate("AUSDT", 70),
@@ -60,17 +60,16 @@ def test_new_listing_report_returns_highest_scoring_five_with_supply_and_extreme
             _candidate("CUSDT", 80),
         ],
         "listing_filtered_candidates": [
-            _candidate("DUSDT", 90),
-            _candidate("EUSDT", 85),
-            _candidate("FUSDT", 75),
+            _candidate("DUSDT", 99),
+            _candidate("EUSDT", 98),
         ],
     }
     report = format_new(snapshot)
 
-    assert "EN YÜKSEK SKORLU 5" in report
-    assert report.index("BUSDT") < report.index("DUSDT") < report.index("EUSDT")
-    assert "FUSDT" in report
-    assert "AUSDT" not in report
+    assert "DOĞRULANMIŞ ADAYLAR" in report
+    assert report.index("BUSDT") < report.index("CUSDT") < report.index("AUSDT")
+    assert "DUSDT" not in report
+    assert "EUSDT" not in report
     assert "Arz: dolaşan 25.00M · toplam 100.00M · max 120.00M" in report
     assert "ATH $2.5 (%-60.0) · ATL $0.05 (%+1900.0)" in report
 
@@ -84,3 +83,14 @@ def test_pending_provider_does_not_invent_supply_or_price_extremes():
     )
     assert "Arz ve ATH/ATL: PROVIDER_COOLDOWN" in report
     assert "dolaşan 0" not in report
+
+
+def test_filtered_only_snapshot_reports_no_verified_candidate():
+    report = format_new(
+        {
+            "listing_candidates": [],
+            "listing_filtered_candidates": [_candidate("OLDUSDT", 100)],
+        }
+    )
+    assert "Son 72 saatte doğrulanmış aktif aday yok." in report
+    assert "OLDUSDT" not in report
