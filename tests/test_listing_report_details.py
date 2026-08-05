@@ -69,7 +69,8 @@ def test_new_listing_report_returns_highest_scoring_five_with_supply_and_extreme
 
     assert "EN YÜKSEK SKORLU 5" in report
     assert report.index("BUSDT") < report.index("DUSDT") < report.index("EUSDT")
-    assert "FUSDT" not in report
+    assert "AUSDT" not in report
+    assert "FUSDT" in report
     assert "Arz: dolaşan 25.00M · toplam 100.00M · max 120.00M" in report
     assert "ATH $2.5 (%-60.0) · ATL $0.05 (%+1900.0)" in report
 
