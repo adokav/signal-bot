@@ -73,7 +73,7 @@ def test_snapshot_serialization_has_global_execution_invariant():
     assert "dex_candidates" not in payload
 
 
-def test_engine_keeps_below_threshold_listing_for_watch_flow():
+def test_below_threshold_listing_is_not_exposed_in_public_snapshot():
     cfg = UnifiedConfig(
         cex_enabled=False, listing_enabled=True, social_enabled=False,
         fundamental_enabled=False,
@@ -86,8 +86,4 @@ def test_engine_keeps_below_threshold_listing_for_watch_flow():
     ).scan_once(now=1_700_000_000)
 
     assert snapshot.listing_candidates == ()
-    assert len(snapshot.listing_filtered_candidates) == 1
-    candidate = snapshot.listing_filtered_candidates[0]
-    assert candidate.symbol == "NOVAUSDT"
-    assert candidate.metadata["filter_reasons"]
-    assert candidate.execution_eligible is False
+    assert snapshot.listing_filtered_candidates == ()
