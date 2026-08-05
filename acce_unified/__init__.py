@@ -6,7 +6,7 @@ radar is started automatically. The application entry point owns lifecycle.
 
 from .config import DEFAULT_TRADE_UNIVERSE, UnifiedConfig, build_trade_universe
 from .engine import (
-    UnifiedRadarEngine,
+    UnifiedRadarEngine as CoreUnifiedRadarEngine,
     UnifiedRadarRuntime,
     attach_snapshot_to_results,
     format_filtered_listing_report,
@@ -15,6 +15,17 @@ from .engine import (
     format_snapshot_brief,
 )
 from .models import CexTicker, MexcListing, RadarCandidate, RadarSnapshot
+from .observation_archive import (
+    LiquidObservationArchive,
+    LiquidScanObservation,
+    LiquidSymbolObservation,
+    ObservationArchivingCexProvider,
+    ObservationArchivingRadarEngine,
+)
+from .observation_runtime import (
+    CadencedObservationArchivingCexProvider,
+    ProductionUnifiedRadarEngine,
+)
 from .research import (
     CostEstimate,
     Decision,
@@ -28,18 +39,28 @@ from .research import (
     ResearchStore,
 )
 
+UnifiedRadarEngine = ProductionUnifiedRadarEngine
+
 __all__ = [
+    "CadencedObservationArchivingCexProvider",
     "CexTicker",
+    "CoreUnifiedRadarEngine",
     "CostEstimate",
     "DEFAULT_TRADE_UNIVERSE",
     "Decision",
     "Direction",
     "Evidence",
     "EvidenceStatus",
+    "LiquidObservationArchive",
+    "LiquidScanObservation",
+    "LiquidSymbolObservation",
     "MarketState",
     "MexcListing",
+    "ObservationArchivingCexProvider",
+    "ObservationArchivingRadarEngine",
     "Opportunity",
     "OutcomeLabel",
+    "ProductionUnifiedRadarEngine",
     "RadarCandidate",
     "RadarSnapshot",
     "ReplayClock",

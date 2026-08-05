@@ -54,6 +54,15 @@ services:
       - key: UNIFIED_LIQUID_REQUIRE_SUPPLY_DATA
         value: "true"
 
+      # Point-in-time research archive. The bot still scans every 120 seconds,
+      # while immutable ML/replay observations are sampled every 30 minutes.
+      - key: LIQUID_OBSERVATION_ARCHIVE_ENABLED
+        value: "true"
+      - key: LIQUID_OBSERVATION_ARCHIVE_PATH
+        value: /data/liquid100_observations.sqlite3
+      - key: LIQUID_OBSERVATION_ARCHIVE_INTERVAL_SECONDS
+        value: "1800"
+
       # Verified MEXC new listings
       - key: UNIFIED_LISTING_TOP_N
         value: "5"
