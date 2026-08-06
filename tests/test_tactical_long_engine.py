@@ -14,19 +14,20 @@ from acce_unified.tactical_long_engine import TacticalLongEngine, _build_plan
 def _series(*, start: float, step: float, seconds: int, count: int = 240):
     rows = []
     base_time = 1_700_000_000
+    amplitude = start * 0.002
+    half_range = start * 0.001
     for i in range(count):
-        # Alternating impulse creates confirmed swings while the drift controls regime.
-        wave = (2.0 if i % 6 == 2 else -2.0 if i % 6 == 5 else 0.0)
+        wave = amplitude if i % 6 == 2 else -amplitude if i % 6 == 5 else 0.0
         center = start + step * i + wave
         open_time = base_time + i * seconds
         rows.append(Candle(
             open_time=open_time,
             close_time=open_time + seconds,
             available_at=open_time + seconds,
-            open=center - 0.2,
-            high=center + 1.0,
-            low=center - 1.0,
-            close=center + 0.2,
+            open=center - half_range * 0.2,
+            high=center + half_range,
+            low=center - half_range,
+            close=center + half_range * 0.2,
             volume=1000 + (i % 20) * 10,
         ))
     return tuple(rows)
