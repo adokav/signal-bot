@@ -119,8 +119,17 @@ class MexcTacticalMarketData:
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()
-        payload = response.json()
-        return payload
+        return response.json()
+
+    @staticmethod
+    def last_closed_end_time_ms(
+        *, timeframe: TacticalTimeframe, decision_at: int
+    ) -> int:
+        """Return the final millisecond of the latest fully closed UTC bucket."""
+        if decision_at <= 0:
+            raise DataQualityError("invalid decision timestamp")
+        bucket_start = (decision_at // timeframe.seconds) * timeframe.seconds
+        return bucket_start * 1000 - 1
 
     @staticmethod
     def parse_kline_rows(
@@ -174,7 +183,10 @@ class MexcTacticalMarketData:
                 "symbol": symbol,
                 "interval": timeframe.value,
                 "limit": self.candle_limit,
-                "endTime": decision_at * 1000,
+                "endTime": self.last_closed_end_time_ms(
+                    timeframe=timeframe,
+                    decision_at=decision_at,
+                ),
             },
         )
         return self.parse_kline_rows(
