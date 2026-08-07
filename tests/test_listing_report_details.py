@@ -71,7 +71,7 @@ def test_new_listing_report_ranks_only_accepted_rows_with_supply_and_extremes():
     assert "DUSDT" not in report
     assert "EUSDT" not in report
     assert "Arz: dolaşan 25.00M · toplam 100.00M · max 120.00M" in report
-    assert "ATH $2.5 (%-60.0) · ATL $0.05 (%+1900.0)" in report
+    assert "ATH $2.50 (%-60.0) · ATL $0.05 (%+1900.0)" in report
 
 
 def test_pending_provider_does_not_invent_supply_or_price_extremes():

@@ -54,14 +54,15 @@ def _snapshot():
     }
 
 
-def test_only_five_public_commands_remain():
+def test_public_commands_include_tactical_radar_without_legacy_bloat():
     assert [row["command"] for row in bot.COMMANDS] == [
-        "panel", "longs", "new", "status", "scan"
+        "panel", "tactical", "longs", "new", "status", "scan"
     ]
 
 
 def test_legacy_listing_command_routes_to_new_view():
     assert bot._command("/listings") == "NEW"
+    assert bot._command("/btceth") == "TACTICAL"
     assert bot._command("/social") == "SOCIAL"
 
 
@@ -70,6 +71,33 @@ def test_long_report_is_top_three_and_shadow_only():
     assert "LONG İLK 3" in text
     assert "SOLUSDT" in text
     assert "işlem emri değildir" in text
+
+
+def test_tactical_report_exposes_entry_stop_and_no_trade_authority():
+    text = bot.format_tactical({
+        "assessments": [{
+            "symbol": "BTCUSDT",
+            "state": "READY",
+            "setup": "TREND_PULLBACK",
+            "structure_4h": "BULLISH",
+            "plan": {
+                "entry_low": 100,
+                "entry_high": 101,
+                "technical_invalidation": 98,
+                "hard_stop": 97,
+                "target_1": 106,
+                "target_2": 110,
+                "net_rr_1": 2.0,
+                "net_rr_2": 3.5,
+            },
+            "reasons": [],
+            "evidence": ["4H_BULLISH_STRUCTURE"],
+            "risk_flags": [],
+        }]
+    })
+    assert "Giriş bölgesi" in text
+    assert "Hard stop" in text
+    assert "otomatik emir" in text
 
 
 def test_new_listing_report_contains_only_accepted_enriched_rows():
@@ -92,11 +120,15 @@ def test_status_surfaces_last_scan_error():
 
 def test_health_declares_no_trade_authority():
     previous = bot.STATE.get("last_error")
+    tactical_previous = bot.STATE.get("tactical_last_error")
     try:
         bot.STATE["last_error"] = None
+        bot.STATE["tactical_last_error"] = None
         payload = bot.APP.test_client().get("/").get_json()
         assert payload["ok"] is True
         assert payload["can_authorize_trade"] is False
         assert "last_error" in payload
+        assert "tactical_last_error" in payload
     finally:
         bot.STATE["last_error"] = previous
+        bot.STATE["tactical_last_error"] = tactical_previous

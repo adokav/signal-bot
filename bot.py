@@ -1,8 +1,4 @@
-"""Signal Bot v5 Core: MEXC Liquid-100 Long and verified new listings.
-
-The process is deliberately advisory. It scans, reports and alerts; it has no
-exchange credentials, portfolio authority or order path.
-"""
+"""Signal Bot v5 Core: MEXC research radars without order authority."""
 from __future__ import annotations
 
 import json
@@ -18,6 +14,8 @@ from flask import Flask, jsonify
 
 from acce_unified import UnifiedConfig, UnifiedRadarEngine
 from acce_unified.listing_fundamentals import ListingFundamentalMetricsProvider
+from acce_unified.tactical_long_data import MexcTacticalMarketData
+from acce_unified.tactical_long_engine import TacticalLongEngine
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -31,6 +29,8 @@ PORT = int(os.getenv("PORT", "10000"))
 STATE_FILE = Path(os.getenv("CORE_STATE_FILE", "/data/core_state.json"))
 POLL_SECONDS = max(2, int(os.getenv("TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS", "5")))
 STARTUP_MESSAGE = os.getenv("CORE_SEND_STARTUP_MESSAGE", "1") == "1"
+TACTICAL_SCAN_SECONDS = max(60, int(os.getenv("TACTICAL_SCAN_INTERVAL_SECONDS", "300")))
+TACTICAL_ALERTS = os.getenv("TACTICAL_LONG_ALERTS_ENABLED", "1") == "1"
 
 CONFIG = UnifiedConfig.from_env()
 FUNDAMENTAL_PROVIDER = ListingFundamentalMetricsProvider(
@@ -41,17 +41,23 @@ FUNDAMENTAL_PROVIDER = ListingFundamentalMetricsProvider(
     max_assets=CONFIG.fundamental_max_assets,
 )
 ENGINE = UnifiedRadarEngine(CONFIG, {}, fundamental_provider=FUNDAMENTAL_PROVIDER)
+TACTICAL_DATA = MexcTacticalMarketData(timeout_seconds=CONFIG.request_timeout_seconds)
+TACTICAL_ENGINE = TacticalLongEngine()
 APP = Flask(__name__)
 HTTP = requests.Session()
 LOCK = threading.RLock()
 STATE: dict[str, Any] = {
     "offset": 0,
     "snapshot": None,
+    "tactical_snapshot": None,
+    "tactical_last_states": {},
     "last_error": None,
+    "tactical_last_error": None,
 }
 
 COMMANDS = [
     {"command": "panel", "description": "Sade kontrol paneli"},
+    {"command": "tactical", "description": "BTC ve ETH giriş/stop radarı"},
     {"command": "longs", "description": "MEXC Likit 100 Long İlk 3"},
     {"command": "new", "description": "Doğrulanmış MEXC yeni listeleri"},
     {"command": "status", "description": "Tarama sağlığı ve veri durumu"},
@@ -86,8 +92,7 @@ def _api(method: str, payload: dict[str, Any] | None = None) -> Any:
         return None
     response = HTTP.post(
         f"https://api.telegram.org/bot{TOKEN}/{method}",
-        json=payload or {},
-        timeout=20,
+        json=payload or {}, timeout=20,
     )
     response.raise_for_status()
     body = response.json()
@@ -111,20 +116,24 @@ def send(text: str, *, keyboard: dict[str, Any] | None = None) -> None:
 
 
 def panel_keyboard() -> dict[str, Any]:
-    return {
-        "inline_keyboard": [
-            [{"text": "💧 Long İlk 3", "callback_data": "LONGS"}],
-            [{"text": "🆕 Yeni Listeler", "callback_data": "NEW"}],
-            [
-                {"text": "📊 Durum", "callback_data": "STATUS"},
-                {"text": "🔄 Şimdi Tara", "callback_data": "SCAN"},
-            ],
-        ]
-    }
+    return {"inline_keyboard": [
+        [{"text": "₿ BTC / Ξ ETH Long", "callback_data": "TACTICAL"}],
+        [{"text": "💧 Long İlk 3", "callback_data": "LONGS"}],
+        [{"text": "🆕 Yeni Listeler", "callback_data": "NEW"}],
+        [
+            {"text": "📊 Durum", "callback_data": "STATUS"},
+            {"text": "🔄 Şimdi Tara", "callback_data": "SCAN"},
+        ],
+    ]}
 
 
 def _snapshot() -> dict[str, Any] | None:
     value = STATE.get("snapshot")
+    return value if isinstance(value, dict) else None
+
+
+def _tactical_snapshot() -> dict[str, Any] | None:
+    value = STATE.get("tactical_snapshot")
     return value if isinstance(value, dict) else None
 
 
@@ -155,11 +164,11 @@ def _price(value: Any) -> str:
         amount = float(value)
     except (TypeError, ValueError):
         return "veri yok"
+    if amount >= 1000:
+        return f"${amount:,.0f}"
     if amount >= 1:
-        return f"${amount:,.4f}".rstrip("0").rstrip(".")
-    if amount >= 0.01:
-        return f"${amount:.6f}".rstrip("0").rstrip(".")
-    return f"${amount:.10f}".rstrip("0").rstrip(".")
+        return f"${amount:,.2f}"
+    return f"${amount:.6f}".rstrip("0").rstrip(".")
 
 
 def _pct(value: Any, *, missing: str = "?") -> str:
@@ -196,20 +205,51 @@ def format_longs(snapshot: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
+def format_tactical(report: dict[str, Any] | None) -> str:
+    lines = ["₿ BTC / Ξ ETH — TAKTİK LONG RADARI", "MEXC Spot · SHADOW", ""]
+    if not report:
+        lines.extend(["Henüz geçerli radar taraması yok.", str(STATE.get("tactical_last_error") or "")])
+        return "\n".join(line for line in lines if line)
+    for item in report.get("assessments") or []:
+        symbol = str(item.get("symbol") or "?")
+        state = str(item.get("state") or "NO_LONG")
+        setup = str(item.get("setup") or "-")
+        structure = str(item.get("structure_4h") or "?")
+        lines.append(f"{symbol} — {state}")
+        lines.append(f"Yapı: {structure} · Setup: {setup}")
+        plan = item.get("plan") or {}
+        if plan:
+            lines.extend([
+                f"Giriş bölgesi: {_price(plan.get('entry_low'))} – {_price(plan.get('entry_high'))}",
+                f"Teknik geçersizlik: {_price(plan.get('technical_invalidation'))}",
+                f"Hard stop: {_price(plan.get('hard_stop'))}",
+                f"Hedef 1: {_price(plan.get('target_1'))} · R/R {float(plan.get('net_rr_1') or 0):.2f}",
+                f"Hedef 2: {_price(plan.get('target_2'))} · R/R {float(plan.get('net_rr_2') or 0):.2f}",
+            ])
+        reasons = item.get("reasons") or []
+        risks = item.get("risk_flags") or []
+        evidence = item.get("evidence") or []
+        if evidence:
+            lines.append("Kanıt: " + ", ".join(evidence))
+        if risks:
+            lines.append("Risk: " + ", ".join(risks))
+        if reasons:
+            lines.append("Karar nedeni: " + ", ".join(reasons))
+        lines.append("")
+    lines.append("Plan araştırma çıktısıdır; otomatik emir veya pozisyon yetkisi yoktur.")
+    return "\n".join(lines)
+
+
 def format_new(snapshot: dict[str, Any] | None) -> str:
     if not snapshot:
         return "🆕 MEXC NEW LISTING\n\nİlk tarama bekleniyor."
-
-    # Public output is fail-closed. Rejected/watch rows are diagnostics and may
-    # never be promoted back into the visible ranking merely to fill five slots.
     rows = sorted(
         snapshot.get("listing_candidates") or [],
         key=lambda item: (
             int(item.get("score") or 0),
             float((item.get("metadata") or {}).get("quote_volume") or 0),
             str(item.get("symbol") or ""),
-        ),
-        reverse=True,
+        ), reverse=True,
     )[:5]
     lines = ["🆕 MEXC NEW LISTING — DOĞRULANMIŞ ADAYLAR", ""]
     if not rows:
@@ -241,18 +281,20 @@ def format_new(snapshot: dict[str, Any] | None) -> str:
 def format_status(snapshot: dict[str, Any] | None) -> str:
     errors = (snapshot or {}).get("errors") or []
     generated = int((snapshot or {}).get("generated_at") or 0)
+    tactical = _tactical_snapshot() or {}
+    tactical_age = max(0, int(time.time()) - int(tactical.get("generated_at") or 0)) if tactical else 0
     age = max(0, int(time.time()) - generated) if generated else 0
-    last_error = str(STATE.get("last_error") or "")
-    error_text = ", ".join(errors) if errors else last_error or "yok"
+    error_text = ", ".join(errors) if errors else str(STATE.get("last_error") or "yok")
     return "\n".join([
         "📊 SIGNAL BOT v5 CORE",
         "Mod: SHADOW / RADAR ONLY",
-        f"Son tarama: {age} sn önce" if generated else "Son tarama: henüz yok",
+        f"Ana tarama: {age} sn önce" if generated else "Ana tarama: henüz yok",
+        f"Taktik radar: {tactical_age} sn önce" if tactical else "Taktik radar: henüz yok",
         f"Likit evren: {int((snapshot or {}).get('liquid_universe_size') or 0)}/100",
         f"Long aday: {len((snapshot or {}).get('liquid_long_candidates') or [])}/3",
         f"Doğrulanmış yeni aday: {len((snapshot or {}).get('listing_candidates') or [])}",
-        f"Tanı amaçlı elenen yeni aday: {len((snapshot or {}).get('listing_filtered_candidates') or [])}",
-        f"Hata: {error_text}",
+        f"Ana hata: {error_text}",
+        f"Taktik hata: {STATE.get('tactical_last_error') or 'yok'}",
         "Emir yetkisi: YOK",
     ])
 
@@ -273,40 +315,82 @@ def scan_once() -> dict[str, Any] | None:
     return snapshot
 
 
+def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
+    try:
+        report = TACTICAL_ENGINE.analyze(TACTICAL_DATA.snapshot()).to_dict()
+    except Exception as exc:
+        log.exception("Taktik radar taraması başarısız")
+        with LOCK:
+            STATE["tactical_last_error"] = f"{type(exc).__name__}: {exc}"
+            _save_state()
+        return None
+    alerts: list[str] = []
+    with LOCK:
+        previous = dict(STATE.get("tactical_last_states") or {})
+        current: dict[str, str] = {}
+        for item in report.get("assessments") or []:
+            symbol = str(item.get("symbol") or "?")
+            state = str(item.get("state") or "NO_LONG")
+            setup = str(item.get("setup") or "-")
+            current[symbol] = f"{state}:{setup}"
+            old = previous.get(symbol)
+            if old != current[symbol] and state in {"READY", "TRIGGERED"}:
+                alerts.append(f"🔔 {symbol} {state}\nSetup: {setup}\n" + format_tactical({"assessments": [item]}))
+            elif old and old.split(":", 1)[0] in {"READY", "TRIGGERED"} and state == "NO_LONG":
+                alerts.append(f"⚠️ {symbol} Long formasyonu bozuldu.\nNeden: {', '.join(item.get('reasons') or ['NO_VALID_SETUP'])}")
+        STATE["tactical_snapshot"] = report
+        STATE["tactical_last_states"] = current
+        STATE["tactical_last_error"] = None
+        _save_state()
+    if emit_alerts and TACTICAL_ALERTS:
+        for alert in alerts:
+            try:
+                send(alert, keyboard=panel_keyboard())
+            except Exception:
+                log.warning("Taktik uyarı gönderilemedi", exc_info=True)
+    return report
+
+
 def scanner_loop() -> None:
     while True:
         scan_once()
         time.sleep(CONFIG.scan_interval_seconds)
 
 
+def tactical_scanner_loop() -> None:
+    while True:
+        tactical_scan_once()
+        time.sleep(TACTICAL_SCAN_SECONDS)
+
+
 def _command(text: str) -> str:
     token = (text or "").strip().split(maxsplit=1)[0].lower()
     return {
-        "/start": "PANEL",
-        "/panel": "PANEL",
-        "/longs": "LONGS",
-        "/new": "NEW",
-        "/listings": "NEW",
-        "/status": "STATUS",
-        "/scan": "SCAN",
+        "/start": "PANEL", "/panel": "PANEL", "/tactical": "TACTICAL",
+        "/btceth": "TACTICAL", "/longs": "LONGS", "/new": "NEW",
+        "/listings": "NEW", "/status": "STATUS", "/scan": "SCAN",
     }.get(token, token.lstrip("/").upper())
 
 
 def handle(action: str) -> None:
     snapshot = _snapshot()
-    if action == "LONGS":
+    if action == "TACTICAL":
+        refreshed = tactical_scan_once(emit_alerts=False)
+        send(format_tactical(refreshed or _tactical_snapshot()), keyboard=panel_keyboard())
+    elif action == "LONGS":
         send(format_longs(snapshot), keyboard=panel_keyboard())
     elif action == "NEW":
         send(format_new(snapshot), keyboard=panel_keyboard())
     elif action == "STATUS":
         send(format_status(snapshot), keyboard=panel_keyboard())
     elif action == "SCAN":
-        send("🔄 Tarama başlatıldı.", keyboard=panel_keyboard())
+        send("🔄 Tüm radar taramaları başlatıldı.", keyboard=panel_keyboard())
         refreshed = scan_once()
+        tactical_scan_once()
         send(format_status(refreshed or _snapshot()), keyboard=panel_keyboard())
     else:
         send(
-            "🎯 SIGNAL BOT v5 CORE\n\nAktif araştırma motorları:\n• MEXC Likit 100 Long İlk 3\n• Doğrulanmış MEXC yeni listelemeleri",
+            "🎯 SIGNAL BOT v5 CORE\n\nAktif araştırma motorları:\n• BTC/ETH Taktik Long giriş ve stop radarı\n• MEXC Likit 100 Long İlk 3\n• Doğrulanmış MEXC yeni listelemeleri",
             keyboard=panel_keyboard(),
         )
 
@@ -321,27 +405,18 @@ def telegram_loop() -> None:
         log.warning("Bot komutları ayarlanamadı: %s", exc)
     while True:
         try:
-            updates = _api(
-                "getUpdates",
-                {
-                    "offset": int(STATE.get("offset") or 0),
-                    "timeout": 20,
-                    "allowed_updates": ["message", "callback_query"],
-                },
-            ) or []
+            updates = _api("getUpdates", {
+                "offset": int(STATE.get("offset") or 0), "timeout": 20,
+                "allowed_updates": ["message", "callback_query"],
+            }) or []
             for update in updates:
-                STATE["offset"] = max(
-                    int(STATE.get("offset") or 0),
-                    int(update.get("update_id") or 0) + 1,
-                )
+                STATE["offset"] = max(int(STATE.get("offset") or 0), int(update.get("update_id") or 0) + 1)
                 callback = update.get("callback_query") or {}
                 message = update.get("message") or callback.get("message") or {}
                 chat = str((message.get("chat") or {}).get("id") or "")
                 if chat != CHAT_ID:
                     continue
-                action = str(callback.get("data") or "") or _command(
-                    str(message.get("text") or "")
-                )
+                action = str(callback.get("data") or "") or _command(str(message.get("text") or ""))
                 if callback.get("id"):
                     _api("answerCallbackQuery", {"callback_query_id": callback["id"]})
                 handle(action)
@@ -354,12 +429,15 @@ def telegram_loop() -> None:
 @APP.get("/")
 def health() -> Any:
     snapshot = _snapshot() or {}
+    tactical = _tactical_snapshot() or {}
     return jsonify({
-        "ok": STATE.get("last_error") is None,
+        "ok": STATE.get("last_error") is None and STATE.get("tactical_last_error") is None,
         "service": "signal-bot-v5-core",
         "last_scan_at": snapshot.get("generated_at"),
+        "tactical_last_scan_at": tactical.get("generated_at"),
         "errors": snapshot.get("errors") or [],
         "last_error": STATE.get("last_error"),
+        "tactical_last_error": STATE.get("tactical_last_error"),
         "can_authorize_trade": False,
     })
 
@@ -367,6 +445,7 @@ def health() -> Any:
 def main() -> None:
     _load_state()
     threading.Thread(target=scanner_loop, name="mexc-core-scanner", daemon=True).start()
+    threading.Thread(target=tactical_scanner_loop, name="btc-eth-tactical-scanner", daemon=True).start()
     threading.Thread(target=telegram_loop, name="telegram-command-loop", daemon=True).start()
     if STARTUP_MESSAGE:
         try:
