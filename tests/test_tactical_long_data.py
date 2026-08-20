@@ -46,12 +46,37 @@ def test_completed_rows_are_parsed_chronologically():
     assert [row.close_time for row in candles] == [9_299, 9_599, 9_899]
 
 
-def test_open_or_future_candle_fails_closed():
+def test_single_current_open_candle_is_discarded_at_provider_boundary():
     rows = [
+        _row(9_300, 9_599),
         _row(9_600, 9_899),
         _row(9_900, 10_199),
     ]
-    with pytest.raises(DataQualityError, match="future or open"):
+    candles = MexcTacticalMarketData.parse_kline_rows(
+        rows,
+        timeframe=TacticalTimeframe.M5,
+        decision_at=10_000,
+    )
+    assert [row.close_time for row in candles] == [9_599, 9_899]
+
+
+def test_multiple_future_or_open_rows_still_fail_closed():
+    rows = [
+        _row(9_600, 9_899),
+        _row(9_900, 10_199),
+        _row(10_200, 10_499),
+    ]
+    with pytest.raises(DataQualityError, match="multiple future or open"):
+        MexcTacticalMarketData.parse_kline_rows(
+            rows,
+            timeframe=TacticalTimeframe.M5,
+            decision_at=10_000,
+        )
+
+
+def test_payload_with_no_closed_candle_fails_closed():
+    rows = [_row(9_900, 10_199)]
+    with pytest.raises(DataQualityError, match="no closed candles"):
         MexcTacticalMarketData.parse_kline_rows(
             rows,
             timeframe=TacticalTimeframe.M5,
