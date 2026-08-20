@@ -2,8 +2,10 @@
 
 Unlike the broad market radar, this adapter never substitutes another venue.
 Entry, stop and execution-quality decisions must use the intended MEXC market.
-The adapter is read-only and deliberately fails closed on malformed, open,
-future or stale observations.
+The adapter is read-only and deliberately fails closed on malformed, future or
+stale observations. A provider may still return its current open kline even
+when an endTime boundary is supplied; that row is deterministically discarded
+at this ingestion boundary rather than being allowed into signal logic.
 """
 from __future__ import annotations
 
@@ -141,6 +143,7 @@ class MexcTacticalMarketData:
         if not isinstance(rows, list) or not rows:
             raise DataQualityError("MEXC kline payload is empty or malformed")
         parsed: list[Candle] = []
+        discarded_open_rows = 0
         for row in rows:
             if not isinstance(row, (list, tuple)) or len(row) < 7:
                 raise DataQualityError("malformed MEXC kline row")
@@ -159,7 +162,21 @@ class MexcTacticalMarketData:
                 )
             except (TypeError, ValueError, IndexError) as exc:
                 raise DataQualityError("invalid MEXC kline values") from exc
+
+            # MEXC's REST kline response can include the current in-progress
+            # bucket. It is provider transport noise, not valid research data.
+            # Discard only rows that are provably still open at decision_at;
+            # never alter their timestamps or promote them to closed candles.
+            if not candle.visible_at(decision_at):
+                discarded_open_rows += 1
+                continue
             parsed.append(candle)
+
+        if not parsed:
+            raise DataQualityError("no closed candles in MEXC kline payload")
+        if discarded_open_rows > 1:
+            raise DataQualityError("multiple future or open candles supplied")
+
         max_staleness = timeframe.seconds * 2
         return visible_closed_candles(
             parsed,
