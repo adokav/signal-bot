@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.parse import urlparse
 from xml.etree import ElementTree
 
 import requests
@@ -30,6 +31,22 @@ FRED_SERIES = {
 BOJ_SERIES = {
     "boj_call_rate": ("FM01", "STRDCLUCON"),
 }
+
+
+def _parse_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _official_treasury_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host in {"home.treasury.gov", "treasurydirect.gov", "www.treasurydirect.gov"}
 
 
 @dataclass(frozen=True)
@@ -55,17 +72,6 @@ class MacroObservation:
             raise ValueError("observation time cannot be after available time")
         if not self.provider or not self.series:
             raise ValueError("macro observation requires provider and series")
-
-
-def _parse_time(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 class FredAdapter:
@@ -101,10 +107,14 @@ class FredAdapter:
         row = rows[0]
         ingested = _utc_now()
         obs = MacroObservation(
-            provider="fred", series=logical_series, source_id=series_id,
+            provider="fred",
+            series=logical_series,
+            source_id=series_id,
             observation_time=f"{row['date']}T00:00:00+00:00",
-            available_time=ingested.isoformat(), ingested_time=ingested.isoformat(),
-            value=float(row["value"]), realtime_start=row.get("realtime_start"),
+            available_time=ingested.isoformat(),
+            ingested_time=ingested.isoformat(),
+            value=float(row["value"]),
+            realtime_start=row.get("realtime_start"),
             realtime_end=row.get("realtime_end"),
         )
         obs.validate()
@@ -125,6 +135,7 @@ class BojAdapter:
     @staticmethod
     def _find_value_rows(payload: Any) -> list[tuple[str, float, str | None]]:
         rows: list[tuple[str, float, str | None]] = []
+
         def walk(node: Any, inherited_unit: str | None = None) -> None:
             if isinstance(node, dict):
                 normalized = {str(key).upper(): value for key, value in node.items()}
@@ -141,6 +152,7 @@ class BojAdapter:
             elif isinstance(node, list):
                 for child in node:
                     walk(child, inherited_unit)
+
         walk(payload)
         return rows
 
@@ -162,14 +174,27 @@ class BojAdapter:
         db, code = BOJ_SERIES[logical_series]
         start = (as_of.replace(day=1) - timedelta(days=1)).strftime("%Y%m")
         end = as_of.strftime("%Y%m")
-        response = self.session.get(self.base_url, params={"format":"json","lang":"en","db":db,"code":code,"startDate":start,"endDate":end}, timeout=15)
+        response = self.session.get(
+            self.base_url,
+            params={"format": "json", "lang": "en", "db": db, "code": code, "startDate": start, "endDate": end},
+            timeout=15,
+        )
         response.raise_for_status()
         rows = self._find_value_rows(response.json())
         if not rows:
             raise RuntimeError(f"no BOJ value rows for {db}:{code}")
         observation_time, value, unit = sorted((self._boj_date_to_iso(d), v, u) for d, v, u in rows)[-1]
         ingested = _utc_now()
-        obs = MacroObservation(provider="boj", series=logical_series, source_id=f"{db}:{code}", observation_time=observation_time, available_time=ingested.isoformat(), ingested_time=ingested.isoformat(), value=value, unit=unit)
+        obs = MacroObservation(
+            provider="boj",
+            series=logical_series,
+            source_id=f"{db}:{code}",
+            observation_time=observation_time,
+            available_time=ingested.isoformat(),
+            ingested_time=ingested.isoformat(),
+            value=value,
+            unit=unit,
+        )
         obs.validate()
         return obs
 
@@ -195,28 +220,29 @@ class TreasuryBuybackOperation:
             raise ValueError("Treasury operation precedes announcement")
         if self.max_purchase_usd < 0:
             raise ValueError("negative Treasury buyback capacity")
+        if not _official_treasury_url(self.source_url):
+            raise ValueError("untrusted Treasury source")
 
 
 class TreasuryBuybackAdapter:
     """Parse official Treasury Quarterly Refunding buyback schedule XML.
 
-    Schedule capacity is *not* a completed purchase and must never be scored as
+    Schedule capacity is not a completed purchase and must never be scored as
     realized liquidity. The source URL is supplied by configuration so a
-    quarterly document can be pinned and archived rather than silently changing
-    when Treasury rotates its 'most recent' URL.
+    quarterly document can be pinned and archived rather than silently changing.
     """
 
     def __init__(self, schedule_url: str, session: requests.Session | None = None):
-        if not schedule_url.startswith("https://home.treasury.gov/"):
-            raise ValueError("Treasury schedule must use official home.treasury.gov source")
+        if not _official_treasury_url(schedule_url):
+            raise ValueError("Treasury schedule must use official Treasury source")
         self.schedule_url = schedule_url
         self.session = session or requests.Session()
 
     @staticmethod
     def _text(node: ElementTree.Element, names: tuple[str, ...]) -> str | None:
-        wanted = {name.lower().replace("_", "") for name in names}
+        wanted = {name.lower().replace("_", "").replace("-", "").replace(" ", "") for name in names}
         for child in node.iter():
-            tag = child.tag.split("}")[-1].lower().replace("_", "").replace("-", "")
+            tag = child.tag.split("}")[-1].lower().replace("_", "").replace("-", "").replace(" ", "")
             if tag in wanted and child.text and child.text.strip():
                 return child.text.strip()
         return None
@@ -246,6 +272,8 @@ class TreasuryBuybackAdapter:
 
     @classmethod
     def parse_xml(cls, xml_text: str, *, source_url: str, ingested_at: datetime) -> tuple[TreasuryBuybackOperation, ...]:
+        if not _official_treasury_url(source_url):
+            raise ValueError("Treasury schedule must use official Treasury source")
         root = ElementTree.fromstring(xml_text)
         operations: list[TreasuryBuybackOperation] = []
         for node in root.iter():
@@ -257,14 +285,9 @@ class TreasuryBuybackAdapter:
             maximum = cls._text(node, ("MaximumPurchaseAmount", "MaxPurchaseAmount", "Maximum Purchase Amount"))
             if not all((announcement, operation, settlement, operation_type, bucket, maximum)):
                 continue
-            announced_dt = cls._date(announcement)
-            operated_dt = cls._date(operation)
-            # Treasury schedules disclose dates; publication/operation intraday
-            # times are intentionally not invented here. Availability is the
-            # actual ingestion time, while operation_time is date-bounded.
             item = TreasuryBuybackOperation(
-                announcement_time=announced_dt.isoformat(),
-                operation_time=operated_dt.isoformat(),
+                announcement_time=cls._date(announcement).isoformat(),
+                operation_time=cls._date(operation).isoformat(),
                 settlement_date=settlement.replace("*", ""),
                 operation_type=operation_type,
                 security_bucket=bucket,
@@ -287,6 +310,106 @@ class TreasuryBuybackAdapter:
 
 
 @dataclass(frozen=True)
+class TreasuryBuybackResult:
+    operation_time: str
+    settlement_date: str
+    operation_type: str | None
+    security_bucket: str | None
+    max_purchase_usd: float
+    total_offered_usd: float
+    total_accepted_usd: float
+    issues_eligible: int | None
+    issues_accepted: int | None
+    source_url: str
+    available_time: str
+    ingested_time: str
+
+    def validate(self) -> None:
+        operated = _parse_time(self.operation_time)
+        available = _parse_time(self.available_time)
+        ingested = _parse_time(self.ingested_time)
+        if available > ingested:
+            raise ValueError("Treasury result claims future availability")
+        if operated > available:
+            raise ValueError("Treasury result available before operation")
+        if min(self.max_purchase_usd, self.total_offered_usd, self.total_accepted_usd) < 0:
+            raise ValueError("negative Treasury buyback amount")
+        if self.total_accepted_usd > self.total_offered_usd:
+            raise ValueError("Treasury accepted exceeds offered")
+        if self.max_purchase_usd and self.total_accepted_usd > self.max_purchase_usd:
+            raise ValueError("Treasury accepted exceeds announced maximum")
+        if self.issues_eligible is not None and self.issues_eligible < 0:
+            raise ValueError("negative Treasury eligible issue count")
+        if self.issues_accepted is not None and self.issues_accepted < 0:
+            raise ValueError("negative Treasury accepted issue count")
+        if self.issues_eligible is not None and self.issues_accepted is not None and self.issues_accepted > self.issues_eligible:
+            raise ValueError("Treasury accepted issue count exceeds eligible")
+        if not _official_treasury_url(self.source_url):
+            raise ValueError("untrusted Treasury source")
+
+
+class TreasuryBuybackResultAdapter:
+    """Ingest one official TreasuryDirect buyback result XML document.
+
+    Results represent realized accepted par, unlike the tentative schedule's
+    maximum capacity. Publication time is not invented: live availability is
+    the actual ingestion timestamp unless a trusted release timestamp is added
+    later by a dedicated historical-release layer.
+    """
+
+    def __init__(self, result_url: str, session: requests.Session | None = None):
+        if not _official_treasury_url(result_url):
+            raise ValueError("Treasury result must use official Treasury source")
+        self.result_url = result_url
+        self.session = session or requests.Session()
+
+    @classmethod
+    def parse_xml(cls, xml_text: str, *, source_url: str, ingested_at: datetime) -> TreasuryBuybackResult:
+        if not _official_treasury_url(source_url):
+            raise ValueError("Treasury result must use official Treasury source")
+        root = ElementTree.fromstring(xml_text)
+        text = TreasuryBuybackAdapter._text
+        date = TreasuryBuybackAdapter._date
+        money = TreasuryBuybackAdapter._money
+
+        operation = text(root, ("OperationDate", "Operation Date"))
+        settlement = text(root, ("SettlementDate", "Settlement Date"))
+        maximum = text(root, ("MaximumParAmountToBeRedeemed", "MaxParAmountToBeRedeemed", "Maximum Purchase Amount"))
+        offered = text(root, ("TotalParAmountOffered", "Total Par Amount Offered"))
+        accepted = text(root, ("TotalParAmountAccepted", "Total Par Amount Accepted"))
+        op_type = text(root, ("OperationType", "Operation Type"))
+        bucket = text(root, ("MaturityBucket", "Maturity Date Range", "SecurityTypeMaturityRange"))
+        eligible = text(root, ("NumberOfIssuesEligible", "NoIssueEligible", "No. Issue Eligible"))
+        accepted_count = text(root, ("NumberOfIssuesAccepted", "NoIssuesAccepted", "No. Issues Accepted"))
+
+        if not all((operation, settlement, maximum, offered, accepted)):
+            raise RuntimeError("Treasury result XML missing required aggregate fields")
+        ingested = ingested_at.astimezone(timezone.utc)
+        result = TreasuryBuybackResult(
+            operation_time=date(operation).isoformat(),
+            settlement_date=settlement.replace("*", ""),
+            operation_type=op_type,
+            security_bucket=bucket,
+            max_purchase_usd=money(maximum),
+            total_offered_usd=money(offered),
+            total_accepted_usd=money(accepted),
+            issues_eligible=int(eligible.replace(",", "")) if eligible else None,
+            issues_accepted=int(accepted_count.replace(",", "")) if accepted_count else None,
+            source_url=source_url,
+            available_time=ingested.isoformat(),
+            ingested_time=ingested.isoformat(),
+        )
+        result.validate()
+        return result
+
+    def fetch_result(self, *, as_of: datetime | None = None) -> TreasuryBuybackResult:
+        as_of = (as_of or _utc_now()).astimezone(timezone.utc)
+        response = self.session.get(self.result_url, timeout=20)
+        response.raise_for_status()
+        return self.parse_xml(response.text, source_url=self.result_url, ingested_at=as_of)
+
+
+@dataclass(frozen=True)
 class MacroCoverage:
     required_series: tuple[str, ...]
     present_series: tuple[str, ...]
@@ -295,7 +418,13 @@ class MacroCoverage:
     healthy: bool
 
 
-def coverage_report(observations: Iterable[MacroObservation], *, required_series: Iterable[str], as_of: datetime | None = None, max_age: Mapping[str, timedelta] | None = None) -> MacroCoverage:
+def coverage_report(
+    observations: Iterable[MacroObservation],
+    *,
+    required_series: Iterable[str],
+    as_of: datetime | None = None,
+    max_age: Mapping[str, timedelta] | None = None,
+) -> MacroCoverage:
     as_of = (as_of or _utc_now()).astimezone(timezone.utc)
     required = tuple(dict.fromkeys(required_series))
     latest: dict[str, MacroObservation] = {}
@@ -306,7 +435,7 @@ def coverage_report(observations: Iterable[MacroObservation], *, required_series
             latest[obs.series] = obs
     present = tuple(name for name in required if name in latest)
     missing = tuple(name for name in required if name not in latest)
-    stale = []
+    stale: list[str] = []
     ages = dict(max_age or {})
     for name in present:
         threshold = ages.get(name)
@@ -331,8 +460,10 @@ class JsonlMacroArchive:
     def read_all(self) -> tuple[MacroObservation, ...]:
         if not self.path.exists():
             return ()
-        rows = []
+        rows: list[MacroObservation] = []
         for line in self.path.read_text("utf-8").splitlines():
             if line.strip():
-                row = MacroObservation(**json.loads(line)); row.validate(); rows.append(row)
+                row = MacroObservation(**json.loads(line))
+                row.validate()
+                rows.append(row)
         return tuple(rows)
