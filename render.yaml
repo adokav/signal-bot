@@ -3,7 +3,7 @@ services:
     name: signal-bot-v5-core
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
+    startCommand: python run_service.py
     disk:
       name: signal-bot-data
       mountPath: /data
@@ -19,6 +19,19 @@ services:
         value: "1"
       - key: TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS
         value: "5"
+
+      # Live point-in-time macro evidence collection. This does not score or
+      # modify trading signals; it only archives first-seen raw observations.
+      - key: MACRO_DATA_COLLECTION_ENABLED
+        value: "1"
+      - key: MACRO_DATA_COLLECTION_INTERVAL_SECONDS
+        value: "21600"
+      - key: MACRO_OBSERVATION_ARCHIVE_PATH
+        value: /data/macro_observations.jsonl
+      - key: MACRO_DATA_STATUS_PATH
+        value: /data/macro_status.json
+      - key: FRED_API_KEY
+        sync: false
 
       # Exactly two MEXC opportunity engines
       - key: UNIFIED_ENGINE_ENABLED
