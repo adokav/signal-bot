@@ -1,6 +1,6 @@
 """Official U.S. Treasury operation data for macro research.
 
-This module intentionally stops at normalized cash-flow facts.  It does not
+This module intentionally stops at normalized cash-flow facts. It does not
 convert Treasury operations into bullish/bearish scores and it does not have
 trade authority.
 """
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 from typing import Any, Iterable
 from urllib.parse import urlparse
 from xml.etree import ElementTree
@@ -29,14 +30,17 @@ def _utc(value: datetime | None = None) -> datetime:
 
 
 def _iso_date(value: str) -> datetime:
-    return datetime.strptime(value.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return datetime.strptime(value.strip()[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
 
 def _money(value: Any) -> float:
     if value in (None, "", "null", "None"):
         raise ValueError("missing Treasury amount")
     cleaned = str(value).replace("$", "").replace(",", "").strip()
-    return float(cleaned)
+    number = float(cleaned)
+    if not math.isfinite(number):
+        raise ValueError("Treasury amount must be finite")
+    return number
 
 
 def _official_host(url: str, allowed: tuple[str, ...]) -> None:
@@ -58,19 +62,15 @@ class TreasuryBuybackResult:
     ingested_time: str
 
     def validate(self) -> None:
-        operated = datetime.fromisoformat(self.operation_time.replace("Z", "+00:00"))
-        available = datetime.fromisoformat(self.available_time.replace("Z", "+00:00"))
-        ingested = datetime.fromisoformat(self.ingested_time.replace("Z", "+00:00"))
-        if operated.tzinfo is None:
-            operated = operated.replace(tzinfo=timezone.utc)
-        if available.tzinfo is None:
-            available = available.replace(tzinfo=timezone.utc)
-        if ingested.tzinfo is None:
-            ingested = ingested.replace(tzinfo=timezone.utc)
-        if operated.astimezone(timezone.utc) > available.astimezone(timezone.utc):
+        operated = _utc(datetime.fromisoformat(self.operation_time.replace("Z", "+00:00")))
+        available = _utc(datetime.fromisoformat(self.available_time.replace("Z", "+00:00")))
+        ingested = _utc(datetime.fromisoformat(self.ingested_time.replace("Z", "+00:00")))
+        if operated > available:
             raise ValueError("buyback result available before operation")
-        if available.astimezone(timezone.utc) > ingested.astimezone(timezone.utc):
+        if available > ingested:
             raise ValueError("buyback result claims future availability")
+        if not math.isfinite(float(self.total_par_offered_usd)) or not math.isfinite(float(self.total_par_accepted_usd)):
+            raise ValueError("non-finite buyback amount")
         if self.total_par_offered_usd < 0 or self.total_par_accepted_usd < 0:
             raise ValueError("negative buyback amount")
         if self.total_par_accepted_usd > self.total_par_offered_usd:
@@ -80,9 +80,9 @@ class TreasuryBuybackResult:
 class TreasuryBuybackResultsAdapter:
     """Parse one official TreasuryDirect buyback-results XML document.
 
-    TreasuryDirect documents that result files expose total par amount offered
-    and accepted, while individual result XML files carry operation timestamps.
-    The adapter accepts a pinned XML URL rather than scraping changing HTML.
+    The adapter accepts a pinned official XML URL rather than scraping changing
+    HTML. A document explicitly marked with a non-results operationStatus is
+    rejected so a schedule/release payload cannot be misread as realized flow.
     """
 
     allowed_hosts = ("www.treasurydirect.gov", "treasurydirect.gov")
@@ -120,13 +120,15 @@ class TreasuryBuybackResultsAdapter:
         _official_host(source_url, cls.allowed_hosts)
         root = ElementTree.fromstring(xml_text)
         values = cls._normalized(root)
-        operation = cls._pick(values, "operationDate", "operationStartDate", "operationStartDtm")
+        status = cls._pick(values, "operationStatus")
+        if status is not None and status.strip().lower() != "results":
+            raise RuntimeError(f"Treasury XML is not a results document: {status}")
+        operation = cls._pick(values, "operationDate", "operationStartDate", "operationStartDtm", "operationStartDateTime")
         offered = cls._pick(values, "totalParAmountOffered", "totalParOffered")
         accepted = cls._pick(values, "totalParAmountAccepted", "totalParAccepted")
         if not operation or offered is None or accepted is None:
             raise RuntimeError("Treasury buyback result missing required fields")
 
-        # Result XML may expose a full timestamp or only an operation date.
         op_text = operation.strip()
         operated: datetime | None = None
         for parser in (
@@ -141,9 +143,7 @@ class TreasuryBuybackResultsAdapter:
                 continue
         if operated is None:
             raise RuntimeError(f"unrecognized buyback operation timestamp: {operation}")
-        if operated.tzinfo is None:
-            operated = operated.replace(tzinfo=timezone.utc)
-        operated = operated.astimezone(timezone.utc)
+        operated = _utc(operated)
         ingested = _utc(ingested_at)
 
         result = TreasuryBuybackResult(
@@ -154,8 +154,8 @@ class TreasuryBuybackResultsAdapter:
             total_par_offered_usd=_money(offered),
             total_par_accepted_usd=_money(accepted),
             source_url=source_url,
-            # We do not invent Treasury's intraday publication timestamp.
-            # For live use, availability is the instant our process obtained it.
+            # TreasuryDirect result files do not provide a trustworthy release
+            # instant in every schema version. Live availability is ingestion.
             available_time=ingested.isoformat(),
             ingested_time=ingested.isoformat(),
         )
@@ -186,28 +186,24 @@ class TreasuryAuctionIssuance:
         record = _iso_date(self.record_date)
         auction = _iso_date(self.auction_date)
         issue = _iso_date(self.issue_date)
-        available = datetime.fromisoformat(self.available_time.replace("Z", "+00:00"))
-        ingested = datetime.fromisoformat(self.ingested_time.replace("Z", "+00:00"))
-        if available.tzinfo is None:
-            available = available.replace(tzinfo=timezone.utc)
-        if ingested.tzinfo is None:
-            ingested = ingested.replace(tzinfo=timezone.utc)
-        if record > available.astimezone(timezone.utc):
+        available = _utc(datetime.fromisoformat(self.available_time.replace("Z", "+00:00")))
+        ingested = _utc(datetime.fromisoformat(self.ingested_time.replace("Z", "+00:00")))
+        if record > available:
             raise ValueError("auction record published after claimed availability")
         if auction > issue:
             raise ValueError("Treasury auction occurs after issue date")
-        if available.astimezone(timezone.utc) > ingested.astimezone(timezone.utc):
+        if available > ingested:
             raise ValueError("auction row claims future availability")
-        if self.total_accepted_usd < 0:
-            raise ValueError("negative Treasury issuance")
+        if not math.isfinite(float(self.total_accepted_usd)) or self.total_accepted_usd < 0:
+            raise ValueError("invalid Treasury issuance amount")
 
 
 class TreasuryAuctionIssuanceAdapter:
     """Official Fiscal Data auction-results adapter.
 
-    `total_accepted` is used as an observed gross issuance fact. Reopenings and
-    maturities are retained as rows rather than silently netted here; research
-    aggregation must define the exact cash-flow window separately.
+    `total_accepted` is an observed gross auction acceptance fact. It is not net
+    issuance: maturities/redemptions, SOMA effects and TGA cash management are
+    separate facts and must be handled before any liquidity interpretation.
     """
 
     base_url = FISCALDATA_AUCTIONS_URL
@@ -237,8 +233,6 @@ class TreasuryAuctionIssuanceAdapter:
                 security_term=str(row["security_term"]),
                 total_accepted_usd=_money(row["total_accepted"]),
                 source_url=cls.base_url,
-                # Fiscal Data's record_date is publication date but not an
-                # intraday release timestamp, so live availability is ingestion.
                 available_time=ingested.isoformat(),
                 ingested_time=ingested.isoformat(),
             )
@@ -250,11 +244,14 @@ class TreasuryAuctionIssuanceAdapter:
 
     def fetch_recent(self, *, as_of: datetime | None = None, page_size: int = 100) -> tuple[TreasuryAuctionIssuance, ...]:
         ingested = _utc(as_of)
+        # Explicit record_date boundary prevents a historical as_of query from
+        # asking FiscalData for records that were published later.
         response = self.session.get(
             self.base_url,
             params={
                 "format": "json",
                 "fields": "record_date,cusip,security_type,security_term,auction_date,issue_date,total_accepted",
+                "filter": f"record_date:lte:{ingested.date().isoformat()}",
                 "sort": "-record_date,-auction_date",
                 "page[size]": max(1, min(int(page_size), 1000)),
                 "page[number]": 1,
@@ -267,20 +264,26 @@ class TreasuryAuctionIssuanceAdapter:
 
 @dataclass(frozen=True)
 class TreasurySupplyWindow:
-    gross_issuance_usd: float
+    gross_auction_acceptance_usd: float
     realized_buybacks_usd: float
-    net_market_supply_usd: float
+    gross_acceptance_less_buybacks_usd: float
 
 
 def treasury_supply_window(
     issuance: Iterable[TreasuryAuctionIssuance],
     buybacks: Iterable[TreasuryBuybackResult],
 ) -> TreasurySupplyWindow:
-    """Mechanical supply accounting, not a liquidity or risk-on score."""
-    gross = sum(row.total_accepted_usd for row in issuance)
-    redeemed = sum(row.total_par_accepted_usd for row in buybacks)
+    """Mechanical accounting only; deliberately not named or used as net liquidity."""
+    issuance_rows = tuple(issuance)
+    buyback_rows = tuple(buybacks)
+    for row in issuance_rows:
+        row.validate()
+    for row in buyback_rows:
+        row.validate()
+    gross = sum(row.total_accepted_usd for row in issuance_rows)
+    redeemed = sum(row.total_par_accepted_usd for row in buyback_rows)
     return TreasurySupplyWindow(
-        gross_issuance_usd=gross,
+        gross_auction_acceptance_usd=gross,
         realized_buybacks_usd=redeemed,
-        net_market_supply_usd=gross - redeemed,
+        gross_acceptance_less_buybacks_usd=gross - redeemed,
     )
