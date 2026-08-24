@@ -15,6 +15,7 @@ import threading
 import time
 
 import bot
+from flask import jsonify
 from macro_backfill_runtime import HistoricalBackfillConfig, MacroHistoricalBackfillJob
 from macro_runtime import MacroCollector
 
@@ -35,6 +36,59 @@ def _write_status(payload: dict) -> None:
         tmp.replace(MACRO_STATUS_PATH)
     except Exception:
         log.warning("Macro status file could not be written", exc_info=True)
+
+
+def _safe_read_json(path: Path) -> dict | None:
+    try:
+        payload = json.loads(path.read_text("utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _line_count(path: Path) -> int | None:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except OSError:
+        return None
+
+
+def macro_research_health_payload() -> dict:
+    """Sanitized observability only; never exposes API keys or creates a signal."""
+    config = HistoricalBackfillConfig.from_env()
+    live_status = _safe_read_json(MACRO_STATUS_PATH)
+    backfill_status = _safe_read_json(config.status_path)
+    evidence = _safe_read_json(config.evidence_path)
+    evidence_rows = evidence.get("rows") if isinstance(evidence, dict) else None
+    if not isinstance(evidence_rows, list):
+        evidence_rows = []
+
+    state = str((backfill_status or {}).get("state") or "NOT_STARTED")
+    return {
+        "ok": state in {"COMPLETED", "SKIPPED_ALREADY_COMPLETE"},
+        "scientific_boundary": "EVIDENCE_ONLY_NO_SCORE_NO_REGIME_NO_TRADING_AUTHORITY",
+        "live_first_seen": {
+            "status": live_status,
+            "archive_rows": _line_count(MACRO_ARCHIVE_PATH),
+        },
+        "historical_research": {
+            "enabled": HISTORICAL_BACKFILL_ENABLED,
+            "state": state,
+            "status": backfill_status,
+            "reconstructed_macro_rows": _line_count(config.reconstructed_macro_path),
+            "btc_hourly_bar_rows": _line_count(config.btc_path),
+            "replay_rows": _line_count(config.replay_path),
+            "evidence_summary_rows": len(evidence_rows),
+            "evidence_generated_at": (evidence or {}).get("generated_at") if isinstance(evidence, dict) else None,
+        },
+        "can_authorize_trade": False,
+    }
+
+
+@bot.APP.get("/macro-research")
+def macro_research_health():
+    return jsonify(macro_research_health_payload())
 
 
 def macro_collection_loop() -> None:
