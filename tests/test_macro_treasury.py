@@ -40,6 +40,18 @@ def test_buyback_results_rejects_accepted_above_offered():
         )
 
 
+def test_buyback_results_reject_operation_after_ingestion():
+    xml = """<BuybackResults><OperationDate>2026-08-21</OperationDate>
+      <TotalParAmountOffered>100</TotalParAmountOffered>
+      <TotalParAmountAccepted>90</TotalParAmountAccepted></BuybackResults>"""
+    with pytest.raises(ValueError):
+        TreasuryBuybackResultsAdapter.parse_xml(
+            xml,
+            source_url="https://treasurydirect.gov/example/results.xml",
+            ingested_at=datetime(2026, 8, 20, 20, tzinfo=timezone.utc),
+        )
+
+
 def test_buyback_adapter_rejects_unapproved_host():
     with pytest.raises(ValueError):
         TreasuryBuybackResultsAdapter("https://example.com/results.xml")
