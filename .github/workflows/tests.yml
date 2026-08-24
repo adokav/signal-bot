@@ -41,7 +41,9 @@ jobs:
             tests/test_liquid_observation_archive.py \
             tests/test_observation_archive_cadence.py \
             tests/test_macro_data.py \
-            tests/test_macro_treasury.py > pytest-output.txt 2>&1
+            tests/test_macro_treasury.py \
+            tests/test_macro_factors.py \
+            tests/test_macro_replay.py > pytest-output.txt 2>&1
           rc=$?
           cat pytest-output.txt
           exit $rc
@@ -52,4 +54,4 @@ jobs:
           name: pytest-output
           path: pytest-output.txt
       - name: Compile active Python sources
-        run: python -m compileall -q bot.py acce_unified memecoin_radar macro_data.py macro_treasury.py tests/test_core_bot.py tests/test_long_opportunity.py tests/test_tactical_long.py tests/test_tactical_long_data.py tests/test_tactical_long_engine.py tests/test_memecoin_radar_contracts.py tests/test_research_core.py tests/test_listing_report_details.py tests/test_new_listing_anti_trap.py tests/test_liquid_observation_archive.py tests/test_observation_archive_cadence.py tests/test_macro_data.py tests/test_macro_treasury.py
+        run: python -m compileall -q bot.py acce_unified memecoin_radar macro_data.py macro_treasury.py macro_factors.py macro_replay.py tests/test_core_bot.py tests/test_long_opportunity.py tests/test_tactical_long.py tests/test_tactical_long_data.py tests/test_tactical_long_engine.py tests/test_memecoin_radar_contracts.py tests/test_research_core.py tests/test_listing_report_details.py tests/test_new_listing_anti_trap.py tests/test_liquid_observation_archive.py tests/test_observation_archive_cadence.py tests/test_macro_data.py tests/test_macro_treasury.py tests/test_macro_factors.py tests/test_macro_replay.py
