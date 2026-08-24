@@ -33,6 +33,19 @@ services:
       - key: FRED_API_KEY
         sync: false
 
+      # One-shot historical research reconstruction. It runs in an isolated
+      # daemon, writes only under /data/research/macro and cannot affect signals.
+      # A fingerprint marker prevents the same date/config range from rebuilding
+      # on every redeploy. The end is lagged >=8 days so 7d labels are complete.
+      - key: MACRO_HISTORICAL_BACKFILL_ENABLED
+        value: "1"
+      - key: MACRO_HISTORICAL_START_DATE
+        value: "2017-08-18"
+      - key: MACRO_HISTORICAL_END_LAG_DAYS
+        value: "8"
+      - key: MACRO_HISTORICAL_ROOT
+        value: /data/research/macro
+
       # Exactly two MEXC opportunity engines
       - key: UNIFIED_ENGINE_ENABLED
         value: "1"
