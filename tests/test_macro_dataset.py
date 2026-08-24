@@ -17,7 +17,7 @@ def test_bar_outcome_uses_intrabar_high_low_for_mfe_mae():
     bars = (
         PriceBar("2020-01-01T23:00:00+00:00", 99, 101, 98, 100),
         PriceBar("2020-01-02T11:00:00+00:00", 100, 120, 80, 110),
-        PriceBar("2020-01-02T23:00:00+00:00", 110, 112, 108, 105),
+        PriceBar("2020-01-02T23:00:00+00:00", 110, 112, 100, 105),
     )
     outcome = build_forward_outcome_from_bars(
         bars,
