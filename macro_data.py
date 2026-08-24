@@ -9,9 +9,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.parse import urlparse
 from xml.etree import ElementTree
 
 import requests
@@ -55,6 +57,8 @@ class MacroObservation:
             raise ValueError("observation time cannot be after available time")
         if not self.provider or not self.series:
             raise ValueError("macro observation requires provider and series")
+        if not math.isfinite(float(self.value)):
+            raise ValueError("macro observation value must be finite")
 
 
 def _parse_time(value: str) -> datetime:
@@ -64,8 +68,15 @@ def _parse_time(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _utc(value: datetime | None = None) -> datetime:
+    current = value or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc)
+
+
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return _utc()
 
 
 class FredAdapter:
@@ -82,7 +93,7 @@ class FredAdapter:
             raise RuntimeError("FRED_API_KEY is required")
         if logical_series not in FRED_SERIES:
             raise KeyError(f"unsupported FRED series: {logical_series}")
-        as_of = (as_of or _utc_now()).astimezone(timezone.utc)
+        as_of = _utc(as_of)
         series_id = FRED_SERIES[logical_series]
         params = {
             "series_id": series_id,
@@ -90,8 +101,13 @@ class FredAdapter:
             "file_type": "json",
             "sort_order": "desc",
             "limit": 20,
+            # Vintage boundary: ask what FRED knew on the requested date.
             "realtime_start": as_of.date().isoformat(),
             "realtime_end": as_of.date().isoformat(),
+            # Observation boundary: never allow a future-dated observation to
+            # enter a historical/live point-in-time query even if a provider
+            # changes its response semantics.
+            "observation_end": as_of.date().isoformat(),
         }
         response = self.session.get(self.base_url, params=params, timeout=15)
         response.raise_for_status()
@@ -99,12 +115,22 @@ class FredAdapter:
         if not rows:
             raise RuntimeError(f"no point-in-time FRED observation for {series_id}")
         row = rows[0]
+        observation_time = _parse_time(f"{row['date']}T00:00:00+00:00")
+        if observation_time.date() > as_of.date():
+            raise RuntimeError(f"future-dated FRED observation for {series_id}")
         ingested = _utc_now()
         obs = MacroObservation(
-            provider="fred", series=logical_series, source_id=series_id,
-            observation_time=f"{row['date']}T00:00:00+00:00",
-            available_time=ingested.isoformat(), ingested_time=ingested.isoformat(),
-            value=float(row["value"]), realtime_start=row.get("realtime_start"),
+            provider="fred",
+            series=logical_series,
+            source_id=series_id,
+            observation_time=observation_time.isoformat(),
+            # FRED daily observations do not expose a trustworthy intraday
+            # publication timestamp for every series. In live acquisition the
+            # only defensible availability timestamp is when we actually saw it.
+            available_time=ingested.isoformat(),
+            ingested_time=ingested.isoformat(),
+            value=float(row["value"]),
+            realtime_start=row.get("realtime_start"),
             realtime_end=row.get("realtime_end"),
         )
         obs.validate()
@@ -125,6 +151,7 @@ class BojAdapter:
     @staticmethod
     def _find_value_rows(payload: Any) -> list[tuple[str, float, str | None]]:
         rows: list[tuple[str, float, str | None]] = []
+
         def walk(node: Any, inherited_unit: str | None = None) -> None:
             if isinstance(node, dict):
                 normalized = {str(key).upper(): value for key, value in node.items()}
@@ -133,7 +160,9 @@ class BojAdapter:
                 value = normalized.get("VALUE")
                 if date is not None and value not in (None, "", "NA", "N.A.", "-"):
                     try:
-                        rows.append((str(date), float(str(value).replace(",", "")), str(unit) if unit else None))
+                        numeric = float(str(value).replace(",", ""))
+                        if math.isfinite(numeric):
+                            rows.append((str(date), numeric, str(unit) if unit else None))
                     except ValueError:
                         pass
                 for child in node.values():
@@ -141,6 +170,7 @@ class BojAdapter:
             elif isinstance(node, list):
                 for child in node:
                     walk(child, inherited_unit)
+
         walk(payload)
         return rows
 
@@ -158,18 +188,37 @@ class BojAdapter:
     def fetch_latest(self, logical_series: str, *, as_of: datetime | None = None) -> MacroObservation:
         if logical_series not in BOJ_SERIES:
             raise KeyError(f"unsupported BOJ series: {logical_series}")
-        as_of = (as_of or _utc_now()).astimezone(timezone.utc)
+        as_of = _utc(as_of)
         db, code = BOJ_SERIES[logical_series]
         start = (as_of.replace(day=1) - timedelta(days=1)).strftime("%Y%m")
         end = as_of.strftime("%Y%m")
-        response = self.session.get(self.base_url, params={"format":"json","lang":"en","db":db,"code":code,"startDate":start,"endDate":end}, timeout=15)
+        response = self.session.get(
+            self.base_url,
+            params={"format": "json", "lang": "en", "db": db, "code": code, "startDate": start, "endDate": end},
+            timeout=15,
+        )
         response.raise_for_status()
         rows = self._find_value_rows(response.json())
         if not rows:
             raise RuntimeError(f"no BOJ value rows for {db}:{code}")
-        observation_time, value, unit = sorted((self._boj_date_to_iso(d), v, u) for d, v, u in rows)[-1]
+        normalized = sorted((self._boj_date_to_iso(d), v, u) for d, v, u in rows)
+        # Critical point-in-time guard: a month-bounded BOJ response can contain
+        # observations after an historical as_of date. Those rows are invisible.
+        visible = [row for row in normalized if _parse_time(row[0]).date() <= as_of.date()]
+        if not visible:
+            raise RuntimeError(f"no point-in-time BOJ observation for {db}:{code}")
+        observation_time, value, unit = visible[-1]
         ingested = _utc_now()
-        obs = MacroObservation(provider="boj", series=logical_series, source_id=f"{db}:{code}", observation_time=observation_time, available_time=ingested.isoformat(), ingested_time=ingested.isoformat(), value=value, unit=unit)
+        obs = MacroObservation(
+            provider="boj",
+            series=logical_series,
+            source_id=f"{db}:{code}",
+            observation_time=observation_time,
+            available_time=ingested.isoformat(),
+            ingested_time=ingested.isoformat(),
+            value=value,
+            unit=unit,
+        )
         obs.validate()
         return obs
 
@@ -193,8 +242,8 @@ class TreasuryBuybackOperation:
             raise ValueError("future Treasury announcement supplied")
         if operated < announced:
             raise ValueError("Treasury operation precedes announcement")
-        if self.max_purchase_usd < 0:
-            raise ValueError("negative Treasury buyback capacity")
+        if not math.isfinite(float(self.max_purchase_usd)) or self.max_purchase_usd < 0:
+            raise ValueError("invalid Treasury buyback capacity")
 
 
 class TreasuryBuybackAdapter:
@@ -206,17 +255,24 @@ class TreasuryBuybackAdapter:
     when Treasury rotates its 'most recent' URL.
     """
 
+    allowed_hosts = ("home.treasury.gov",)
+
     def __init__(self, schedule_url: str, session: requests.Session | None = None):
-        if not schedule_url.startswith("https://home.treasury.gov/"):
-            raise ValueError("Treasury schedule must use official home.treasury.gov source")
+        self._validate_source(schedule_url)
         self.schedule_url = schedule_url
         self.session = session or requests.Session()
 
+    @classmethod
+    def _validate_source(cls, source_url: str) -> None:
+        parsed = urlparse(source_url)
+        if parsed.scheme != "https" or parsed.hostname not in cls.allowed_hosts:
+            raise ValueError("Treasury schedule must use official home.treasury.gov source")
+
     @staticmethod
     def _text(node: ElementTree.Element, names: tuple[str, ...]) -> str | None:
-        wanted = {name.lower().replace("_", "") for name in names}
+        wanted = {name.lower().replace("_", "").replace("-", "").replace(" ", "") for name in names}
         for child in node.iter():
-            tag = child.tag.split("}")[-1].lower().replace("_", "").replace("-", "")
+            tag = child.tag.split("}")[-1].lower().replace("_", "").replace("-", "").replace(" ", "")
             if tag in wanted and child.text and child.text.strip():
                 return child.text.strip()
         return None
@@ -232,7 +288,10 @@ class TreasuryBuybackAdapter:
         number = "".join(ch for ch in cleaned if ch.isdigit() or ch in ".-")
         if not number:
             raise ValueError(f"unrecognized Treasury amount: {value}")
-        return float(number) * multiplier
+        amount = float(number) * multiplier
+        if not math.isfinite(amount):
+            raise ValueError(f"non-finite Treasury amount: {value}")
+        return amount
 
     @staticmethod
     def _date(value: str) -> datetime:
@@ -246,6 +305,8 @@ class TreasuryBuybackAdapter:
 
     @classmethod
     def parse_xml(cls, xml_text: str, *, source_url: str, ingested_at: datetime) -> tuple[TreasuryBuybackOperation, ...]:
+        cls._validate_source(source_url)
+        ingested_at = _utc(ingested_at)
         root = ElementTree.fromstring(xml_text)
         operations: list[TreasuryBuybackOperation] = []
         for node in root.iter():
@@ -259,9 +320,6 @@ class TreasuryBuybackAdapter:
                 continue
             announced_dt = cls._date(announcement)
             operated_dt = cls._date(operation)
-            # Treasury schedules disclose dates; publication/operation intraday
-            # times are intentionally not invented here. Availability is the
-            # actual ingestion time, while operation_time is date-bounded.
             item = TreasuryBuybackOperation(
                 announcement_time=announced_dt.isoformat(),
                 operation_time=operated_dt.isoformat(),
@@ -270,7 +328,7 @@ class TreasuryBuybackAdapter:
                 security_bucket=bucket,
                 max_purchase_usd=cls._money(maximum),
                 source_url=source_url,
-                ingested_time=ingested_at.astimezone(timezone.utc).isoformat(),
+                ingested_time=ingested_at.isoformat(),
             )
             item.validate()
             operations.append(item)
@@ -280,7 +338,7 @@ class TreasuryBuybackAdapter:
         return tuple(sorted(unique.values(), key=lambda x: (x.operation_time, x.security_bucket)))
 
     def fetch_schedule(self, *, as_of: datetime | None = None) -> tuple[TreasuryBuybackOperation, ...]:
-        as_of = (as_of or _utc_now()).astimezone(timezone.utc)
+        as_of = _utc(as_of)
         response = self.session.get(self.schedule_url, timeout=20)
         response.raise_for_status()
         return self.parse_xml(response.text, source_url=self.schedule_url, ingested_at=as_of)
@@ -295,18 +353,29 @@ class MacroCoverage:
     healthy: bool
 
 
-def coverage_report(observations: Iterable[MacroObservation], *, required_series: Iterable[str], as_of: datetime | None = None, max_age: Mapping[str, timedelta] | None = None) -> MacroCoverage:
-    as_of = (as_of or _utc_now()).astimezone(timezone.utc)
+def coverage_report(
+    observations: Iterable[MacroObservation],
+    *,
+    required_series: Iterable[str],
+    as_of: datetime | None = None,
+    max_age: Mapping[str, timedelta] | None = None,
+) -> MacroCoverage:
+    """Point-in-time coverage report; future-available rows are invisible."""
+    as_of = _utc(as_of)
     required = tuple(dict.fromkeys(required_series))
     latest: dict[str, MacroObservation] = {}
     for obs in observations:
         obs.validate()
+        # A valid archive row may have become available after the requested
+        # historical cut. It must not leak backwards into that cut.
+        if _parse_time(obs.available_time) > as_of:
+            continue
         old = latest.get(obs.series)
         if old is None or _parse_time(obs.available_time) > _parse_time(old.available_time):
             latest[obs.series] = obs
     present = tuple(name for name in required if name in latest)
     missing = tuple(name for name in required if name not in latest)
-    stale = []
+    stale: list[str] = []
     ages = dict(max_age or {})
     for name in present:
         threshold = ages.get(name)
@@ -331,8 +400,10 @@ class JsonlMacroArchive:
     def read_all(self) -> tuple[MacroObservation, ...]:
         if not self.path.exists():
             return ()
-        rows = []
+        rows: list[MacroObservation] = []
         for line in self.path.read_text("utf-8").splitlines():
             if line.strip():
-                row = MacroObservation(**json.loads(line)); row.validate(); rows.append(row)
+                row = MacroObservation(**json.loads(line))
+                row.validate()
+                rows.append(row)
         return tuple(rows)
