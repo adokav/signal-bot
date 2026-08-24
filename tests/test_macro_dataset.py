@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from macro_dataset import daily_replay_cuts
 from macro_factors import MacroFactorSnapshot
 from macro_replay import PriceBar, build_forward_outcome_from_bars, build_replay_row_from_bars
@@ -27,9 +29,9 @@ def test_bar_outcome_uses_intrabar_high_low_for_mfe_mae():
     assert outcome is not None
     assert outcome.anchor_price == 100
     assert outcome.end_price == 105
-    assert outcome.return_pct == 5.0
-    assert outcome.mfe_pct == 20.0
-    assert outcome.mae_pct == -20.0
+    assert outcome.return_pct == pytest.approx(5.0)
+    assert outcome.mfe_pct == pytest.approx(20.0)
+    assert outcome.mae_pct == pytest.approx(-20.0)
 
 
 def test_replay_row_from_bars_does_not_create_score_or_regime():
