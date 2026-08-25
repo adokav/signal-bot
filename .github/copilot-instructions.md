@@ -47,6 +47,7 @@ Review this repository as a safety-critical trading research system. Do not opti
 - Scheduled Treasury buyback capacity is not the same as realized liquidity injection.
 - Gross issuance minus buybacks must not be mislabeled as full net market supply/liquidity when maturities, redemptions, TGA, SOMA, or other relevant flows are omitted.
 - Candidate macro factors must earn promotion through point-in-time, out-of-sample evidence.
+- Historical research caches/completion markers must be invalidated whenever the research series set, factor definitions, label schema, availability semantics, or validation protocol changes. A stale artifact must never be treated as evidence for the current research schema.
 
 ## 7. Statistical and ML review requirements
 
@@ -94,6 +95,7 @@ For changed behavior, look for regression tests that cover both success and fail
 - malformed/non-finite input;
 - API-key/token redaction;
 - incomplete research artifacts reporting unhealthy;
+- research-cache invalidation when schemas or candidate-series sets change;
 - train/test leakage and purge behavior;
 - duplicate state/order prevention;
 - trading-authority boundaries;
