@@ -1,16 +1,17 @@
-"""Research-only Japan rates reconstruction for the macro evidence pipeline.
+"""Research-only Japan rates snapshot adapters.
 
 Sources are official: Japan Ministry of Finance JGB constant-maturity yields and
-the Bank of Japan Time-Series Data Search API. These historical files/APIs do
-not expose a full vintage history for every correction. Therefore observations
-from this module are reconstruction inputs, not live first-seen facts, and must
-not gain trading authority merely because they are official.
+the Bank of Japan Time-Series Data Search API. These public historical files do
+not expose a complete vintage/correction history. Therefore a value downloaded
+today must never be backdated to its original historical release time for a
+point-in-time replay.
 
-Availability is conservative and calendar-aware without guessing Japanese
-holidays: for an observation dated D we use the date of the next published
-observation as the next business day, then apply the official release clock.
-The final source row is omitted because its next-business-day release date
-cannot be inferred from the dataset alone.
+All observations emitted by this module use the *actual retrieval time* as both
+``available_time`` and ``ingested_time``. Historical ``observation_time`` is
+preserved, but a replay cut before the retrieval timestamp cannot see the row.
+These snapshots are suitable for descriptive research and for building a true
+first-seen archive going forward; they are not retrospective point-in-time
+history and must not gain trading authority.
 """
 from __future__ import annotations
 
@@ -39,6 +40,10 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _day(value: str | date | datetime) -> date:
     if isinstance(value, datetime):
         return _utc(value).date()
@@ -47,22 +52,14 @@ def _day(value: str | date | datetime) -> date:
     return date.fromisoformat(str(value))
 
 
-def _release_time(day: date, *, hour_utc: int, minute_utc: int) -> datetime:
-    return datetime.combine(day, time(hour_utc, minute_utc), tzinfo=timezone.utc)
-
-
 class MofJgbBackfill:
-    """MOF constant-maturity JGB curve reconstruction.
-
-    MOF states that the rates are based on 3pm market closes and are released
-    at 9:30am Japan time on the next business day. We infer that business day
-    from the next observation date in the official daily file.
-    """
+    """Current MOF history snapshot, explicitly *not* vintage-safe history."""
 
     url = MOF_JGB_URL
 
-    def __init__(self, session: requests.Session | None = None):
+    def __init__(self, session: requests.Session | None = None, now=_utc_now):
         self.session = session or requests.Session()
+        self.now = now
 
     @classmethod
     def parse_csv(
@@ -71,10 +68,12 @@ class MofJgbBackfill:
         *,
         start: str | date | datetime,
         end: str | date | datetime,
+        ingested_at: datetime,
     ) -> tuple[MacroObservation, ...]:
         start_day, end_day = _day(start), _day(end)
         if end_day < start_day:
             raise ValueError("MOF JGB backfill end precedes start")
+        ingested = _utc(ingested_at)
 
         rows = list(csv.reader(io.StringIO(text)))
         header_index = next((i for i, row in enumerate(rows) if row and row[0].strip() == "Date"), None)
@@ -87,7 +86,8 @@ class MofJgbBackfill:
                 raise RuntimeError(f"MOF JGB CSV missing required column: {column}")
             indexes[logical] = header.index(column)
 
-        daily: list[tuple[date, dict[str, float]]] = []
+        parsed: list[MacroObservation] = []
+        seen_dates: set[date] = set()
         for raw in rows[header_index + 1 :]:
             if not raw or not raw[0].strip():
                 continue
@@ -95,71 +95,73 @@ class MofJgbBackfill:
                 observed = datetime.strptime(raw[0].strip(), "%Y/%m/%d").date()
             except ValueError as exc:
                 raise RuntimeError(f"invalid MOF JGB date: {raw[0]}") from exc
-            values: dict[str, float] = {}
+            if observed in seen_dates:
+                raise RuntimeError("MOF JGB dates must be unique")
+            seen_dates.add(observed)
+            if not (start_day <= observed <= end_day):
+                continue
+            observed_at = datetime.combine(
+                observed,
+                time(15, 0),
+                tzinfo=timezone(timedelta(hours=9)),
+            ).astimezone(timezone.utc)
+            if observed_at > ingested:
+                raise RuntimeError("MOF snapshot contains future observation")
             for logical, idx in indexes.items():
                 cell = raw[idx].strip() if idx < len(raw) else ""
                 if cell in ("", "-"):
                     continue
-                value = float(cell)
+                try:
+                    value = float(cell)
+                except ValueError as exc:
+                    raise RuntimeError(f"invalid MOF JGB yield: {cell}") from exc
                 if not math.isfinite(value):
                     raise ValueError("non-finite MOF JGB yield")
-                values[logical] = value
-            daily.append((observed, values))
-
-        daily.sort(key=lambda item: item[0])
-        if any(b[0] <= a[0] for a, b in zip(daily, daily[1:])):
-            raise RuntimeError("MOF JGB dates must be strictly increasing")
-
-        parsed: list[MacroObservation] = []
-        # Need the next source observation to infer the next business-day release.
-        for (observed, values), (next_day, _) in zip(daily, daily[1:]):
-            if not (start_day <= observed <= end_day):
-                continue
-            available = _release_time(next_day, hour_utc=0, minute_utc=30)  # 09:30 JST
-            observed_at = datetime.combine(observed, time(15, 0), tzinfo=timezone(timedelta(hours=9))).astimezone(timezone.utc)
-            for logical, value in values.items():
                 obs = MacroObservation(
-                    provider="mof_jgb_reconstruction",
+                    provider="mof_jgb_unversioned_snapshot",
                     series=logical,
                     source_id=f"MOF:JGB:{MOF_JGB_COLUMNS[logical]}",
                     observation_time=observed_at.isoformat(),
-                    available_time=available.isoformat(),
-                    ingested_time=available.isoformat(),
+                    available_time=ingested.isoformat(),
+                    ingested_time=ingested.isoformat(),
                     value=value,
                     unit="percent",
                 )
                 obs.validate()
                 parsed.append(obs)
-        return tuple(sorted(parsed, key=lambda row: (row.available_time, row.series, row.observation_time)))
+        return tuple(sorted(parsed, key=lambda row: (row.observation_time, row.series)))
 
     def fetch_core(self, *, start: str | date | datetime, end: str | date | datetime) -> tuple[MacroObservation, ...]:
         response = self.session.get(self.url, timeout=30)
         response.raise_for_status()
-        return self.parse_csv(response.text, start=start, end=end)
+        ingested = _utc(self.now())
+        return self.parse_csv(response.text, start=start, end=end, ingested_at=ingested)
 
 
 class BojCallRateBackfill:
-    """BOJ uncollateralized overnight call-rate historical reconstruction."""
+    """Current BOJ call-rate history snapshot, not a vintage-safe reconstruction."""
 
     base_url = BojAdapter.base_url
     logical_series = "boj_call_rate"
 
-    def __init__(self, session: requests.Session | None = None):
+    def __init__(self, session: requests.Session | None = None, now=_utc_now):
         self.session = session or requests.Session()
+        self.now = now
 
     def fetch_core(self, *, start: str | date | datetime, end: str | date | datetime) -> tuple[MacroObservation, ...]:
         start_day, end_day = _day(start), _day(end)
         if end_day < start_day:
             raise ValueError("BOJ call-rate backfill end precedes start")
         db, code = BOJ_SERIES[self.logical_series]
-        # Ask slightly beyond end so the final in-range observation can get a
-        # next-business-day release timestamp from the following source row.
-        query_end = end_day + timedelta(days=10)
         response = self.session.get(
             self.base_url,
             params={
-                "format": "json", "lang": "en", "db": db, "code": code,
-                "startDate": start_day.strftime("%Y%m"), "endDate": query_end.strftime("%Y%m"),
+                "format": "json",
+                "lang": "en",
+                "db": db,
+                "code": code,
+                "startDate": start_day.strftime("%Y%m"),
+                "endDate": end_day.strftime("%Y%m"),
             },
             timeout=30,
         )
@@ -168,38 +170,44 @@ class BojCallRateBackfill:
         if isinstance(payload, dict) and payload.get("STATUS") not in (None, 200, "200"):
             raise RuntimeError(f"BOJ API returned STATUS={payload.get('STATUS')}")
         value_rows = BojAdapter._find_value_rows(payload)
+        if not value_rows:
+            raise RuntimeError("no BOJ call-rate rows")
+
+        ingested = _utc(self.now())
         normalized: dict[date, tuple[float, str | None]] = {}
         for raw_date, value, unit in value_rows:
             observed = datetime.fromisoformat(BojAdapter._boj_date_to_iso(raw_date)).date()
-            normalized[observed] = (float(value), unit)
-        ordered = sorted(normalized.items())
-        if len(ordered) < 2:
-            raise RuntimeError("insufficient BOJ call-rate rows for release reconstruction")
+            numeric = float(value)
+            if not math.isfinite(numeric):
+                raise ValueError("non-finite BOJ call rate")
+            normalized[observed] = (numeric, unit)
 
         parsed: list[MacroObservation] = []
-        for (observed, (value, unit)), (next_day, _) in zip(ordered, ordered[1:]):
+        for observed, (value, unit) in sorted(normalized.items()):
             if not (start_day <= observed <= end_day):
                 continue
-            if not math.isfinite(value):
-                raise ValueError("non-finite BOJ call rate")
-            available = _release_time(next_day, hour_utc=1, minute_utc=0)  # around 10:00 JST final result
+            observed_at = datetime.combine(observed, time.min, tzinfo=timezone.utc)
+            if observed_at > ingested:
+                raise RuntimeError("BOJ snapshot contains future observation")
             obs = MacroObservation(
-                provider="boj_call_reconstruction",
+                provider="boj_call_unversioned_snapshot",
                 series=self.logical_series,
                 source_id=f"{db}:{code}",
-                observation_time=datetime.combine(observed, time.min, tzinfo=timezone.utc).isoformat(),
-                available_time=available.isoformat(),
-                ingested_time=available.isoformat(),
+                observation_time=observed_at.isoformat(),
+                available_time=ingested.isoformat(),
+                ingested_time=ingested.isoformat(),
                 value=value,
                 unit=unit or "percent",
             )
             obs.validate()
             parsed.append(obs)
+        if not parsed:
+            raise RuntimeError("no in-range BOJ call-rate rows")
         return tuple(parsed)
 
 
 class JapanRatesBackfill:
-    """Composite official-source Japan carry research provider."""
+    """Composite Japan snapshot provider for descriptive/forward archival research."""
 
     def __init__(self, *, mof: MofJgbBackfill | None = None, boj: BojCallRateBackfill | None = None):
         self.mof = mof or MofJgbBackfill()
