@@ -90,9 +90,24 @@ def test_boj_snapshot_rejects_provider_status_failure():
         )
 
 
-def test_boj_snapshot_rejects_malformed_or_nonfinite_payload():
+def test_boj_snapshot_rejects_nonfinite_payload():
     session = _Session(_Response(payload={"STATUS": 200, "data": [{"DATE":"20260814","VALUE":"nan"}]}))
-    with pytest.raises(RuntimeError, match="no BOJ call-rate rows"):
+    with pytest.raises(RuntimeError, match="non-finite BOJ observation value"):
+        BojCallRateBackfill(session=session, now=lambda: NOW).fetch_core(
+            start=date(2026,8,14), end=date(2026,8,17)
+        )
+
+
+def test_boj_snapshot_rejects_partially_malformed_payload_instead_of_accepting_subset():
+    payload = {
+        "STATUS": 200,
+        "data": [
+            {"DATE": "20260814", "VALUE": "0.50", "UNIT": "percent"},
+            {"DATE": "20260817", "VALUE": "not-a-number", "UNIT": "percent"},
+        ],
+    }
+    session = _Session(_Response(payload=payload))
+    with pytest.raises(RuntimeError, match="malformed BOJ observation value"):
         BojCallRateBackfill(session=session, now=lambda: NOW).fetch_core(
             start=date(2026,8,14), end=date(2026,8,17)
         )
