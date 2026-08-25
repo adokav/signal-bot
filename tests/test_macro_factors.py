@@ -49,6 +49,15 @@ def test_japan_curve_and_rate_spread_are_transparent_transforms():
     assert round(snapshot.factors["boj_call_rate_d5obs_bp"],8)==5.0
 
 
+def test_stale_japan_inputs_expire_instead_of_looking_current():
+    snapshot=build_factor_snapshot(_core_history(),as_of=datetime(2026,8,26,18,tzinfo=timezone.utc))
+    assert snapshot.complete is True
+    assert snapshot.factors["jgb_10y_d1_bp"] is None
+    assert snapshot.factors["jgb_curve_2s10s_bp"] is None
+    assert snapshot.factors["us_jp_10y_spread_bp"] is None
+    assert snapshot.factors["boj_call_rate_d1_bp"] is None
+
+
 def test_factor_snapshot_does_not_pretend_insufficient_history_is_neutral():
     latest={"us_2y":4.0,"us_10y":4.5,"us_30y":5.0,"us_10y_real":2.0,"fed_assets":7_000_000.0,"rrp":100.0,"tga":800_000.0,"broad_usd":120.0,"usdjpy":145.0}
     snapshot=build_factor_snapshot([_obs(name,19,value) for name,value in latest.items()],as_of=datetime(2026,8,20,18,tzinfo=timezone.utc))
