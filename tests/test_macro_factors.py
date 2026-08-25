@@ -45,7 +45,9 @@ def test_japan_curve_and_rate_spread_are_transparent_transforms():
     assert round(snapshot.factors["jgb_30y_d5obs_bp"],8)==15.0
     assert round(snapshot.factors["jgb_curve_2s10s_bp"],8)==105.0
     assert round(snapshot.factors["jgb_curve_10s30s_bp"],8)==105.0
-    assert round(snapshot.factors["us_jp_10y_spread_bp"],8)==260.0
+    # Latest synthetic levels are US 10Y=4.60% and JGB 10Y=2.10%,
+    # therefore the transparent US-Japan spread is exactly 250 bp.
+    assert round(snapshot.factors["us_jp_10y_spread_bp"],8)==250.0
     assert round(snapshot.factors["boj_call_rate_d5obs_bp"],8)==5.0
 
 
