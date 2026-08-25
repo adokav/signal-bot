@@ -45,22 +45,23 @@ def test_japan_curve_and_rate_spread_are_transparent_transforms():
     assert round(snapshot.factors["jgb_30y_d5obs_bp"],8)==15.0
     assert round(snapshot.factors["jgb_curve_2s10s_bp"],8)==105.0
     assert round(snapshot.factors["jgb_curve_10s30s_bp"],8)==105.0
-    # Latest synthetic levels are US 10Y=4.60% and JGB 10Y=2.10%,
-    # therefore the transparent US-Japan spread is exactly 250 bp.
     assert round(snapshot.factors["us_jp_10y_spread_bp"],8)==250.0
     assert round(snapshot.factors["boj_call_rate_d5obs_bp"],8)==5.0
 
 
 def test_factor_snapshot_does_not_pretend_insufficient_history_is_neutral():
-    latest={"us_2y":4.0,"us_10y":4.5,"us_30y":5.0,"us_10y_real":2.0,"fed_assets":7_000_000.0,"rrp":100.0,"tga":800_000.0,"broad_usd":120.0,"usdjpy":145.0,"jgb_2y":1.0,"jgb_10y":2.0,"jgb_30y":3.0,"boj_call_rate":0.5}
+    latest={"us_2y":4.0,"us_10y":4.5,"us_30y":5.0,"us_10y_real":2.0,"fed_assets":7_000_000.0,"rrp":100.0,"tga":800_000.0,"broad_usd":120.0,"usdjpy":145.0}
     snapshot=build_factor_snapshot([_obs(name,19,value) for name,value in latest.items()],as_of=datetime(2026,8,20,18,tzinfo=timezone.utc))
     assert snapshot.complete is False; assert "us_10y_d1_bp" in snapshot.insufficient_history_factors
 
 
-def test_missing_japan_series_is_explicit_not_neutral():
+def test_missing_japan_series_is_explicit_but_does_not_block_vintage_safe_core():
     rows=[row for row in _core_history() if row.series!="jgb_10y"]
     snapshot=build_factor_snapshot(rows,as_of=datetime(2026,8,20,18,tzinfo=timezone.utc))
-    assert snapshot.complete is False; assert "jgb_10y" in snapshot.missing_required_series; assert snapshot.factors["jgb_10y_d1_bp"] is None
+    assert snapshot.complete is True
+    assert "jgb_10y" not in snapshot.missing_required_series
+    assert snapshot.factors["jgb_10y_d1_bp"] is None
+    assert snapshot.factors["us_jp_10y_spread_bp"] is None
 
 
 def test_factor_snapshot_has_no_score_or_regime_field():
