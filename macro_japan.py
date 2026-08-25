@@ -1,107 +1,63 @@
-"""Research-only Japan rates snapshot adapters.
+"""Japan rates research adapters.
 
-Sources are official: Japan Ministry of Finance JGB constant-maturity yields and
-the Bank of Japan Time-Series Data Search API. These public historical files do
-not expose a complete vintage/correction history. Therefore a value downloaded
-today must never be backdated to its original historical release time for a
-point-in-time replay.
-
-All observations emitted by this module use the *actual retrieval time* as both
-``available_time`` and ``ingested_time``. Historical ``observation_time`` is
-preserved, but a replay cut before the retrieval timestamp cannot see the row.
-These snapshots are suitable for descriptive research and for building a true
-first-seen archive going forward; they are not retrospective point-in-time
-history and must not gain trading authority.
+MOF/BOJ historical endpoints used here are unversioned snapshots: they do not
+provide a complete vintage/correction history. Observations are therefore
+stamped with the actual retrieval time and are suitable for forward archival
+research only; they must not be backdated into retrospective point-in-time
+replay.
 """
 from __future__ import annotations
 
 import csv
-from datetime import date, datetime, time, timedelta, timezone
-import io
+from datetime import date, datetime, timezone
+from io import StringIO
 import math
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
-from macro_data import BOJ_SERIES, BojAdapter, MacroObservation
-
-
-MOF_JGB_URL = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv"
-MOF_JGB_COLUMNS = {
-    "jgb_2y": "2Y",
-    "jgb_10y": "10Y",
-    "jgb_30y": "30Y",
-}
-
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+from macro_data import MacroObservation
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _day(value: str | date | datetime) -> date:
+def _as_date(value: str | date | datetime) -> date:
     if isinstance(value, datetime):
-        return _utc(value).date()
+        return value.astimezone(timezone.utc).date()
     if isinstance(value, date):
         return value
-    return date.fromisoformat(str(value))
+    return date.fromisoformat(str(value)[:10])
 
 
-def _validate_boj_candidate_rows(payload: Any) -> None:
-    """Fail closed when any BOJ observation-like row is malformed.
+def _parse_provider_date(value: Any) -> date:
+    text = str(value).strip()
+    for fmt in ("%Y%m%d", "%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    raise RuntimeError(f"malformed provider observation date: {text!r}")
 
-    ``BojAdapter._find_value_rows`` is deliberately permissive and skips bad
-    leaves. Research ingestion cannot accept that behavior: every dict carrying
-    an observation date/time key must also carry a parseable, finite VALUE.
-    Otherwise a partially corrupt provider response could be archived as a
-    healthy subset.
-    """
 
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            normalized = {str(key).upper(): value for key, value in node.items()}
-            date_value = (
-                normalized.get("DATE")
-                or normalized.get("TIME")
-                or normalized.get("PERIOD")
-                or normalized.get("TIME_PERIOD")
-            )
-            if date_value is not None:
-                try:
-                    BojAdapter._boj_date_to_iso(str(date_value))
-                except Exception as exc:
-                    raise RuntimeError(f"malformed BOJ observation date: {date_value}") from exc
-                if "VALUE" not in normalized:
-                    raise RuntimeError("BOJ observation row missing VALUE")
-                raw_value = normalized.get("VALUE")
-                if raw_value in (None, "", "NA", "N.A.", "-"):
-                    raise RuntimeError("malformed BOJ observation value")
-                try:
-                    numeric = float(str(raw_value).replace(",", ""))
-                except (TypeError, ValueError) as exc:
-                    raise RuntimeError(f"malformed BOJ observation value: {raw_value}") from exc
-                if not math.isfinite(numeric):
-                    raise RuntimeError("non-finite BOJ observation value")
-            for child in node.values():
-                walk(child)
-        elif isinstance(node, list):
-            for child in node:
-                walk(child)
-
-    walk(payload)
+def _finite_float(value: Any, *, label: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"malformed {label}") from exc
+    if not math.isfinite(parsed):
+        raise RuntimeError(f"non-finite {label}")
+    return parsed
 
 
 class MofJgbBackfill:
-    """Current MOF history snapshot, explicitly *not* vintage-safe history."""
+    """MOF JGB constant-maturity snapshot adapter (forward archival only)."""
 
-    url = MOF_JGB_URL
+    url = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcm.csv"
+    tenors = {"2Y": "jgb_2y", "10Y": "jgb_10y", "30Y": "jgb_30y"}
 
-    def __init__(self, session: requests.Session | None = None, now=_utc_now):
+    def __init__(self, session: requests.Session | None = None, now: Callable[[], datetime] = _utc_now):
         self.session = session or requests.Session()
         self.now = now
 
@@ -114,144 +70,152 @@ class MofJgbBackfill:
         end: str | date | datetime,
         ingested_at: datetime,
     ) -> tuple[MacroObservation, ...]:
-        start_day, end_day = _day(start), _day(end)
-        if end_day < start_day:
-            raise ValueError("MOF JGB backfill end precedes start")
-        ingested = _utc(ingested_at)
+        start_d, end_d = _as_date(start), _as_date(end)
+        lines = list(csv.reader(StringIO(text)))
+        header_idx = next((i for i, row in enumerate(lines) if row and row[0].strip().lower() == "date"), None)
+        if header_idx is None:
+            raise RuntimeError("MOF CSV missing Date header")
+        header = [cell.strip() for cell in lines[header_idx]]
+        indices: dict[str, int] = {}
+        for tenor in cls.tenors:
+            if tenor not in header:
+                raise RuntimeError(f"MOF CSV missing required column {tenor}")
+            indices[tenor] = header.index(tenor)
 
-        rows = list(csv.reader(io.StringIO(text)))
-        header_index = next((i for i, row in enumerate(rows) if row and row[0].strip() == "Date"), None)
-        if header_index is None:
-            raise RuntimeError("MOF JGB CSV missing Date header")
-        header = [cell.strip() for cell in rows[header_index]]
-        indexes: dict[str, int] = {}
-        for logical, column in MOF_JGB_COLUMNS.items():
-            if column not in header:
-                raise RuntimeError(f"MOF JGB CSV missing required column: {column}")
-            indexes[logical] = header.index(column)
-
+        stamp = ingested_at.astimezone(timezone.utc)
         parsed: list[MacroObservation] = []
-        seen_dates: set[date] = set()
-        for raw in rows[header_index + 1 :]:
+        for raw in lines[header_idx + 1 :]:
             if not raw or not raw[0].strip():
                 continue
             try:
-                observed = datetime.strptime(raw[0].strip(), "%Y/%m/%d").date()
-            except ValueError as exc:
-                raise RuntimeError(f"invalid MOF JGB date: {raw[0]}") from exc
-            if observed in seen_dates:
-                raise RuntimeError("MOF JGB dates must be unique")
-            seen_dates.add(observed)
-            if not (start_day <= observed <= end_day):
+                obs_date = _parse_provider_date(raw[0])
+            except RuntimeError:
                 continue
-            observed_at = datetime.combine(
-                observed,
-                time(15, 0),
-                tzinfo=timezone(timedelta(hours=9)),
-            ).astimezone(timezone.utc)
-            if observed_at > ingested:
-                raise RuntimeError("MOF snapshot contains future observation")
-
-            required_cells: dict[str, str] = {}
-            for logical, idx in indexes.items():
+            if obs_date < start_d or obs_date > end_d:
+                continue
+            if obs_date > stamp.date():
+                raise RuntimeError("future observation in MOF snapshot")
+            for tenor, logical in cls.tenors.items():
+                idx = indices[tenor]
                 cell = raw[idx].strip() if idx < len(raw) else ""
                 if cell in ("", "-"):
-                    raise RuntimeError(
-                        f"MOF JGB row {observed.isoformat()} missing required tenor {MOF_JGB_COLUMNS[logical]}"
-                    )
-                required_cells[logical] = cell
-
-            for logical, cell in required_cells.items():
-                try:
-                    value = float(cell)
-                except ValueError as exc:
-                    raise RuntimeError(f"invalid MOF JGB yield: {cell}") from exc
-                if not math.isfinite(value):
-                    raise ValueError("non-finite MOF JGB yield")
+                    raise RuntimeError(f"MOF in-range row missing required tenor {tenor}")
+                value = _finite_float(cell, label=f"MOF {tenor} value")
                 obs = MacroObservation(
                     provider="mof_jgb_unversioned_snapshot",
                     series=logical,
-                    source_id=f"MOF:JGB:{MOF_JGB_COLUMNS[logical]}",
-                    observation_time=observed_at.isoformat(),
-                    available_time=ingested.isoformat(),
-                    ingested_time=ingested.isoformat(),
+                    observation_time=datetime.combine(obs_date, datetime.min.time(), tzinfo=timezone.utc).isoformat(),
+                    available_time=stamp.isoformat(),
+                    ingested_time=stamp.isoformat(),
                     value=value,
                     unit="percent",
                 )
                 obs.validate()
                 parsed.append(obs)
-        return tuple(sorted(parsed, key=lambda row: (row.observation_time, row.series)))
+        return tuple(parsed)
 
     def fetch_core(self, *, start: str | date | datetime, end: str | date | datetime) -> tuple[MacroObservation, ...]:
         response = self.session.get(self.url, timeout=30)
         response.raise_for_status()
-        ingested = _utc(self.now())
-        return self.parse_csv(response.text, start=start, end=end, ingested_at=ingested)
+        return self.parse_csv(response.text, start=start, end=end, ingested_at=self.now())
+
+
+class BojAdapter:
+    base_url = "https://www.stat-search.boj.or.jp/api/v1/getDataCode"
+
+    @staticmethod
+    def _find_value_rows(payload: Any) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                normalized = {str(key).upper(): value for key, value in node.items()}
+                if any(key in normalized for key in ("DATE", "TIME", "PERIOD", "TIME_PERIOD")) and "VALUE" in normalized:
+                    rows.append(normalized)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        walk(payload)
+        return rows
+
+
+def _validate_boj_observation_rows(payload: Any) -> None:
+    """Fail closed on any date-bearing malformed BOJ observation candidate."""
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            normalized = {str(key).upper(): value for key, value in node.items()}
+            date_value = (
+                normalized.get("DATE")
+                or normalized.get("TIME")
+                or normalized.get("PERIOD")
+                or normalized.get("TIME_PERIOD")
+            )
+            if date_value is not None:
+                if "VALUE" not in normalized or normalized.get("VALUE") in (None, ""):
+                    raise RuntimeError("BOJ observation missing VALUE")
+                _parse_provider_date(date_value)
+                _finite_float(normalized.get("VALUE"), label="BOJ observation value")
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(payload)
 
 
 class BojCallRateBackfill:
-    """Current BOJ call-rate history snapshot, not a vintage-safe reconstruction."""
+    """BOJ uncollateralized overnight call-rate unversioned snapshot adapter."""
 
     base_url = BojAdapter.base_url
     logical_series = "boj_call_rate"
 
-    def __init__(self, session: requests.Session | None = None, now=_utc_now):
+    def __init__(self, session: requests.Session | None = None, now: Callable[[], datetime] = _utc_now):
         self.session = session or requests.Session()
         self.now = now
 
     def fetch_core(self, *, start: str | date | datetime, end: str | date | datetime) -> tuple[MacroObservation, ...]:
-        start_day, end_day = _day(start), _day(end)
-        if end_day < start_day:
-            raise ValueError("BOJ call-rate backfill end precedes start")
-        db, code = BOJ_SERIES[self.logical_series]
+        start_d, end_d = _as_date(start), _as_date(end)
         response = self.session.get(
             self.base_url,
-            params={
-                "format": "json",
-                "lang": "en",
-                "db": db,
-                "code": code,
-                "startDate": start_day.strftime("%Y%m"),
-                "endDate": end_day.strftime("%Y%m"),
-            },
+            params={"format": "json", "lang": "en", "code": "FM01'STRD"},
             timeout=30,
         )
         response.raise_for_status()
-        payload: Any = response.json()
-        if isinstance(payload, dict) and payload.get("STATUS") not in (None, 200, "200"):
-            raise RuntimeError(f"BOJ API returned STATUS={payload.get('STATUS')}")
-        _validate_boj_candidate_rows(payload)
+        payload = response.json()
+        status = payload.get("STATUS") if isinstance(payload, dict) else None
+        if status not in (None, 200, "200"):
+            raise RuntimeError(f"BOJ provider STATUS={status}")
+        _validate_boj_observation_rows(payload)
         value_rows = BojAdapter._find_value_rows(payload)
         if not value_rows:
             raise RuntimeError("no BOJ call-rate rows")
 
-        ingested = _utc(self.now())
-        normalized: dict[date, tuple[float, str | None]] = {}
-        for raw_date, value, unit in value_rows:
-            observed = datetime.fromisoformat(BojAdapter._boj_date_to_iso(raw_date)).date()
-            numeric = float(value)
-            if not math.isfinite(numeric):
-                raise ValueError("non-finite BOJ call rate")
-            prior = normalized.get(observed)
-            candidate = (numeric, unit)
-            if prior is not None and prior != candidate:
-                raise RuntimeError(f"conflicting BOJ observations for {observed.isoformat()}")
-            normalized[observed] = candidate
-
+        stamp = self.now().astimezone(timezone.utc)
         parsed: list[MacroObservation] = []
-        for observed, (value, unit) in sorted(normalized.items()):
-            if not (start_day <= observed <= end_day):
+        seen: dict[date, float] = {}
+        for row in value_rows:
+            raw_date = row.get("DATE") or row.get("TIME") or row.get("PERIOD") or row.get("TIME_PERIOD")
+            obs_date = _parse_provider_date(raw_date)
+            if obs_date < start_d or obs_date > end_d:
                 continue
-            observed_at = datetime.combine(observed, time.min, tzinfo=timezone.utc)
-            if observed_at > ingested:
-                raise RuntimeError("BOJ snapshot contains future observation")
+            if obs_date > stamp.date():
+                raise RuntimeError("future observation in BOJ snapshot")
+            value = _finite_float(row.get("VALUE"), label="BOJ observation value")
+            if obs_date in seen and seen[obs_date] != value:
+                raise RuntimeError("conflicting duplicate BOJ observation")
+            seen[obs_date] = value
+            unit = str(row.get("UNIT") or row.get("UNIT_NAME") or "percent")
             obs = MacroObservation(
                 provider="boj_call_unversioned_snapshot",
                 series=self.logical_series,
-                source_id=f"{db}:{code}",
-                observation_time=observed_at.isoformat(),
-                available_time=ingested.isoformat(),
-                ingested_time=ingested.isoformat(),
+                observation_time=datetime.combine(obs_date, datetime.min.time(), tzinfo=timezone.utc).isoformat(),
+                available_time=stamp.isoformat(),
+                ingested_time=stamp.isoformat(),
                 value=value,
                 unit=unit or "percent",
             )
@@ -263,13 +227,23 @@ class BojCallRateBackfill:
 
 
 class JapanRatesBackfill:
-    """Composite Japan snapshot provider for descriptive/forward archival research."""
+    """Composite Japan snapshot provider for descriptive/forward archival research.
+
+    The composite is atomic: both MOF JGB and BOJ call-rate legs must contain
+    in-range observations. A partial provider snapshot is unknown, not healthy.
+    """
 
     def __init__(self, *, mof: MofJgbBackfill | None = None, boj: BojCallRateBackfill | None = None):
         self.mof = mof or MofJgbBackfill()
         self.boj = boj or BojCallRateBackfill()
 
     def fetch_core(self, *, start: str | date | datetime, end: str | date | datetime) -> tuple[MacroObservation, ...]:
-        rows = list(self.mof.fetch_core(start=start, end=end))
-        rows.extend(self.boj.fetch_core(start=start, end=end))
+        mof_rows = tuple(self.mof.fetch_core(start=start, end=end))
+        if not mof_rows:
+            raise RuntimeError("Japan composite missing in-range MOF JGB observations")
+        boj_rows = tuple(self.boj.fetch_core(start=start, end=end))
+        if not boj_rows:
+            raise RuntimeError("Japan composite missing in-range BOJ call-rate observations")
+        rows = list(mof_rows)
+        rows.extend(boj_rows)
         return tuple(sorted(rows, key=lambda row: (row.available_time, row.series, row.observation_time)))
