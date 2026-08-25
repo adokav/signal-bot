@@ -18,12 +18,14 @@ from typing import Callable
 from macro_backfill import BinanceHourlyBackfill, FredRevisionBackfill
 from macro_dataset import build_daily_replay_rows, write_replay_jsonl
 from macro_evidence import build_evidence_report
+from macro_japan import JapanRatesBackfill
 
 
-RESEARCH_FINGERPRINT_SCHEMA = 3
+RESEARCH_FINGERPRINT_SCHEMA = 4
 RESEARCH_CODE_FILES = (
     "macro_data.py",
     "macro_backfill.py",
+    "macro_japan.py",
     "macro_factors.py",
     "macro_replay.py",
     "macro_dataset.py",
@@ -55,13 +57,6 @@ def _atomic_jsonl_dataclasses(path: Path, rows) -> int:
 
 
 def _research_code_digest() -> str:
-    """Hash research-defining source so stale evidence cannot survive schema edits.
-
-    This is intentionally conservative: any edit to ingestion contracts, factor,
-    label, dataset, evidence or validation code invalidates the completion
-    fingerprint. Rebuilding unnecessarily is preferable to silently reusing
-    stale evidence.
-    """
     root = Path(__file__).resolve().parent
     digest = hashlib.sha256()
     for name in RESEARCH_CODE_FILES:
@@ -75,7 +70,6 @@ def _research_code_digest() -> str:
 
 
 def _file_integrity(path: Path) -> dict[str, object]:
-    """Return deterministic size/hash metadata for a completed artifact."""
     digest = hashlib.sha256()
     size = 0
     try:
@@ -92,7 +86,6 @@ def _file_integrity(path: Path) -> dict[str, object]:
 
 
 def _jsonl_valid(path: Path) -> bool:
-    """Validate every nonblank JSONL record; truncated/corrupt tails must fail."""
     seen = False
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -227,6 +220,7 @@ class MacroHistoricalBackfillJob:
         *,
         live_archive: str | Path,
         fred: FredRevisionBackfill | None = None,
+        japan: JapanRatesBackfill | None = None,
         btc: BinanceHourlyBackfill | None = None,
         now: Callable[[], datetime] = _utc_now,
     ) -> None:
@@ -234,6 +228,7 @@ class MacroHistoricalBackfillJob:
         self.live_archive = Path(live_archive)
         self.config.validate_paths(self.live_archive)
         self.fred = fred or FredRevisionBackfill()
+        self.japan = japan or JapanRatesBackfill()
         self.btc = btc or BinanceHourlyBackfill()
         self.now = now
 
@@ -293,30 +288,24 @@ class MacroHistoricalBackfillJob:
 
         try:
             macro_start = self.config.start_date - timedelta(days=30)
-            observations = self.fred.fetch_core(start=macro_start, end=end)
+            observations = list(self.fred.fetch_core(start=macro_start, end=end))
+            observations.extend(self.japan.fetch_core(start=macro_start, end=end))
+            observations = tuple(sorted(observations, key=lambda row: (row.available_time, row.series, row.observation_time)))
             macro_n = _atomic_jsonl_dataclasses(self.config.reconstructed_macro_path, observations)
 
             price_start = datetime.combine(
                 self.config.start_date - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
             )
-            # end is lagged >=8d, therefore end+8d is not in the future.
             price_end = datetime.combine(end + timedelta(days=8), datetime.max.time(), tzinfo=timezone.utc)
             bars = self.btc.fetch(start=price_start, end=price_end)
             btc_n = _atomic_jsonl_dataclasses(self.config.btc_path, bars)
 
-            replay = build_daily_replay_rows(
-                observations,
-                bars,
-                start=self.config.start_date,
-                end=end,
-            )
+            replay = build_daily_replay_rows(observations, bars, start=self.config.start_date, end=end)
             replay_n = write_replay_jsonl(replay, self.config.replay_path)
             complete_n = sum(row.factor_complete for row in replay)
             labeled_n = sum(bool(row.outcomes) for row in replay)
 
-            factor_names = sorted(
-                {name for row in replay for name, value in row.factors.items() if value is not None}
-            )
+            factor_names = sorted({name for row in replay for name, value in row.factors.items() if value is not None})
             evidence = build_evidence_report(
                 replay,
                 factors=factor_names,
@@ -328,6 +317,7 @@ class MacroHistoricalBackfillJob:
                 {
                     "generated_at": self.now().astimezone(timezone.utc).isoformat(),
                     "scientific_boundary": "EVIDENCE_ONLY_NO_SCORE_NO_REGIME_NO_TRADING_AUTHORITY",
+                    "japan_data_boundary": "MOF_AND_BOJ_HISTORICAL_RECONSTRUCTION_NO_FULL_VINTAGE_HISTORY",
                     "rows": [row.to_dict() for row in evidence],
                 },
             )
@@ -348,11 +338,8 @@ class MacroHistoricalBackfillJob:
                 evidence_rows=len(evidence),
             )
             _atomic_json(self.config.status_path, status.to_dict())
-            # Marker is written last and binds exact completed artifact bytes.
             marker = status.to_dict()
-            marker["artifacts"] = {
-                name: _file_integrity(path) for name, path in self.config.artifact_paths.items()
-            }
+            marker["artifacts"] = {name: _file_integrity(path) for name, path in self.config.artifact_paths.items()}
             if not self._artifacts_valid(marker["artifacts"]):
                 raise RuntimeError("completed research artifacts failed integrity validation")
             _atomic_json(self.config.marker_path, marker)
