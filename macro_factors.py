@@ -16,9 +16,12 @@ from macro_data import MacroObservation
 
 CORE_FACTOR_SERIES = (
     "us_2y", "us_10y", "us_30y", "us_10y_real", "fed_assets", "rrp", "tga",
-    "broad_usd", "usdjpy", "jgb_2y", "jgb_10y", "jgb_30y", "boj_call_rate",
+    "broad_usd", "usdjpy",
 )
-OPTIONAL_FACTOR_SERIES: tuple[str, ...] = ()
+# Japan public historical snapshots are unversioned. Keep them optional until a
+# true first-seen archive or vintage-safe source exists; otherwise historical
+# replay would be forced to treat unavailable retrospective values as required.
+OPTIONAL_FACTOR_SERIES = ("jgb_2y", "jgb_10y", "jgb_30y", "boj_call_rate")
 
 
 def _utc(value: datetime) -> datetime:
@@ -99,7 +102,7 @@ class MacroFactorSnapshot:
             if value is not None and not math.isfinite(float(value)):
                 raise ValueError("macro factor must be finite")
         if self.complete and (self.missing_required_series or self.insufficient_history_factors):
-            raise ValueError("complete factor snapshot cannot contain data gaps")
+            raise ValueError("complete factor snapshot cannot contain required data gaps")
 
 
 def build_factor_snapshot(observations: Iterable[MacroObservation], *, as_of: datetime) -> MacroFactorSnapshot:
@@ -127,12 +130,12 @@ def build_factor_snapshot(observations: Iterable[MacroObservation], *, as_of: da
         "rrp_d5obs_pct": _pct_change(history["rrp"], 5),
         "tga_d1_pct": _pct_change(history["tga"], 1),
         "tga_d5obs_pct": _pct_change(history["tga"], 5),
-        # Direction is intentionally uninterpreted. Evidence decides whether
-        # positive or negative moves matter for BTC outcomes.
         "broad_usd_d1_pct": _pct_change(history["broad_usd"], 1),
         "broad_usd_d5obs_pct": _pct_change(history["broad_usd"], 5),
         "usdjpy_d1_pct": _pct_change(history["usdjpy"], 1),
         "usdjpy_d5obs_pct": _pct_change(history["usdjpy"], 5),
+        # Optional Japan transforms. They remain None until rows were genuinely
+        # available to the replay cut; no synthetic neutral value is inserted.
         "jgb_2y_d1_bp": _bp_delta(history["jgb_2y"], 1),
         "jgb_10y_d1_bp": _bp_delta(history["jgb_10y"], 1),
         "jgb_30y_d1_bp": _bp_delta(history["jgb_30y"], 1),
@@ -145,7 +148,8 @@ def build_factor_snapshot(observations: Iterable[MacroObservation], *, as_of: da
         "boj_call_rate_d1_bp": _bp_delta(history["boj_call_rate"], 1),
         "boj_call_rate_d5obs_bp": _bp_delta(history["boj_call_rate"], 5),
     }
-    insufficient = tuple(name for name, value in factors.items() if value is None)
+    required_factor_names = tuple(name for name in factors if not name.startswith("jgb_") and not name.startswith("boj_") and name != "us_jp_10y_spread_bp")
+    insufficient = tuple(name for name in required_factor_names if factors[name] is None)
     snapshot = MacroFactorSnapshot(
         as_of=cut.isoformat(),
         factors=factors,
