@@ -64,6 +64,17 @@ def test_mof_rejects_missing_required_column():
         MofJgbBackfill.parse_csv(broken, start=date(2026,8,14), end=date(2026,8,14), ingested_at=NOW)
 
 
+def test_mof_rejects_in_range_row_missing_required_tenor():
+    broken = """Interest Rate,,,,,,,,,,,,,,,(Unit : %)\nDate,1Y,2Y,3Y,4Y,5Y,6Y,7Y,8Y,9Y,10Y,15Y,20Y,25Y,30Y,40Y\n2026/8/14,1.100,1.200,1.300,1.400,1.500,1.600,1.700,1.800,1.900,-,2.100,2.200,2.300,2.400,2.500\n"""
+    with pytest.raises(RuntimeError, match="missing required tenor 10Y"):
+        MofJgbBackfill.parse_csv(
+            broken,
+            start=date(2026,8,14),
+            end=date(2026,8,14),
+            ingested_at=NOW,
+        )
+
+
 def test_boj_snapshot_success_normalizes_dates_and_uses_real_ingestion_time():
     payload = {
         "STATUS": 200,
