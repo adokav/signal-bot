@@ -20,6 +20,18 @@ from macro_dataset import build_daily_replay_rows, write_replay_jsonl
 from macro_evidence import build_evidence_report
 
 
+RESEARCH_FINGERPRINT_SCHEMA = 3
+RESEARCH_CODE_FILES = (
+    "macro_data.py",
+    "macro_backfill.py",
+    "macro_factors.py",
+    "macro_replay.py",
+    "macro_dataset.py",
+    "macro_evidence.py",
+    "macro_validation.py",
+)
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -40,6 +52,67 @@ def _atomic_jsonl_dataclasses(path: Path, rows) -> int:
             handle.write(json.dumps(asdict(row), sort_keys=True) + "\n")
     tmp.replace(path)
     return len(data)
+
+
+def _research_code_digest() -> str:
+    """Hash research-defining source so stale evidence cannot survive schema edits.
+
+    This is intentionally conservative: any edit to ingestion contracts, factor,
+    label, dataset, evidence or validation code invalidates the completion
+    fingerprint. Rebuilding unnecessarily is preferable to silently reusing
+    stale evidence.
+    """
+    root = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for name in RESEARCH_CODE_FILES:
+        path = root / name
+        digest.update(name.encode("utf-8"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError as exc:
+            raise RuntimeError(f"research schema source unavailable: {name}") from exc
+    return digest.hexdigest()
+
+
+def _file_integrity(path: Path) -> dict[str, object]:
+    """Return deterministic size/hash metadata for a completed artifact."""
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                digest.update(chunk)
+    except OSError:
+        return {"size": -1, "sha256": ""}
+    return {"size": size, "sha256": digest.hexdigest()}
+
+
+def _jsonl_valid(path: Path) -> bool:
+    """Validate every nonblank JSONL record; truncated/corrupt tails must fail."""
+    seen = False
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                if not isinstance(json.loads(line), dict):
+                    return False
+                seen = True
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return False
+    return seen
+
+
+def _evidence_readable(path: Path) -> bool:
+    try:
+        payload = json.loads(path.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("rows"), list)
 
 
 @dataclass(frozen=True)
@@ -88,6 +161,15 @@ class HistoricalBackfillConfig:
     def marker_path(self) -> Path:
         return self.root / "backfill_complete.json"
 
+    @property
+    def artifact_paths(self) -> dict[str, Path]:
+        return {
+            "macro": self.reconstructed_macro_path,
+            "btc": self.btc_path,
+            "replay": self.replay_path,
+            "evidence": self.evidence_path,
+        }
+
     def validate_paths(self, live_archive: Path) -> None:
         live = live_archive.resolve()
         for path in (
@@ -105,7 +187,8 @@ class HistoricalBackfillConfig:
 
     def fingerprint(self, end: date) -> str:
         payload = {
-            "schema": 1,
+            "schema": RESEARCH_FINGERPRINT_SCHEMA,
+            "research_code_digest": _research_code_digest(),
             "start": self.start_date.isoformat(),
             "end": end.isoformat(),
             "end_lag_days": self.end_lag_days,
@@ -136,7 +219,7 @@ class HistoricalBackfillStatus:
 
 
 class MacroHistoricalBackfillJob:
-    """Build historical evidence once per date/config fingerprint."""
+    """Build historical evidence once per date/config/research-schema fingerprint."""
 
     def __init__(
         self,
@@ -154,12 +237,33 @@ class MacroHistoricalBackfillJob:
         self.btc = btc or BinanceHourlyBackfill()
         self.now = now
 
+    def _artifacts_valid(self, expected: dict | None = None) -> bool:
+        validators = {
+            "macro": _jsonl_valid,
+            "btc": _jsonl_valid,
+            "replay": _jsonl_valid,
+            "evidence": _evidence_readable,
+        }
+        for name, path in self.config.artifact_paths.items():
+            if not validators[name](path):
+                return False
+            if expected is not None:
+                meta = expected.get(name)
+                if not isinstance(meta, dict) or _file_integrity(path) != meta:
+                    return False
+        return True
+
     def _marker_matches(self, fingerprint: str) -> bool:
         try:
             payload = json.loads(self.config.marker_path.read_text("utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeError):
             return False
-        return payload.get("fingerprint") == fingerprint and payload.get("state") == "COMPLETED"
+        return (
+            payload.get("fingerprint") == fingerprint
+            and payload.get("state") == "COMPLETED"
+            and isinstance(payload.get("artifacts"), dict)
+            and self._artifacts_valid(payload.get("artifacts"))
+        )
 
     def run_once(self, *, force: bool = False) -> HistoricalBackfillStatus:
         started = self.now().astimezone(timezone.utc)
@@ -244,9 +348,14 @@ class MacroHistoricalBackfillJob:
                 evidence_rows=len(evidence),
             )
             _atomic_json(self.config.status_path, status.to_dict())
-            # Marker is written last. Any exception before this point leaves no
-            # completion marker and the next deploy can safely retry.
-            _atomic_json(self.config.marker_path, status.to_dict())
+            # Marker is written last and binds exact completed artifact bytes.
+            marker = status.to_dict()
+            marker["artifacts"] = {
+                name: _file_integrity(path) for name, path in self.config.artifact_paths.items()
+            }
+            if not self._artifacts_valid(marker["artifacts"]):
+                raise RuntimeError("completed research artifacts failed integrity validation")
+            _atomic_json(self.config.marker_path, marker)
             return status
         except Exception as exc:
             failed = HistoricalBackfillStatus(
