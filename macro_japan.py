@@ -52,6 +52,48 @@ def _day(value: str | date | datetime) -> date:
     return date.fromisoformat(str(value))
 
 
+def _validate_boj_candidate_rows(payload: Any) -> None:
+    """Fail closed when any BOJ data-like row is partially malformed.
+
+    ``BojAdapter._find_value_rows`` intentionally ignores malformed leaves so it
+    can be generic. For research ingestion we need stricter semantics: if the
+    provider returned a dict that looks like an observation (date/time key plus
+    VALUE), every such row must have a parseable date and a finite numeric value.
+    Accepting a valid subset would make provider corruption look healthy.
+    """
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            normalized = {str(key).upper(): value for key, value in node.items()}
+            date_value = (
+                normalized.get("DATE")
+                or normalized.get("TIME")
+                or normalized.get("PERIOD")
+                or normalized.get("TIME_PERIOD")
+            )
+            if date_value is not None and "VALUE" in normalized:
+                raw_value = normalized.get("VALUE")
+                try:
+                    BojAdapter._boj_date_to_iso(str(date_value))
+                except Exception as exc:
+                    raise RuntimeError(f"malformed BOJ observation date: {date_value}") from exc
+                if raw_value in (None, "", "NA", "N.A.", "-"):
+                    raise RuntimeError("malformed BOJ observation value")
+                try:
+                    numeric = float(str(raw_value).replace(",", ""))
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(f"malformed BOJ observation value: {raw_value}") from exc
+                if not math.isfinite(numeric):
+                    raise RuntimeError("non-finite BOJ observation value")
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(payload)
+
+
 class MofJgbBackfill:
     """Current MOF history snapshot, explicitly *not* vintage-safe history."""
 
@@ -169,6 +211,7 @@ class BojCallRateBackfill:
         payload: Any = response.json()
         if isinstance(payload, dict) and payload.get("STATUS") not in (None, 200, "200"):
             raise RuntimeError(f"BOJ API returned STATUS={payload.get('STATUS')}")
+        _validate_boj_candidate_rows(payload)
         value_rows = BojAdapter._find_value_rows(payload)
         if not value_rows:
             raise RuntimeError("no BOJ call-rate rows")
@@ -180,7 +223,11 @@ class BojCallRateBackfill:
             numeric = float(value)
             if not math.isfinite(numeric):
                 raise ValueError("non-finite BOJ call rate")
-            normalized[observed] = (numeric, unit)
+            prior = normalized.get(observed)
+            candidate = (numeric, unit)
+            if prior is not None and prior != candidate:
+                raise RuntimeError(f"conflicting BOJ observations for {observed.isoformat()}")
+            normalized[observed] = candidate
 
         parsed: list[MacroObservation] = []
         for observed, (value, unit) in sorted(normalized.items()):
