@@ -55,13 +55,7 @@ def _atomic_jsonl_dataclasses(path: Path, rows) -> int:
 
 
 def _research_code_digest() -> str:
-    """Hash research-defining source so stale evidence cannot survive schema edits.
-
-    This is intentionally conservative: any edit to ingestion contracts, factor,
-    label, dataset, evidence or validation code invalidates the completion
-    fingerprint. Rebuilding unnecessarily is preferable to silently reusing
-    stale evidence.
-    """
+    """Hash research-defining source so stale evidence cannot survive schema edits."""
     root = Path(__file__).resolve().parent
     digest = hashlib.sha256()
     for name in RESEARCH_CODE_FILES:
@@ -75,7 +69,6 @@ def _research_code_digest() -> str:
 
 
 def _file_integrity(path: Path) -> dict[str, object]:
-    """Return deterministic size/hash metadata for a completed artifact."""
     digest = hashlib.sha256()
     size = 0
     try:
@@ -92,7 +85,6 @@ def _file_integrity(path: Path) -> dict[str, object]:
 
 
 def _jsonl_valid(path: Path) -> bool:
-    """Validate every nonblank JSONL record; truncated/corrupt tails must fail."""
     seen = False
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -163,38 +155,18 @@ class HistoricalBackfillConfig:
 
     @property
     def artifact_paths(self) -> dict[str, Path]:
-        return {
-            "macro": self.reconstructed_macro_path,
-            "btc": self.btc_path,
-            "replay": self.replay_path,
-            "evidence": self.evidence_path,
-        }
+        return {"macro": self.reconstructed_macro_path, "btc": self.btc_path, "replay": self.replay_path, "evidence": self.evidence_path}
 
     def validate_paths(self, live_archive: Path) -> None:
         live = live_archive.resolve()
-        for path in (
-            self.reconstructed_macro_path,
-            self.btc_path,
-            self.replay_path,
-            self.evidence_path,
-            self.status_path,
-            self.marker_path,
-        ):
+        for path in (self.reconstructed_macro_path, self.btc_path, self.replay_path, self.evidence_path, self.status_path, self.marker_path):
             if path.resolve() == live:
                 raise ValueError("historical research path collides with live macro archive")
         if self.reconstructed_macro_path.name == "macro_observations.jsonl":
             raise ValueError("historical reconstruction cannot use live archive filename")
 
     def fingerprint(self, end: date) -> str:
-        payload = {
-            "schema": RESEARCH_FINGERPRINT_SCHEMA,
-            "research_code_digest": _research_code_digest(),
-            "start": self.start_date.isoformat(),
-            "end": end.isoformat(),
-            "end_lag_days": self.end_lag_days,
-            "min_train_rows": self.min_train_rows,
-            "test_rows": self.test_rows,
-        }
+        payload = {"schema": RESEARCH_FINGERPRINT_SCHEMA, "research_code_digest": _research_code_digest(), "start": self.start_date.isoformat(), "end": end.isoformat(), "end_lag_days": self.end_lag_days, "min_train_rows": self.min_train_rows, "test_rows": self.test_rows}
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -219,17 +191,14 @@ class HistoricalBackfillStatus:
 
 
 class MacroHistoricalBackfillJob:
-    """Build historical evidence once per date/config/research-schema fingerprint."""
+    """Build vintage-safe historical evidence only.
 
-    def __init__(
-        self,
-        config: HistoricalBackfillConfig,
-        *,
-        live_archive: str | Path,
-        fred: FredRevisionBackfill | None = None,
-        btc: BinanceHourlyBackfill | None = None,
-        now: Callable[[], datetime] = _utc_now,
-    ) -> None:
+    Unversioned MOF/BOJ history snapshots are deliberately excluded. They may
+    be archived forward from their real ingestion time, but they cannot be
+    retroactively inserted into historical replay.
+    """
+
+    def __init__(self, config: HistoricalBackfillConfig, *, live_archive: str | Path, fred: FredRevisionBackfill | None = None, btc: BinanceHourlyBackfill | None = None, now: Callable[[], datetime] = _utc_now) -> None:
         self.config = config
         self.live_archive = Path(live_archive)
         self.config.validate_paths(self.live_archive)
@@ -238,12 +207,7 @@ class MacroHistoricalBackfillJob:
         self.now = now
 
     def _artifacts_valid(self, expected: dict | None = None) -> bool:
-        validators = {
-            "macro": _jsonl_valid,
-            "btc": _jsonl_valid,
-            "replay": _jsonl_valid,
-            "evidence": _evidence_readable,
-        }
+        validators = {"macro": _jsonl_valid, "btc": _jsonl_valid, "replay": _jsonl_valid, "evidence": _evidence_readable}
         for name, path in self.config.artifact_paths.items():
             if not validators[name](path):
                 return False
@@ -258,114 +222,45 @@ class MacroHistoricalBackfillJob:
             payload = json.loads(self.config.marker_path.read_text("utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeError):
             return False
-        return (
-            payload.get("fingerprint") == fingerprint
-            and payload.get("state") == "COMPLETED"
-            and isinstance(payload.get("artifacts"), dict)
-            and self._artifacts_valid(payload.get("artifacts"))
-        )
+        return payload.get("fingerprint") == fingerprint and payload.get("state") == "COMPLETED" and isinstance(payload.get("artifacts"), dict) and self._artifacts_valid(payload.get("artifacts"))
 
     def run_once(self, *, force: bool = False) -> HistoricalBackfillStatus:
         started = self.now().astimezone(timezone.utc)
         end = self.config.end_date(started)
         fingerprint = self.config.fingerprint(end)
         if not force and self._marker_matches(fingerprint):
-            status = HistoricalBackfillStatus(
-                state="SKIPPED_ALREADY_COMPLETE",
-                started_at=started.isoformat(),
-                completed_at=started.isoformat(),
-                start_date=self.config.start_date.isoformat(),
-                end_date=end.isoformat(),
-                fingerprint=fingerprint,
-            )
+            status = HistoricalBackfillStatus(state="SKIPPED_ALREADY_COMPLETE", started_at=started.isoformat(), completed_at=started.isoformat(), start_date=self.config.start_date.isoformat(), end_date=end.isoformat(), fingerprint=fingerprint)
             _atomic_json(self.config.status_path, status.to_dict())
             return status
 
-        running = HistoricalBackfillStatus(
-            state="RUNNING",
-            started_at=started.isoformat(),
-            completed_at=None,
-            start_date=self.config.start_date.isoformat(),
-            end_date=end.isoformat(),
-            fingerprint=fingerprint,
-        )
+        running = HistoricalBackfillStatus(state="RUNNING", started_at=started.isoformat(), completed_at=None, start_date=self.config.start_date.isoformat(), end_date=end.isoformat(), fingerprint=fingerprint)
         _atomic_json(self.config.status_path, running.to_dict())
 
         try:
             macro_start = self.config.start_date - timedelta(days=30)
             observations = self.fred.fetch_core(start=macro_start, end=end)
             macro_n = _atomic_jsonl_dataclasses(self.config.reconstructed_macro_path, observations)
-
-            price_start = datetime.combine(
-                self.config.start_date - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
-            )
-            # end is lagged >=8d, therefore end+8d is not in the future.
+            price_start = datetime.combine(self.config.start_date - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
             price_end = datetime.combine(end + timedelta(days=8), datetime.max.time(), tzinfo=timezone.utc)
             bars = self.btc.fetch(start=price_start, end=price_end)
             btc_n = _atomic_jsonl_dataclasses(self.config.btc_path, bars)
-
-            replay = build_daily_replay_rows(
-                observations,
-                bars,
-                start=self.config.start_date,
-                end=end,
-            )
+            replay = build_daily_replay_rows(observations, bars, start=self.config.start_date, end=end)
             replay_n = write_replay_jsonl(replay, self.config.replay_path)
             complete_n = sum(row.factor_complete for row in replay)
             labeled_n = sum(bool(row.outcomes) for row in replay)
-
-            factor_names = sorted(
-                {name for row in replay for name, value in row.factors.items() if value is not None}
-            )
-            evidence = build_evidence_report(
-                replay,
-                factors=factor_names,
-                min_train_rows=self.config.min_train_rows,
-                test_rows=self.config.test_rows,
-            )
-            _atomic_json(
-                self.config.evidence_path,
-                {
-                    "generated_at": self.now().astimezone(timezone.utc).isoformat(),
-                    "scientific_boundary": "EVIDENCE_ONLY_NO_SCORE_NO_REGIME_NO_TRADING_AUTHORITY",
-                    "rows": [row.to_dict() for row in evidence],
-                },
-            )
-
+            factor_names = sorted({name for row in replay for name, value in row.factors.items() if value is not None})
+            evidence = build_evidence_report(replay, factors=factor_names, min_train_rows=self.config.min_train_rows, test_rows=self.config.test_rows)
+            _atomic_json(self.config.evidence_path, {"generated_at": self.now().astimezone(timezone.utc).isoformat(), "scientific_boundary": "EVIDENCE_ONLY_NO_SCORE_NO_REGIME_NO_TRADING_AUTHORITY", "japan_data_boundary": "UNVERSIONED_MOF_BOJ_HISTORY_EXCLUDED_FROM_RETROSPECTIVE_REPLAY", "rows": [row.to_dict() for row in evidence]})
             completed = self.now().astimezone(timezone.utc)
-            status = HistoricalBackfillStatus(
-                state="COMPLETED",
-                started_at=started.isoformat(),
-                completed_at=completed.isoformat(),
-                start_date=self.config.start_date.isoformat(),
-                end_date=end.isoformat(),
-                fingerprint=fingerprint,
-                macro_observations=macro_n,
-                btc_bars=btc_n,
-                replay_rows=replay_n,
-                complete_factor_rows=complete_n,
-                labeled_rows=labeled_n,
-                evidence_rows=len(evidence),
-            )
+            status = HistoricalBackfillStatus(state="COMPLETED", started_at=started.isoformat(), completed_at=completed.isoformat(), start_date=self.config.start_date.isoformat(), end_date=end.isoformat(), fingerprint=fingerprint, macro_observations=macro_n, btc_bars=btc_n, replay_rows=replay_n, complete_factor_rows=complete_n, labeled_rows=labeled_n, evidence_rows=len(evidence))
             _atomic_json(self.config.status_path, status.to_dict())
-            # Marker is written last and binds exact completed artifact bytes.
             marker = status.to_dict()
-            marker["artifacts"] = {
-                name: _file_integrity(path) for name, path in self.config.artifact_paths.items()
-            }
+            marker["artifacts"] = {name: _file_integrity(path) for name, path in self.config.artifact_paths.items()}
             if not self._artifacts_valid(marker["artifacts"]):
                 raise RuntimeError("completed research artifacts failed integrity validation")
             _atomic_json(self.config.marker_path, marker)
             return status
         except Exception as exc:
-            failed = HistoricalBackfillStatus(
-                state="FAILED",
-                started_at=started.isoformat(),
-                completed_at=self.now().astimezone(timezone.utc).isoformat(),
-                start_date=self.config.start_date.isoformat(),
-                end_date=end.isoformat(),
-                fingerprint=fingerprint,
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            failed = HistoricalBackfillStatus(state="FAILED", started_at=started.isoformat(), completed_at=self.now().astimezone(timezone.utc).isoformat(), start_date=self.config.start_date.isoformat(), end_date=end.isoformat(), fingerprint=fingerprint, error=f"{type(exc).__name__}: {exc}")
             _atomic_json(self.config.status_path, failed.to_dict())
             raise
