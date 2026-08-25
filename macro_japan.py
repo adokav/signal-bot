@@ -53,13 +53,13 @@ def _day(value: str | date | datetime) -> date:
 
 
 def _validate_boj_candidate_rows(payload: Any) -> None:
-    """Fail closed when any BOJ data-like row is partially malformed.
+    """Fail closed when any BOJ observation-like row is malformed.
 
-    ``BojAdapter._find_value_rows`` intentionally ignores malformed leaves so it
-    can be generic. For research ingestion we need stricter semantics: if the
-    provider returned a dict that looks like an observation (date/time key plus
-    VALUE), every such row must have a parseable date and a finite numeric value.
-    Accepting a valid subset would make provider corruption look healthy.
+    ``BojAdapter._find_value_rows`` is deliberately permissive and skips bad
+    leaves. Research ingestion cannot accept that behavior: every dict carrying
+    an observation date/time key must also carry a parseable, finite VALUE.
+    Otherwise a partially corrupt provider response could be archived as a
+    healthy subset.
     """
 
     def walk(node: Any) -> None:
@@ -71,12 +71,14 @@ def _validate_boj_candidate_rows(payload: Any) -> None:
                 or normalized.get("PERIOD")
                 or normalized.get("TIME_PERIOD")
             )
-            if date_value is not None and "VALUE" in normalized:
-                raw_value = normalized.get("VALUE")
+            if date_value is not None:
                 try:
                     BojAdapter._boj_date_to_iso(str(date_value))
                 except Exception as exc:
                     raise RuntimeError(f"malformed BOJ observation date: {date_value}") from exc
+                if "VALUE" not in normalized:
+                    raise RuntimeError("BOJ observation row missing VALUE")
+                raw_value = normalized.get("VALUE")
                 if raw_value in (None, "", "NA", "N.A.", "-"):
                     raise RuntimeError("malformed BOJ observation value")
                 try:
