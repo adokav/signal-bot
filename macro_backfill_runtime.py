@@ -20,6 +20,17 @@ from macro_dataset import build_daily_replay_rows, write_replay_jsonl
 from macro_evidence import build_evidence_report
 
 
+RESEARCH_FINGERPRINT_SCHEMA = 2
+RESEARCH_CODE_FILES = (
+    "macro_backfill.py",
+    "macro_factors.py",
+    "macro_replay.py",
+    "macro_dataset.py",
+    "macro_evidence.py",
+    "macro_validation.py",
+)
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -40,6 +51,46 @@ def _atomic_jsonl_dataclasses(path: Path, rows) -> int:
             handle.write(json.dumps(asdict(row), sort_keys=True) + "\n")
     tmp.replace(path)
     return len(data)
+
+
+def _research_code_digest() -> str:
+    """Hash research-defining source so stale evidence cannot survive schema edits.
+
+    This is intentionally conservative: any edit to ingestion, factor, label,
+    dataset, evidence or validation code invalidates the completion fingerprint.
+    Rebuilding unnecessarily is preferable to silently reusing stale evidence.
+    """
+    root = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for name in RESEARCH_CODE_FILES:
+        path = root / name
+        digest.update(name.encode("utf-8"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError as exc:
+            raise RuntimeError(f"research schema source unavailable: {name}") from exc
+    return digest.hexdigest()
+
+
+def _jsonl_readable(path: Path) -> bool:
+    """Require at least one parseable JSON object without loading a large archive."""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                return isinstance(json.loads(line), dict)
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return False
+    return False
+
+
+def _evidence_readable(path: Path) -> bool:
+    try:
+        payload = json.loads(path.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("rows"), list)
 
 
 @dataclass(frozen=True)
@@ -105,7 +156,8 @@ class HistoricalBackfillConfig:
 
     def fingerprint(self, end: date) -> str:
         payload = {
-            "schema": 1,
+            "schema": RESEARCH_FINGERPRINT_SCHEMA,
+            "research_code_digest": _research_code_digest(),
             "start": self.start_date.isoformat(),
             "end": end.isoformat(),
             "end_lag_days": self.end_lag_days,
@@ -136,7 +188,7 @@ class HistoricalBackfillStatus:
 
 
 class MacroHistoricalBackfillJob:
-    """Build historical evidence once per date/config fingerprint."""
+    """Build historical evidence once per date/config/research-schema fingerprint."""
 
     def __init__(
         self,
@@ -154,12 +206,24 @@ class MacroHistoricalBackfillJob:
         self.btc = btc or BinanceHourlyBackfill()
         self.now = now
 
+    def _artifacts_valid(self) -> bool:
+        return (
+            _jsonl_readable(self.config.reconstructed_macro_path)
+            and _jsonl_readable(self.config.btc_path)
+            and _jsonl_readable(self.config.replay_path)
+            and _evidence_readable(self.config.evidence_path)
+        )
+
     def _marker_matches(self, fingerprint: str) -> bool:
         try:
             payload = json.loads(self.config.marker_path.read_text("utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeError):
             return False
-        return payload.get("fingerprint") == fingerprint and payload.get("state") == "COMPLETED"
+        return (
+            payload.get("fingerprint") == fingerprint
+            and payload.get("state") == "COMPLETED"
+            and self._artifacts_valid()
+        )
 
     def run_once(self, *, force: bool = False) -> HistoricalBackfillStatus:
         started = self.now().astimezone(timezone.utc)
