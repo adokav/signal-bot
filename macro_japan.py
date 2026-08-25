@@ -151,10 +151,17 @@ class MofJgbBackfill:
             ).astimezone(timezone.utc)
             if observed_at > ingested:
                 raise RuntimeError("MOF snapshot contains future observation")
+
+            required_cells: dict[str, str] = {}
             for logical, idx in indexes.items():
                 cell = raw[idx].strip() if idx < len(raw) else ""
                 if cell in ("", "-"):
-                    continue
+                    raise RuntimeError(
+                        f"MOF JGB row {observed.isoformat()} missing required tenor {MOF_JGB_COLUMNS[logical]}"
+                    )
+                required_cells[logical] = cell
+
+            for logical, cell in required_cells.items():
                 try:
                     value = float(cell)
                 except ValueError as exc:
