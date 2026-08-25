@@ -54,33 +54,69 @@ def _line_count(path: Path) -> int | None:
         return None
 
 
+def _public_live_status(payload: dict | None) -> dict | None:
+    """Whitelist only non-secret collector metadata for the public endpoint."""
+    if not isinstance(payload, dict):
+        return None
+    allowed = ("ok", "attempted_at", "appended", "fetched_series", "unchanged_series")
+    return {key: payload[key] for key in allowed if key in payload}
+
+
+def _public_backfill_status(payload: dict | None) -> dict | None:
+    """Never expose raw error strings or URLs from provider exceptions."""
+    if not isinstance(payload, dict):
+        return None
+    allowed = (
+        "state", "started_at", "completed_at", "start_date", "end_date", "fingerprint",
+        "macro_observations", "btc_bars", "replay_rows", "complete_factor_rows",
+        "labeled_rows", "evidence_rows",
+    )
+    return {key: payload[key] for key in allowed if key in payload}
+
+
 def macro_research_health_payload() -> dict:
     """Sanitized observability only; never exposes API keys or creates a signal."""
     config = HistoricalBackfillConfig.from_env()
-    live_status = _safe_read_json(MACRO_STATUS_PATH)
-    backfill_status = _safe_read_json(config.status_path)
+    live_status_raw = _safe_read_json(MACRO_STATUS_PATH)
+    backfill_status_raw = _safe_read_json(config.status_path)
+    marker = _safe_read_json(config.marker_path)
     evidence = _safe_read_json(config.evidence_path)
+
     evidence_rows = evidence.get("rows") if isinstance(evidence, dict) else None
+    evidence_valid = isinstance(evidence_rows, list) and bool(evidence.get("generated_at"))
     if not isinstance(evidence_rows, list):
         evidence_rows = []
 
-    state = str((backfill_status or {}).get("state") or "NOT_STARTED")
+    reconstructed_rows = _line_count(config.reconstructed_macro_path)
+    btc_rows = _line_count(config.btc_path)
+    replay_rows = _line_count(config.replay_path)
+    state = str((backfill_status_raw or {}).get("state") or "NOT_STARTED")
+
+    marker_completed = isinstance(marker, dict) and marker.get("state") == "COMPLETED"
+    artifacts_readable = all(value is not None and value > 0 for value in (
+        reconstructed_rows, btc_rows, replay_rows,
+    )) and evidence_valid
+    completed_state = state in {"COMPLETED", "SKIPPED_ALREADY_COMPLETE"}
+    healthy = completed_state and marker_completed and artifacts_readable
+
     return {
-        "ok": state in {"COMPLETED", "SKIPPED_ALREADY_COMPLETE"},
+        "ok": healthy,
         "scientific_boundary": "EVIDENCE_ONLY_NO_SCORE_NO_REGIME_NO_TRADING_AUTHORITY",
         "live_first_seen": {
-            "status": live_status,
+            "status": _public_live_status(live_status_raw),
             "archive_rows": _line_count(MACRO_ARCHIVE_PATH),
         },
         "historical_research": {
             "enabled": HISTORICAL_BACKFILL_ENABLED,
             "state": state,
-            "status": backfill_status,
-            "reconstructed_macro_rows": _line_count(config.reconstructed_macro_path),
-            "btc_hourly_bar_rows": _line_count(config.btc_path),
-            "replay_rows": _line_count(config.replay_path),
+            "status": _public_backfill_status(backfill_status_raw),
+            "completion_marker_valid": marker_completed,
+            "artifacts_readable": artifacts_readable,
+            "reconstructed_macro_rows": reconstructed_rows,
+            "btc_hourly_bar_rows": btc_rows,
+            "replay_rows": replay_rows,
             "evidence_summary_rows": len(evidence_rows),
-            "evidence_generated_at": (evidence or {}).get("generated_at") if isinstance(evidence, dict) else None,
+            "evidence_generated_at": (evidence or {}).get("generated_at") if evidence_valid else None,
         },
         "can_authorize_trade": False,
     }
@@ -99,10 +135,10 @@ def macro_collection_loop() -> None:
             _write_status(status.to_dict())
             if status.errors:
                 log.warning(
-                    "Macro collection partial: appended=%s fetched=%s errors=%s",
+                    "Macro collection partial: appended=%s fetched=%s error_count=%s",
                     status.appended,
                     len(status.fetched_series),
-                    "; ".join(status.errors),
+                    len(status.errors),
                 )
             else:
                 log.info(
@@ -111,9 +147,9 @@ def macro_collection_loop() -> None:
                     len(status.fetched_series),
                     len(status.unchanged_series),
                 )
-        except Exception as exc:
+        except Exception:
             log.exception("Macro collection cycle failed")
-            _write_status({"ok": False, "fatal_error": f"{type(exc).__name__}: {exc}"})
+            _write_status({"ok": False, "fatal_error": "macro_collection_cycle_failed"})
         time.sleep(MACRO_INTERVAL_SECONDS)
 
 
