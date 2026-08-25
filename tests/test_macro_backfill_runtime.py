@@ -38,7 +38,10 @@ class _Fred:
         rows = []
         # Enough history for all core factor transforms. Values are simple but
         # valid; this test exercises orchestration, not predictive research.
-        for series in ("us_2y", "us_10y", "us_30y", "us_10y_real", "fed_assets", "rrp", "tga"):
+        for series in (
+            "us_2y", "us_10y", "us_30y", "us_10y_real", "fed_assets", "rrp", "tga",
+            "broad_usd", "usdjpy",
+        ):
             for day in range(1, 8):
                 rows.append(_obs(series, day, float(day) + 1.0))
         return tuple(rows)
@@ -70,6 +73,21 @@ def _config(tmp_path: Path) -> HistoricalBackfillConfig:
     )
 
 
+def _job(config: HistoricalBackfillConfig, tmp_path: Path, fred, btc, monkeypatch):
+    # Evidence creation requires meaningful history; isolate orchestration here.
+    monkeypatch.setattr(
+        "macro_backfill_runtime.build_evidence_report",
+        lambda replay, factors, min_train_rows, test_rows: (),
+    )
+    return MacroHistoricalBackfillJob(
+        config,
+        live_archive=tmp_path / "macro_observations.jsonl",
+        fred=fred,
+        btc=btc,
+        now=lambda: NOW,
+    )
+
+
 def test_runtime_never_allows_live_archive_collision(tmp_path: Path):
     config = HistoricalBackfillConfig(date(2020, 1, 1), 8, tmp_path)
     with pytest.raises(ValueError, match="collides"):
@@ -95,19 +113,8 @@ def test_failed_job_writes_failure_status_but_no_completion_marker(tmp_path: Pat
 def test_completion_marker_prevents_duplicate_rebuild(tmp_path: Path, monkeypatch):
     config = _config(tmp_path)
     fred, btc = _Fred(), _Btc()
+    job = _job(config, tmp_path, fred, btc, monkeypatch)
 
-    # Evidence creation requires meaningful history; isolate orchestration here.
-    monkeypatch.setattr(
-        "macro_backfill_runtime.build_evidence_report",
-        lambda replay, factors, min_train_rows, test_rows: (),
-    )
-    job = MacroHistoricalBackfillJob(
-        config,
-        live_archive=tmp_path / "macro_observations.jsonl",
-        fred=fred,
-        btc=btc,
-        now=lambda: NOW,
-    )
     first = job.run_once()
     assert first.state == "COMPLETED"
     assert config.marker_path.exists()
@@ -118,20 +125,48 @@ def test_completion_marker_prevents_duplicate_rebuild(tmp_path: Path, monkeypatc
     assert fred.calls == 1 and btc.calls == 1
 
 
+def test_missing_artifact_invalidates_completion_marker(tmp_path: Path, monkeypatch):
+    config = _config(tmp_path)
+    fred, btc = _Fred(), _Btc()
+    job = _job(config, tmp_path, fred, btc, monkeypatch)
+
+    first = job.run_once()
+    assert first.state == "COMPLETED"
+    config.replay_path.unlink()
+
+    second = job.run_once()
+    assert second.state == "COMPLETED"
+    assert fred.calls == 2 and btc.calls == 2
+    assert config.replay_path.exists()
+
+
+def test_malformed_artifact_invalidates_completion_marker(tmp_path: Path, monkeypatch):
+    config = _config(tmp_path)
+    fred, btc = _Fred(), _Btc()
+    job = _job(config, tmp_path, fred, btc, monkeypatch)
+
+    job.run_once()
+    config.evidence_path.write_text("not-json", "utf-8")
+
+    rebuilt = job.run_once()
+    assert rebuilt.state == "COMPLETED"
+    assert fred.calls == 2 and btc.calls == 2
+
+
+def test_research_code_digest_is_part_of_fingerprint(tmp_path: Path, monkeypatch):
+    config = _config(tmp_path)
+    end = config.end_date(NOW)
+    monkeypatch.setattr("macro_backfill_runtime._research_code_digest", lambda: "schema-a")
+    first = config.fingerprint(end)
+    monkeypatch.setattr("macro_backfill_runtime._research_code_digest", lambda: "schema-b")
+    second = config.fingerprint(end)
+    assert first != second
+
+
 def test_force_rebuild_ignores_existing_marker(tmp_path: Path, monkeypatch):
     config = _config(tmp_path)
     fred, btc = _Fred(), _Btc()
-    monkeypatch.setattr(
-        "macro_backfill_runtime.build_evidence_report",
-        lambda replay, factors, min_train_rows, test_rows: (),
-    )
-    job = MacroHistoricalBackfillJob(
-        config,
-        live_archive=tmp_path / "macro_observations.jsonl",
-        fred=fred,
-        btc=btc,
-        now=lambda: NOW,
-    )
+    job = _job(config, tmp_path, fred, btc, monkeypatch)
     job.run_once()
     job.run_once(force=True)
     assert fred.calls == 2 and btc.calls == 2
