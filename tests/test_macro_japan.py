@@ -113,6 +113,21 @@ def test_boj_snapshot_rejects_partially_malformed_payload_instead_of_accepting_s
         )
 
 
+def test_boj_snapshot_rejects_date_bearing_row_missing_value():
+    payload = {
+        "STATUS": 200,
+        "data": [
+            {"DATE": "20260814", "VALUE": "0.50", "UNIT": "percent"},
+            {"DATE": "20260817", "UNIT": "percent"},
+        ],
+    }
+    session = _Session(_Response(payload=payload))
+    with pytest.raises(RuntimeError, match="missing VALUE"):
+        BojCallRateBackfill(session=session, now=lambda: NOW).fetch_core(
+            start=date(2026,8,14), end=date(2026,8,17)
+        )
+
+
 def test_boj_snapshot_rejects_future_observation_relative_to_ingestion():
     early = datetime(2026, 8, 14, 0, 0, tzinfo=timezone.utc)
     session = _Session(_Response(payload={"STATUS":200,"data":[{"DATE":"20260817","VALUE":"0.55"}]}))
