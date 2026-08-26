@@ -34,9 +34,9 @@ from .tactical_long_data import TacticalMarketSnapshot, TacticalTimeframe
 
 THESIS_BINDING_PREFIX = "MEDIUM_HORIZON_THESIS_SHA256="
 FAST_VOL_RETURN_LOOKBACK = 20
-# The tactical adapter supports a minimum of 60 candles. Sixty closes contain
-# 59 close-to-close returns, so the slow baseline is explicitly 59 returns
-# rather than silently requiring a 61st candle that the adapter does not promise.
+# The adapter requests at least 61 provider rows so one forming row can be
+# discarded while retaining 60 closed daily candles. Sixty closes contain 59
+# close-to-close returns, hence the explicit 59-return slow baseline.
 SLOW_VOL_RETURN_LOOKBACK = 59
 
 
@@ -50,6 +50,7 @@ class ThesisState(str, Enum):
 class MediumHorizonLongContext:
     symbol: str
     decision_at: int
+    evidence_ingested_at: int
     state: ThesisState
     daily_structure: StructureState
     h4_structure: StructureState
@@ -178,31 +179,36 @@ def _post_confirmation_h4_rows(h4: Sequence[Candle], protected_swing: Swing) -> 
     return tuple(row for row in h4 if row.close_time > protected_swing.confirmed_at)
 
 
-def _valid_fingerprint(value: str) -> bool:
-    if len(value) != 64:
+def _valid_fingerprint(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
         return False
     try:
         int(value, 16)
-    except (TypeError, ValueError):
+    except ValueError:
         return False
     return True
 
 
 def _thesis_evidence_fingerprint(
     *,
+    source: str,
     symbol: str,
     decision_at: int,
+    evidence_ingested_at: int,
     d1: Sequence[Candle],
     h4: Sequence[Candle],
 ) -> str:
-    """Hash the exact point-in-time D1/H4 evidence used by the thesis.
+    """Hash the exact point-in-time D1/H4 evidence vintage used by the thesis.
 
-    The hash includes timestamps, availability and every OHLCV value. A later
-    correction reconstructed at the same historical decision cut therefore has
-    a different lineage and cannot silently re-authorize an old plan.
+    The digest includes source, cut, actual first-seen ingestion time,
+    timestamps, availability and every OHLCV value. Content identity alone is
+    insufficient: a provider correction first downloaded after a historical cut
+    is rejected before hashing and cannot be backdated into replay.
     """
     digest = sha256()
-    digest.update(f"medium-horizon-v1|{symbol}|{decision_at}".encode("ascii"))
+    digest.update(
+        f"medium-horizon-v2|{source}|{symbol}|{decision_at}|{evidence_ingested_at}".encode("utf-8")
+    )
     for timeframe, rows in ((TacticalTimeframe.D1, d1), (TacticalTimeframe.H4, h4)):
         for row in rows:
             digest.update(
@@ -216,7 +222,11 @@ def _thesis_evidence_fingerprint(
 
 
 def _plan_thesis_bindings(plan: TradePlan) -> tuple[str, ...]:
-    return tuple(item for item in plan.evidence if item.startswith(THESIS_BINDING_PREFIX))
+    return tuple(
+        item
+        for item in plan.evidence
+        if isinstance(item, str) and item.startswith(THESIS_BINDING_PREFIX)
+    )
 
 
 def bind_execution_plan(plan: TradePlan, context: MediumHorizonLongContext) -> TradePlan:
@@ -230,8 +240,14 @@ def bind_execution_plan(plan: TradePlan, context: MediumHorizonLongContext) -> T
         raise ValueError("cannot bind plan to a different symbol thesis")
     if plan.decision_at != context.decision_at:
         raise ValueError("cannot bind plan to a different decision cut")
+    if type(context.evidence_ingested_at) is not int or context.evidence_ingested_at <= 0:
+        raise ValueError("cannot bind plan to malformed thesis ingestion time")
+    if context.evidence_ingested_at > context.decision_at:
+        raise ValueError("cannot bind plan to evidence first seen after decision cut")
     if not _valid_fingerprint(context.evidence_fingerprint):
         raise ValueError("cannot bind plan to malformed thesis fingerprint")
+    if any(not isinstance(item, str) for item in plan.evidence):
+        raise ValueError("cannot bind plan with malformed evidence")
 
     expected = f"{THESIS_BINDING_PREFIX}{context.evidence_fingerprint}"
     existing = _plan_thesis_bindings(plan)
@@ -247,12 +263,18 @@ def evaluate_medium_horizon_long(snapshot: TacticalMarketSnapshot, symbol: str) 
     symbol = symbol.upper()
     if symbol not in {"BTCUSDT", "ETHUSDT"}:
         raise ValueError("medium-horizon policy is restricted to BTCUSDT and ETHUSDT")
+    if type(snapshot.evidence_ingested_at) is not int or snapshot.evidence_ingested_at <= 0:
+        raise DataQualityError("invalid evidence ingestion vintage")
+    if snapshot.evidence_ingested_at > snapshot.decision_at:
+        raise DataQualityError("evidence vintage first seen after decision cut")
 
     d1 = _validated_frame(snapshot, symbol, TacticalTimeframe.D1)
     h4 = _validated_frame(snapshot, symbol, TacticalTimeframe.H4)
     fingerprint = _thesis_evidence_fingerprint(
+        source=snapshot.source,
         symbol=symbol,
         decision_at=snapshot.decision_at,
+        evidence_ingested_at=snapshot.evidence_ingested_at,
         d1=d1,
         h4=h4,
     )
@@ -268,6 +290,7 @@ def evaluate_medium_horizon_long(snapshot: TacticalMarketSnapshot, symbol: str) 
         return MediumHorizonLongContext(
             symbol=symbol,
             decision_at=snapshot.decision_at,
+            evidence_ingested_at=snapshot.evidence_ingested_at,
             state=state,
             daily_structure=daily_state,
             h4_structure=h4_state,
@@ -327,9 +350,15 @@ def validate_execution_plan(
     elif evaluated_at != plan.decision_at or evaluated_at != context.decision_at:
         reasons.append("PLAN_VALIDATION_CUT_MISMATCH")
 
+    vintage_valid = type(context.evidence_ingested_at) is int and context.evidence_ingested_at > 0
+    if not vintage_valid or (vintage_valid and context.evidence_ingested_at > context.decision_at):
+        reasons.append("THESIS_EVIDENCE_VINTAGE_UNAVAILABLE_AT_CUT")
+
     fingerprint_valid = _valid_fingerprint(context.evidence_fingerprint)
     if not fingerprint_valid:
         reasons.append("THESIS_EVIDENCE_FINGERPRINT_INVALID")
+    if any(not isinstance(item, str) for item in plan.evidence):
+        reasons.append("PLAN_EVIDENCE_MALFORMED")
     bindings = _plan_thesis_bindings(plan)
     if len(bindings) != 1:
         reasons.append("THESIS_BINDING_MISSING_OR_AMBIGUOUS")
