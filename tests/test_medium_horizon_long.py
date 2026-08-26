@@ -278,7 +278,10 @@ def test_thesis_fingerprint_is_deterministic_and_changes_with_same_cut_revision(
     assert revised_context.decision_at == original.decision_at
     assert revised_context.evidence_fingerprint != original.evidence_fingerprint
 
-    old_plan = bind_execution_plan(_plan(stop=94.0, thesis_fingerprint=None), original)
+    old_plan = bind_execution_plan(
+        _plan(stop=94.0, thesis_fingerprint=None, decision_at=original.decision_at),
+        original,
+    )
     allowed, reasons = validate_execution_plan(old_plan, revised_context, evaluated_at=original.decision_at)
     assert allowed is False
     assert "THESIS_EVIDENCE_FINGERPRINT_MISMATCH" in reasons
