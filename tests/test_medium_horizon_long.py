@@ -319,8 +319,29 @@ def test_thesis_fingerprint_is_deterministic_and_changes_with_same_cut_revision(
 
 def test_thesis_fingerprint_changes_when_first_seen_vintage_changes():
     snapshot = _fresh_thesis_snapshot()
-    earlier = replace(snapshot, evidence_ingested_at=snapshot.decision_at - 1)
-    at_cut = replace(snapshot, evidence_ingested_at=snapshot.decision_at)
+    earlier_ingestion = snapshot.decision_at - 1
+    earlier_quotes = {
+        symbol: replace(
+            quote,
+            observed_at=earlier_ingestion,
+            available_at=earlier_ingestion,
+        )
+        for symbol, quote in snapshot.quotes.items()
+    }
+    earlier = replace(
+        snapshot,
+        quotes=earlier_quotes,
+        evidence_ingested_at=earlier_ingestion,
+    )
+    at_cut = replace(
+        snapshot,
+        quotes=earlier_quotes,
+        evidence_ingested_at=snapshot.decision_at,
+    )
+
+    assert earlier.decision_at == at_cut.decision_at == snapshot.decision_at
+    assert earlier.candles["BTCUSDT"][TacticalTimeframe.D1] == at_cut.candles["BTCUSDT"][TacticalTimeframe.D1]
+    assert earlier.candles["BTCUSDT"][TacticalTimeframe.H4] == at_cut.candles["BTCUSDT"][TacticalTimeframe.H4]
     assert evaluate_medium_horizon_long(earlier, "BTCUSDT").evidence_fingerprint != evaluate_medium_horizon_long(at_cut, "BTCUSDT").evidence_fingerprint
 
 
