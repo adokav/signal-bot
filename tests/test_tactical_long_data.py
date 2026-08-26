@@ -126,8 +126,14 @@ def test_quote_rejects_inverted_market():
         )
 
 
+def test_adapter_reserves_one_row_for_permitted_open_candle_discard():
+    with pytest.raises(ValueError, match="between 61 and 1000"):
+        MexcTacticalMarketData(candle_limit=60)
+    assert MexcTacticalMarketData(candle_limit=61).candle_limit == 61
+
+
 def test_adapter_never_accepts_another_execution_venue_symbol():
-    adapter = MexcTacticalMarketData(candle_limit=60)
+    adapter = MexcTacticalMarketData(candle_limit=61)
     with pytest.raises(ValueError, match="unsupported tactical symbol"):
         adapter.fetch_candles(
             "SOLUSDT",
