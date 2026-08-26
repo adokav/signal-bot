@@ -25,6 +25,7 @@ def _candle(index: int, *, high: float, low: float, close: float | None = None) 
         open_time=start,
         close_time=start + 900,
         available_at=start + 901,
+        ingested_at=start + 901,
         open=(high + low) / 2,
         high=high,
         low=low,
