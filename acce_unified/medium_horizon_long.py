@@ -214,11 +214,10 @@ def evaluate_medium_horizon_long(snapshot: TacticalMarketSnapshot, symbol: str) 
         # recovery cannot silently reactivate the same protected-low thesis.
         return context(ThesisState.NO_LONG, reasons_out=("H4_PROTECTED_LOW_CLOSE_BREAK",))
 
-    latest_h4 = h4[-1]
-    if latest_h4.low <= protected_low:
+    if any(row.low <= protected_low for row in post_confirmation):
         # A wick/sweep below the protected low is not automatically a destroyed
-        # medium-horizon thesis, but it is also not permission to initiate risk
-        # until higher-timeframe structure confirms the reclaim.
+        # thesis, but the same protected-low thesis stays observation-only until
+        # a newer H4 protected low is itself confirmed.
         return context(ThesisState.OBSERVE, reasons_out=("H4_PROTECTED_LOW_WICK_BREACH",))
 
     if daily_state is StructureState.BULLISH:
@@ -234,23 +233,29 @@ def validate_execution_plan(
     *,
     evaluated_at: int,
 ) -> tuple[bool, tuple[str, ...]]:
-    """Reject execution plans that contradict or outlive the medium-horizon thesis.
+    """Validate a plan only against thesis evidence fresh at ``evaluated_at``.
 
-    ``evaluated_at`` is mandatory so persisted READY plans cannot be validated
-    forever against an old matching context without checking their expiry.
+    ``plan.decision_at`` preserves the plan's original lineage. A persisted plan
+    may be revalidated later, but only with a context recomputed at that exact
+    later cut; stale bullish context can never keep a READY plan actionable.
     """
     reasons: list[str] = []
-    if evaluated_at <= 0 or evaluated_at < plan.decision_at or evaluated_at < context.decision_at:
+    evaluation_is_valid = type(evaluated_at) is int and evaluated_at > 0
+    if not evaluation_is_valid:
         reasons.append("INVALID_EXECUTION_EVALUATION_TIME")
+    else:
+        if context.decision_at != evaluated_at:
+            reasons.append("CONTEXT_NOT_CURRENT_AT_EVALUATION")
+        if plan.decision_at > context.decision_at:
+            reasons.append("CONTEXT_PRECEDES_PLAN_DECISION")
+
     if plan.symbol != context.symbol:
         reasons.append("PLAN_CONTEXT_SYMBOL_MISMATCH")
-    if plan.decision_at != context.decision_at:
-        reasons.append("PLAN_CONTEXT_DECISION_TIME_MISMATCH")
     if plan.state is PlanState.INVALIDATED:
         reasons.append("EXECUTION_PLAN_INVALIDATED")
     elif plan.state not in {PlanState.READY, PlanState.TRIGGERED}:
         reasons.append("EXECUTION_PLAN_NOT_ACTIONABLE")
-    elif plan.state is PlanState.READY and evaluated_at >= plan.expires_at:
+    elif evaluation_is_valid and plan.state is PlanState.READY and evaluated_at >= plan.expires_at:
         reasons.append("EXECUTION_PLAN_EXPIRED")
     if context.state is not ThesisState.LONG_ALLOWED:
         reasons.append("MEDIUM_HORIZON_LONG_NOT_ALLOWED")
