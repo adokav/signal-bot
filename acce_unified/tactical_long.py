@@ -56,6 +56,8 @@ class Candle:
     volume: float
 
     def __post_init__(self) -> None:
+        if type(self.ingested_at) is not int or self.ingested_at <= 0:
+            raise DataQualityError("candle ingestion timestamp must be a positive finite integer")
         if self.open_time < 0 or self.close_time <= self.open_time:
             raise DataQualityError("invalid candle time range")
         if self.available_at < self.close_time:
