@@ -48,6 +48,7 @@ class Candle:
     open_time: int
     close_time: int
     available_at: int
+    ingested_at: int
     open: float
     high: float
     low: float
@@ -55,10 +56,14 @@ class Candle:
     volume: float
 
     def __post_init__(self) -> None:
+        if type(self.ingested_at) is not int or self.ingested_at <= 0:
+            raise DataQualityError("candle ingestion timestamp must be a positive finite integer")
         if self.open_time < 0 or self.close_time <= self.open_time:
             raise DataQualityError("invalid candle time range")
         if self.available_at < self.close_time:
             raise DataQualityError("candle cannot be available before close")
+        if self.ingested_at < self.available_at:
+            raise DataQualityError("candle revision cannot be ingested before provider availability")
         if min(self.open, self.high, self.low, self.close) <= 0:
             raise DataQualityError("OHLC values must be positive")
         if self.high < max(self.open, self.close) or self.low > min(self.open, self.close):

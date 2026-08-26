@@ -32,7 +32,8 @@ def test_last_closed_request_never_targets_current_open_bucket():
     assert end_ms < decision_at * 1000
 
 
-def test_completed_rows_are_parsed_chronologically():
+def test_completed_rows_are_parsed_chronologically(monkeypatch):
+    monkeypatch.setattr("acce_unified.tactical_long_data.time.time", lambda: 10_005)
     rows = [
         _row(9_000, 9_299),
         _row(9_300, 9_599),
@@ -44,9 +45,14 @@ def test_completed_rows_are_parsed_chronologically():
         decision_at=10_000,
     )
     assert [row.close_time for row in candles] == [9_299, 9_599, 9_899]
+    assert {row.ingested_at for row in candles} == {10_005}
+    assert all(row.ingested_at != row.close_time for row in candles)
 
 
-def test_single_current_open_candle_is_discarded_at_provider_boundary():
+def test_single_current_open_candle_is_discarded_at_provider_boundary(monkeypatch):
+    # Parse time precedes the forming row's provider availability. The raw row
+    # must be discarded before Candle enforces ingestion >= availability.
+    monkeypatch.setattr("acce_unified.tactical_long_data.time.time", lambda: 10_005)
     rows = [
         _row(9_300, 9_599),
         _row(9_600, 9_899),
@@ -60,7 +66,8 @@ def test_single_current_open_candle_is_discarded_at_provider_boundary():
     assert [row.close_time for row in candles] == [9_599, 9_899]
 
 
-def test_multiple_future_or_open_rows_still_fail_closed():
+def test_multiple_future_or_open_rows_still_fail_closed(monkeypatch):
+    monkeypatch.setattr("acce_unified.tactical_long_data.time.time", lambda: 10_005)
     rows = [
         _row(9_600, 9_899),
         _row(9_900, 10_199),
@@ -126,8 +133,14 @@ def test_quote_rejects_inverted_market():
         )
 
 
+def test_adapter_reserves_one_row_for_permitted_open_candle_discard():
+    with pytest.raises(ValueError, match="between 61 and 1000"):
+        MexcTacticalMarketData(candle_limit=60)
+    assert MexcTacticalMarketData(candle_limit=61).candle_limit == 61
+
+
 def test_adapter_never_accepts_another_execution_venue_symbol():
-    adapter = MexcTacticalMarketData(candle_limit=60)
+    adapter = MexcTacticalMarketData(candle_limit=61)
     with pytest.raises(ValueError, match="unsupported tactical symbol"):
         adapter.fetch_candles(
             "SOLUSDT",

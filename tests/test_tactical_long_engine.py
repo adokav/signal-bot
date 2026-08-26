@@ -24,6 +24,7 @@ def _series(*, start: float, step: float, seconds: int, count: int = 240):
             open_time=open_time,
             close_time=open_time + seconds,
             available_at=open_time + seconds,
+            ingested_at=open_time + seconds,
             open=center - half_range * 0.2,
             high=center + half_range,
             low=center - half_range,
@@ -52,6 +53,7 @@ def _snapshot(*, btc_step: float = 0.05, eth_step: float = 0.04):
     }
     return TacticalMarketSnapshot(
         decision_at=decision_at,
+        evidence_ingested_at=decision_at,
         candles=candles,
         quotes=quotes,
     )
