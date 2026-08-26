@@ -78,6 +78,7 @@ class Quote:
 @dataclass(frozen=True)
 class TacticalMarketSnapshot:
     decision_at: int
+    evidence_ingested_at: int
     candles: Mapping[str, Mapping[TacticalTimeframe, tuple[Candle, ...]]]
     quotes: Mapping[str, Quote]
     source: str = "MEXC_SPOT_V3"
@@ -85,15 +86,28 @@ class TacticalMarketSnapshot:
     def __post_init__(self) -> None:
         if self.decision_at <= 0:
             raise DataQualityError("invalid snapshot decision timestamp")
+        if self.evidence_ingested_at <= 0:
+            raise DataQualityError("invalid snapshot evidence ingestion timestamp")
         required_symbols = {*TACTICAL_SYMBOLS, *CONTEXT_SYMBOLS}
         if set(self.candles) != required_symbols or set(self.quotes) != required_symbols:
             raise DataQualityError("snapshot must contain BTCUSDT, ETHUSDT and ETHBTC")
+        latest_provider_availability = 0
         for symbol in required_symbols:
             frames = self.candles[symbol]
             if set(frames) != set(REQUIRED_TIMEFRAMES):
                 raise DataQualityError(f"incomplete timeframe set for {symbol}")
-            if self.quotes[symbol].available_at > self.decision_at:
+            quote = self.quotes[symbol]
+            if quote.available_at > self.decision_at:
                 raise DataQualityError("future quote in snapshot")
+            latest_provider_availability = max(latest_provider_availability, quote.available_at)
+            for rows in frames.values():
+                if rows:
+                    latest_provider_availability = max(
+                        latest_provider_availability,
+                        max(row.available_at for row in rows),
+                    )
+        if self.evidence_ingested_at < latest_provider_availability:
+            raise DataQualityError("evidence ingestion cannot predate provider availability")
 
 
 class MexcTacticalMarketData:
@@ -107,8 +121,12 @@ class MexcTacticalMarketData:
         candle_limit: int = 240,
         session: requests.Session | None = None,
     ) -> None:
-        if candle_limit < 60 or candle_limit > 1000:
-            raise ValueError("candle_limit must be between 60 and 1000")
+        # One provider row is intentionally reserved for MEXC's permitted
+        # forming-candle spillover. A limit of 61 therefore guarantees at least
+        # 60 retained closed rows, which the medium-horizon volatility policy
+        # requires after the open-row discard path.
+        if candle_limit < 61 or candle_limit > 1000:
+            raise ValueError("candle_limit must be between 61 and 1000")
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = max(1, int(timeout_seconds))
         self.candle_limit = int(candle_limit)
@@ -234,7 +252,8 @@ class MexcTacticalMarketData:
         )
 
     def snapshot(self, *, decision_at: int | None = None) -> TacticalMarketSnapshot:
-        decision_at = int(decision_at or time.time())
+        explicit_cut = decision_at is not None
+        query_cut = int(decision_at if explicit_cut else time.time())
         symbols = (*TACTICAL_SYMBOLS, *CONTEXT_SYMBOLS)
         candle_map: dict[str, dict[TacticalTimeframe, tuple[Candle, ...]]] = {}
         quote_map: dict[str, Quote] = {}
@@ -243,13 +262,22 @@ class MexcTacticalMarketData:
                 timeframe: self.fetch_candles(
                     symbol,
                     timeframe,
-                    decision_at=decision_at,
+                    decision_at=query_cut,
                 )
                 for timeframe in REQUIRED_TIMEFRAMES
             }
-            quote_map[symbol] = self.fetch_quote(symbol, decision_at=decision_at)
+            quote_map[symbol] = self.fetch_quote(symbol, decision_at=query_cut)
+
+        evidence_ingested_at = max(query_cut, int(time.time())) if not explicit_cut else int(time.time())
+        # A live scan decides only after its complete evidence batch has been
+        # collected. An explicit historical cut is preserved as requested, but
+        # its actual ingestion timestamp remains current; medium-horizon replay
+        # policy will therefore reject a newly downloaded historical revision
+        # rather than backdating it into the old cut.
+        final_decision_at = evidence_ingested_at if not explicit_cut else query_cut
         return TacticalMarketSnapshot(
-            decision_at=decision_at,
+            decision_at=final_decision_at,
+            evidence_ingested_at=evidence_ingested_at,
             candles=candle_map,
             quotes=quote_map,
         )
