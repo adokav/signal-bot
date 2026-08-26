@@ -163,6 +163,8 @@ def _validated_frame(
     timeframe: TacticalTimeframe,
 ) -> tuple[Candle, ...]:
     """Revalidate the thesis frame at the exact replay/live decision cut."""
+    if any(row.ingested_at > snapshot.decision_at for row in snapshot.candles[symbol][timeframe]):
+        raise DataQualityError("candle revision first seen after decision cut")
     rows = visible_closed_candles(
         snapshot.candles[symbol][timeframe],
         decision_at=snapshot.decision_at,
@@ -214,6 +216,7 @@ def _thesis_evidence_fingerprint(
             digest.update(
                 (
                     f"|{timeframe.value}|{row.open_time}|{row.close_time}|{row.available_at}|"
+                    f"{row.ingested_at}|"
                     f"{float(row.open).hex()}|{float(row.high).hex()}|{float(row.low).hex()}|"
                     f"{float(row.close).hex()}|{float(row.volume).hex()}"
                 ).encode("ascii")
