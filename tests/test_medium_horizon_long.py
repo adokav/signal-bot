@@ -115,12 +115,12 @@ def test_execution_validator_rejects_symbol_mismatch():
     assert "PLAN_CONTEXT_SYMBOL_MISMATCH" in reasons
 
 
-def test_execution_validator_rejects_context_that_predates_plan_lineage():
+def test_execution_validator_requires_same_plan_context_validation_cut():
     plan = _plan(stop=94.0, decision_at=DECISION_AT + 60)
     context = _context(decision_at=DECISION_AT)
     allowed, reasons = _validate(plan, context, evaluated_at=DECISION_AT)
     assert allowed is False
-    assert "CONTEXT_PRECEDES_PLAN_DECISION" in reasons
+    assert "PLAN_VALIDATION_CUT_MISMATCH" in reasons
 
 
 def test_execution_validator_never_revives_invalidated_plan():
@@ -141,36 +141,37 @@ def test_execution_validator_rejects_nonfinite_structural_invalidation():
     assert "STRUCTURAL_INVALIDATION_UNKNOWN" in reasons
 
 
-def test_ready_plan_revalidation_requires_context_fresh_at_evaluation_cut():
+def test_old_plan_cannot_be_revalidated_later_with_stale_context():
     later = DECISION_AT + TacticalTimeframe.H4.seconds
     allowed, reasons = _validate(_plan(stop=94.0), _context(), evaluated_at=later)
     assert allowed is False
-    assert "CONTEXT_NOT_CURRENT_AT_EVALUATION" in reasons
+    assert "PLAN_VALIDATION_CUT_MISMATCH" in reasons
 
 
-def test_ready_plan_can_be_revalidated_with_fresh_later_context_before_expiry():
+def test_old_plan_cannot_be_reauthorized_by_fresh_later_context():
     later = DECISION_AT + TacticalTimeframe.H4.seconds
     allowed, reasons = _validate(
         _plan(stop=94.0),
         _context(decision_at=later),
         evaluated_at=later,
     )
-    assert allowed is True
-    assert reasons == ()
+    assert allowed is False
+    assert "PLAN_VALIDATION_CUT_MISMATCH" in reasons
 
 
-def test_execution_validator_rejects_expired_ready_plan_with_fresh_context():
+def test_expired_ready_plan_cannot_be_revalidated_at_later_cut():
     plan = _plan(stop=94.0, state=PlanState.READY)
     context = _context(decision_at=plan.expires_at)
     allowed, reasons = _validate(plan, context, evaluated_at=plan.expires_at)
     assert allowed is False
+    assert "PLAN_VALIDATION_CUT_MISMATCH" in reasons
     assert "EXECUTION_PLAN_EXPIRED" in reasons
 
 
 def test_execution_validator_rejects_evaluation_before_decision_cut():
     allowed, reasons = _validate(_plan(stop=94.0), _context(), evaluated_at=DECISION_AT - 1)
     assert allowed is False
-    assert "CONTEXT_NOT_CURRENT_AT_EVALUATION" in reasons
+    assert "PLAN_VALIDATION_CUT_MISMATCH" in reasons
 
 
 def test_execution_validator_rejects_nonfinite_or_noninteger_evaluation_timestamp():
@@ -180,12 +181,19 @@ def test_execution_validator_rejects_nonfinite_or_noninteger_evaluation_timestam
         assert "INVALID_EXECUTION_EVALUATION_TIME" in reasons
 
 
-def test_triggered_plan_after_entry_expiry_still_requires_fresh_thesis_context():
+def test_triggered_plan_is_valid_only_at_its_original_cut():
+    plan = _plan(stop=94.0, state=PlanState.TRIGGERED)
+    allowed, reasons = _validate(plan, _context(), evaluated_at=DECISION_AT)
+    assert allowed is True
+    assert reasons == ()
+
+
+def test_triggered_plan_cannot_be_reauthorized_at_later_cut():
     plan = _plan(stop=94.0, state=PlanState.TRIGGERED)
     later = plan.expires_at + 1
     allowed, reasons = _validate(plan, _context(decision_at=later), evaluated_at=later)
-    assert allowed is True
-    assert reasons == ()
+    assert allowed is False
+    assert "PLAN_VALIDATION_CUT_MISMATCH" in reasons
 
 
 def test_medium_horizon_accepts_real_mexc_inclusive_close_semantics():
