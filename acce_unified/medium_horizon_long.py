@@ -233,21 +233,20 @@ def validate_execution_plan(
     *,
     evaluated_at: int,
 ) -> tuple[bool, tuple[str, ...]]:
-    """Validate a plan only against thesis evidence fresh at ``evaluated_at``.
+    """Validate one immutable plan/context decision cut only.
 
-    ``plan.decision_at`` preserves the plan's original lineage. A persisted plan
-    may be revalidated later, but only with a context recomputed at that exact
-    later cut; stale bullish context can never keep a READY plan actionable.
+    A READY/TRIGGERED plan is never re-authorized at a later cut. Later scans
+    must build a new TradePlan and a new MediumHorizonLongContext. This keeps the
+    original thesis lineage immutable and prevents a broken setup from silently
+    reactivating after a later recovery or newly confirmed protected low.
     """
     reasons: list[str] = []
     evaluation_is_valid = type(evaluated_at) is int and evaluated_at > 0
     if not evaluation_is_valid:
         reasons.append("INVALID_EXECUTION_EVALUATION_TIME")
     else:
-        if context.decision_at != evaluated_at:
-            reasons.append("CONTEXT_NOT_CURRENT_AT_EVALUATION")
-        if plan.decision_at > context.decision_at:
-            reasons.append("CONTEXT_PRECEDES_PLAN_DECISION")
+        if evaluated_at != plan.decision_at or evaluated_at != context.decision_at:
+            reasons.append("PLAN_VALIDATION_CUT_MISMATCH")
 
     if plan.symbol != context.symbol:
         reasons.append("PLAN_CONTEXT_SYMBOL_MISMATCH")
