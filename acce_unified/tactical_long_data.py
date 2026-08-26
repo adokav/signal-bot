@@ -177,6 +177,11 @@ class MexcTacticalMarketData:
             try:
                 open_time = int(row[0]) // 1000
                 close_time = int(row[6]) // 1000
+                # Detect provider spillover from raw timestamps. A forming row
+                # cannot satisfy finalized-candle ingestion ordering yet.
+                if close_time > decision_at:
+                    discarded_open_rows += 1
+                    continue
                 candle = Candle(
                     open_time=open_time,
                     close_time=close_time,
@@ -191,19 +196,12 @@ class MexcTacticalMarketData:
             except (TypeError, ValueError, IndexError) as exc:
                 raise DataQualityError("invalid MEXC kline values") from exc
 
-            # MEXC's REST kline response can include the current in-progress
-            # bucket. It is provider transport noise, not valid research data.
-            # Discard only rows that are provably still open at decision_at;
-            # never alter their timestamps or promote them to closed candles.
-            if not candle.visible_at(decision_at):
-                discarded_open_rows += 1
-                continue
             parsed.append(candle)
 
-        if not parsed:
-            raise DataQualityError("no closed candles in MEXC kline payload")
         if discarded_open_rows > 1:
             raise DataQualityError("multiple future or open candles supplied")
+        if not parsed:
+            raise DataQualityError("no closed candles in MEXC kline payload")
 
         max_staleness = timeframe.seconds * 2
         return visible_closed_candles(
