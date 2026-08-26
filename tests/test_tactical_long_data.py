@@ -49,7 +49,10 @@ def test_completed_rows_are_parsed_chronologically(monkeypatch):
     assert all(row.ingested_at != row.close_time for row in candles)
 
 
-def test_single_current_open_candle_is_discarded_at_provider_boundary():
+def test_single_current_open_candle_is_discarded_at_provider_boundary(monkeypatch):
+    # Parse time precedes the forming row's provider availability. The raw row
+    # must be discarded before Candle enforces ingestion >= availability.
+    monkeypatch.setattr("acce_unified.tactical_long_data.time.time", lambda: 10_005)
     rows = [
         _row(9_300, 9_599),
         _row(9_600, 9_899),
@@ -63,7 +66,8 @@ def test_single_current_open_candle_is_discarded_at_provider_boundary():
     assert [row.close_time for row in candles] == [9_599, 9_899]
 
 
-def test_multiple_future_or_open_rows_still_fail_closed():
+def test_multiple_future_or_open_rows_still_fail_closed(monkeypatch):
+    monkeypatch.setattr("acce_unified.tactical_long_data.time.time", lambda: 10_005)
     rows = [
         _row(9_600, 9_899),
         _row(9_900, 10_199),
