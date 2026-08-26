@@ -115,14 +115,12 @@ def test_execution_validator_rejects_symbol_mismatch():
     assert "PLAN_CONTEXT_SYMBOL_MISMATCH" in reasons
 
 
-def test_execution_validator_rejects_decision_time_mismatch():
-    allowed, reasons = _validate(
-        _plan(stop=94.0, decision_at=DECISION_AT + 60),
-        _context(),
-        evaluated_at=DECISION_AT + 60,
-    )
+def test_execution_validator_rejects_context_that_predates_plan_lineage():
+    plan = _plan(stop=94.0, decision_at=DECISION_AT + 60)
+    context = _context(decision_at=DECISION_AT)
+    allowed, reasons = _validate(plan, context, evaluated_at=DECISION_AT)
     assert allowed is False
-    assert "PLAN_CONTEXT_DECISION_TIME_MISMATCH" in reasons
+    assert "CONTEXT_PRECEDES_PLAN_DECISION" in reasons
 
 
 def test_execution_validator_never_revives_invalidated_plan():
@@ -143,22 +141,49 @@ def test_execution_validator_rejects_nonfinite_structural_invalidation():
     assert "STRUCTURAL_INVALIDATION_UNKNOWN" in reasons
 
 
-def test_execution_validator_rejects_expired_ready_plan():
+def test_ready_plan_revalidation_requires_context_fresh_at_evaluation_cut():
+    later = DECISION_AT + TacticalTimeframe.H4.seconds
+    allowed, reasons = _validate(_plan(stop=94.0), _context(), evaluated_at=later)
+    assert allowed is False
+    assert "CONTEXT_NOT_CURRENT_AT_EVALUATION" in reasons
+
+
+def test_ready_plan_can_be_revalidated_with_fresh_later_context_before_expiry():
+    later = DECISION_AT + TacticalTimeframe.H4.seconds
+    allowed, reasons = _validate(
+        _plan(stop=94.0),
+        _context(decision_at=later),
+        evaluated_at=later,
+    )
+    assert allowed is True
+    assert reasons == ()
+
+
+def test_execution_validator_rejects_expired_ready_plan_with_fresh_context():
     plan = _plan(stop=94.0, state=PlanState.READY)
-    allowed, reasons = _validate(plan, _context(), evaluated_at=plan.expires_at)
+    context = _context(decision_at=plan.expires_at)
+    allowed, reasons = _validate(plan, context, evaluated_at=plan.expires_at)
     assert allowed is False
     assert "EXECUTION_PLAN_EXPIRED" in reasons
 
 
-def test_execution_validator_requires_evaluation_at_or_after_decision_cut():
+def test_execution_validator_rejects_evaluation_before_decision_cut():
     allowed, reasons = _validate(_plan(stop=94.0), _context(), evaluated_at=DECISION_AT - 1)
     assert allowed is False
-    assert "INVALID_EXECUTION_EVALUATION_TIME" in reasons
+    assert "CONTEXT_NOT_CURRENT_AT_EVALUATION" in reasons
 
 
-def test_triggered_plan_is_not_reclassified_as_expired_entry_setup():
+def test_execution_validator_rejects_nonfinite_or_noninteger_evaluation_timestamp():
+    for malformed in (float("nan"), float("inf"), float(DECISION_AT), True):
+        allowed, reasons = validate_execution_plan(_plan(stop=94.0), _context(), evaluated_at=malformed)
+        assert allowed is False
+        assert "INVALID_EXECUTION_EVALUATION_TIME" in reasons
+
+
+def test_triggered_plan_after_entry_expiry_still_requires_fresh_thesis_context():
     plan = _plan(stop=94.0, state=PlanState.TRIGGERED)
-    allowed, reasons = _validate(plan, _context(), evaluated_at=plan.expires_at + 1)
+    later = plan.expires_at + 1
+    allowed, reasons = _validate(plan, _context(decision_at=later), evaluated_at=later)
     assert allowed is True
     assert reasons == ()
 
@@ -320,6 +345,39 @@ def test_h4_wick_below_protected_low_is_observe_not_new_long(monkeypatch):
         (StructureState.BULLISH, ()),
         (StructureState.BULLISH, (
             SimpleNamespace(kind=SwingKind.LOW, price=protected, confirmed_at=h4[-2].close_time),
+        )),
+    ))
+    monkeypatch.setattr(medium_horizon, "_structure", lambda candles, timeframe: next(calls))
+    context = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
+    assert context.state is ThesisState.OBSERVE
+    assert "H4_PROTECTED_LOW_WICK_BREACH" in context.reasons
+
+
+def test_prior_h4_wick_breach_stays_observe_until_new_protected_low_is_confirmed(monkeypatch):
+    snapshot = _fresh_thesis_snapshot()
+    h4 = list(snapshot.candles["BTCUSDT"][TacticalTimeframe.H4])
+    protected = h4[-3].low - 10.0
+    penultimate = h4[-2]
+    latest = h4[-1]
+    h4[-2] = replace(
+        penultimate,
+        open=protected + 3.0,
+        high=protected + 10.0,
+        low=protected - 2.0,
+        close=protected + 4.0,
+    )
+    h4[-1] = replace(
+        latest,
+        open=protected + 4.0,
+        high=protected + 9.0,
+        low=protected + 1.0,
+        close=protected + 6.0,
+    )
+    snapshot = _replace_frame(snapshot, "BTCUSDT", TacticalTimeframe.H4, h4)
+    calls = iter((
+        (StructureState.BULLISH, ()),
+        (StructureState.BULLISH, (
+            SimpleNamespace(kind=SwingKind.LOW, price=protected, confirmed_at=h4[-3].close_time),
         )),
     ))
     monkeypatch.setattr(medium_horizon, "_structure", lambda candles, timeframe: next(calls))
