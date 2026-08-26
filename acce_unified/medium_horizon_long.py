@@ -20,6 +20,7 @@ from .tactical_long import (
     DataQualityError,
     PlanState,
     StructureState,
+    Swing,
     SwingKind,
     TradePlan,
     atr,
@@ -53,7 +54,7 @@ class MediumHorizonLongContext:
         return False
 
 
-def _structure(candles: Sequence[Candle], timeframe: TacticalTimeframe) -> tuple[StructureState, tuple]:
+def _structure(candles: Sequence[Candle], timeframe: TacticalTimeframe) -> tuple[StructureState, tuple[Swing, ...]]:
     local_atr = atr(candles, 14)
     multiplier = 1.0 if timeframe is TacticalTimeframe.D1 else 0.75
     swings = confirmed_swings(candles, left=2, right=2, minimum_move=local_atr * multiplier)
@@ -85,9 +86,9 @@ def _volatility_exposure_scalar(d1: Sequence[Candle]) -> float:
     return 1.0
 
 
-def _protected_h4_low(swings: Sequence) -> float | None:
+def _protected_h4_low(swings: Sequence[Swing]) -> Swing | None:
     lows = [item for item in swings if item.kind is SwingKind.LOW]
-    return lows[-1].price if lows else None
+    return lows[-1] if lows else None
 
 
 def _validate_candle_values(candles: Sequence[Candle], timeframe: TacticalTimeframe) -> None:
@@ -135,6 +136,16 @@ def _validate_cadence(candles: Sequence[Candle], timeframe: TacticalTimeframe) -
                 raise DataQualityError(f"{timeframe.value} candle cadence gap or overlap")
 
 
+def _validate_terminal_bucket(
+    candles: Sequence[Candle], *, decision_at: int, timeframe: TacticalTimeframe
+) -> None:
+    """Require the immediately preceding completed UTC bucket at the decision cut."""
+    expected = timeframe.seconds
+    latest_completed_open = (decision_at // expected) * expected - expected
+    if candles[-1].open_time != latest_completed_open:
+        raise DataQualityError(f"{timeframe.value} latest completed bucket is missing")
+
+
 def _validated_frame(
     snapshot: TacticalMarketSnapshot,
     symbol: str,
@@ -148,7 +159,13 @@ def _validated_frame(
     )
     _validate_candle_values(rows, timeframe)
     _validate_cadence(rows, timeframe)
+    _validate_terminal_bucket(rows, decision_at=snapshot.decision_at, timeframe=timeframe)
     return rows
+
+
+def _post_confirmation_h4_rows(h4: Sequence[Candle], protected_swing: Swing) -> tuple[Candle, ...]:
+    """Return every H4 row closed after the protected low became confirmed."""
+    return tuple(row for row in h4 if row.close_time > protected_swing.confirmed_at)
 
 
 def evaluate_medium_horizon_long(snapshot: TacticalMarketSnapshot, symbol: str) -> MediumHorizonLongContext:
@@ -161,7 +178,8 @@ def evaluate_medium_horizon_long(snapshot: TacticalMarketSnapshot, symbol: str) 
     h4 = _validated_frame(snapshot, symbol, TacticalTimeframe.H4)
     daily_state, _ = _structure(d1, TacticalTimeframe.D1)
     h4_state, h4_swings = _structure(h4, TacticalTimeframe.H4)
-    protected_low = _protected_h4_low(h4_swings)
+    protected_swing = _protected_h4_low(h4_swings)
+    protected_low = protected_swing.price if protected_swing is not None else None
     scalar = _volatility_exposure_scalar(d1)
     evidence = [f"D1_STRUCTURE_{daily_state.value}", f"H4_STRUCTURE_{h4_state.value}"]
     reasons: list[str] = []
@@ -187,12 +205,16 @@ def evaluate_medium_horizon_long(snapshot: TacticalMarketSnapshot, symbol: str) 
         return context(ThesisState.NO_LONG, reasons_out=("H4_STRUCTURE_BEARISH",))
     if h4_state is StructureState.INSUFFICIENT_DATA:
         return context(ThesisState.NO_LONG, reasons_out=("INSUFFICIENT_H4_STRUCTURE",))
-    if protected_low is None:
+    if protected_swing is None:
         return context(ThesisState.NO_LONG, invalidation=None, reasons_out=("NO_CONFIRMED_H4_PROTECTED_LOW",))
 
-    latest_h4 = h4[-1]
-    if latest_h4.close <= protected_low:
+    post_confirmation = _post_confirmation_h4_rows(h4, protected_swing)
+    if any(row.close <= protected_low for row in post_confirmation):
+        # A confirmed higher-timeframe structural break stays broken. A later
+        # recovery cannot silently reactivate the same protected-low thesis.
         return context(ThesisState.NO_LONG, reasons_out=("H4_PROTECTED_LOW_CLOSE_BREAK",))
+
+    latest_h4 = h4[-1]
     if latest_h4.low <= protected_low:
         # A wick/sweep below the protected low is not automatically a destroyed
         # medium-horizon thesis, but it is also not permission to initiate risk
@@ -206,9 +228,20 @@ def evaluate_medium_horizon_long(snapshot: TacticalMarketSnapshot, symbol: str) 
     return context(ThesisState.OBSERVE, reasons_out=("DAILY_RANGE_OR_TRANSITION",))
 
 
-def validate_execution_plan(plan: TradePlan, context: MediumHorizonLongContext) -> tuple[bool, tuple[str, ...]]:
-    """Reject execution plans that contradict or outlive the medium-horizon thesis."""
+def validate_execution_plan(
+    plan: TradePlan,
+    context: MediumHorizonLongContext,
+    *,
+    evaluated_at: int,
+) -> tuple[bool, tuple[str, ...]]:
+    """Reject execution plans that contradict or outlive the medium-horizon thesis.
+
+    ``evaluated_at`` is mandatory so persisted READY plans cannot be validated
+    forever against an old matching context without checking their expiry.
+    """
     reasons: list[str] = []
+    if evaluated_at <= 0 or evaluated_at < plan.decision_at or evaluated_at < context.decision_at:
+        reasons.append("INVALID_EXECUTION_EVALUATION_TIME")
     if plan.symbol != context.symbol:
         reasons.append("PLAN_CONTEXT_SYMBOL_MISMATCH")
     if plan.decision_at != context.decision_at:
@@ -217,6 +250,8 @@ def validate_execution_plan(plan: TradePlan, context: MediumHorizonLongContext) 
         reasons.append("EXECUTION_PLAN_INVALIDATED")
     elif plan.state not in {PlanState.READY, PlanState.TRIGGERED}:
         reasons.append("EXECUTION_PLAN_NOT_ACTIONABLE")
+    elif plan.state is PlanState.READY and evaluated_at >= plan.expires_at:
+        reasons.append("EXECUTION_PLAN_EXPIRED")
     if context.state is not ThesisState.LONG_ALLOWED:
         reasons.append("MEDIUM_HORIZON_LONG_NOT_ALLOWED")
 
