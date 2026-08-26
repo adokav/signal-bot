@@ -24,6 +24,7 @@ def _series(*, start: float, step: float, seconds: int, count: int = 240):
             open_time=open_time,
             close_time=open_time + seconds,
             available_at=open_time + seconds,
+            ingested_at=open_time + seconds,
             open=center - half_range * 0.2,
             high=center + half_range,
             low=center - half_range,
