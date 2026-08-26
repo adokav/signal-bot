@@ -92,6 +92,7 @@ class TacticalMarketSnapshot:
         if set(self.candles) != required_symbols or set(self.quotes) != required_symbols:
             raise DataQualityError("snapshot must contain BTCUSDT, ETHUSDT and ETHBTC")
         latest_provider_availability = 0
+        latest_revision_ingestion = 0
         for symbol in required_symbols:
             frames = self.candles[symbol]
             if set(frames) != set(REQUIRED_TIMEFRAMES):
@@ -104,12 +105,17 @@ class TacticalMarketSnapshot:
                 for row in rows:
                     if not row.visible_at(self.decision_at):
                         raise DataQualityError("future or open candle supplied")
+                    if row.ingested_at > self.decision_at:
+                        raise DataQualityError("candle revision first seen after decision cut")
                     latest_provider_availability = max(
                         latest_provider_availability,
                         row.available_at,
                     )
+                    latest_revision_ingestion = max(latest_revision_ingestion, row.ingested_at)
         if self.evidence_ingested_at < latest_provider_availability:
             raise DataQualityError("evidence ingestion cannot predate provider availability")
+        if self.evidence_ingested_at < latest_revision_ingestion:
+            raise DataQualityError("snapshot ingestion cannot predate candle revision ingestion")
 
 
 class MexcTacticalMarketData:
@@ -162,6 +168,7 @@ class MexcTacticalMarketData:
     ) -> tuple[Candle, ...]:
         if not isinstance(rows, list) or not rows:
             raise DataQualityError("MEXC kline payload is empty or malformed")
+        ingested_at = int(time.time())
         parsed: list[Candle] = []
         discarded_open_rows = 0
         for row in rows:
@@ -174,6 +181,7 @@ class MexcTacticalMarketData:
                     open_time=open_time,
                     close_time=close_time,
                     available_at=close_time,
+                    ingested_at=ingested_at,
                     open=float(row[1]),
                     high=float(row[2]),
                     low=float(row[3]),
