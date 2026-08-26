@@ -101,10 +101,12 @@ class TacticalMarketSnapshot:
                 raise DataQualityError("future quote in snapshot")
             latest_provider_availability = max(latest_provider_availability, quote.available_at)
             for rows in frames.values():
-                if rows:
+                for row in rows:
+                    if not row.visible_at(self.decision_at):
+                        raise DataQualityError("future or open candle supplied")
                     latest_provider_availability = max(
                         latest_provider_availability,
-                        max(row.available_at for row in rows),
+                        row.available_at,
                     )
         if self.evidence_ingested_at < latest_provider_availability:
             raise DataQualityError("evidence ingestion cannot predate provider availability")
