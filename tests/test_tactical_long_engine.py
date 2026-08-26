@@ -52,6 +52,7 @@ def _snapshot(*, btc_step: float = 0.05, eth_step: float = 0.04):
     }
     return TacticalMarketSnapshot(
         decision_at=decision_at,
+        evidence_ingested_at=decision_at,
         candles=candles,
         quotes=quotes,
     )
