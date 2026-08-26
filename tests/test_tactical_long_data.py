@@ -32,7 +32,8 @@ def test_last_closed_request_never_targets_current_open_bucket():
     assert end_ms < decision_at * 1000
 
 
-def test_completed_rows_are_parsed_chronologically():
+def test_completed_rows_are_parsed_chronologically(monkeypatch):
+    monkeypatch.setattr("acce_unified.tactical_long_data.time.time", lambda: 10_005)
     rows = [
         _row(9_000, 9_299),
         _row(9_300, 9_599),
@@ -44,6 +45,8 @@ def test_completed_rows_are_parsed_chronologically():
         decision_at=10_000,
     )
     assert [row.close_time for row in candles] == [9_299, 9_599, 9_899]
+    assert {row.ingested_at for row in candles} == {10_005}
+    assert all(row.ingested_at != row.close_time for row in candles)
 
 
 def test_single_current_open_candle_is_discarded_at_provider_boundary():
