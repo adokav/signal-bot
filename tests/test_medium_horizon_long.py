@@ -60,11 +60,15 @@ def _context(
     invalidation=95.0,
     symbol="BTCUSDT",
     decision_at=DECISION_AT,
+    evidence_ingested_at: int | None = None,
     evidence_fingerprint: str = DEFAULT_THESIS_FP,
 ):
+    if evidence_ingested_at is None:
+        evidence_ingested_at = decision_at
     return MediumHorizonLongContext(
         symbol=symbol,
         decision_at=decision_at,
+        evidence_ingested_at=evidence_ingested_at,
         state=state,
         daily_structure=StructureState.BULLISH,
         h4_structure=StructureState.BULLISH,
@@ -161,6 +165,15 @@ def test_execution_validator_rejects_nonfinite_structural_invalidation():
     assert "STRUCTURAL_INVALIDATION_UNKNOWN" in reasons
 
 
+def test_execution_validator_rejects_evidence_vintage_first_seen_after_cut():
+    context = _context(evidence_ingested_at=DECISION_AT + 1)
+    allowed, reasons = _validate(_plan(stop=94.0), context)
+    assert allowed is False
+    assert "THESIS_EVIDENCE_VINTAGE_UNAVAILABLE_AT_CUT" in reasons
+    with pytest.raises(ValueError, match="first seen after decision cut"):
+        bind_execution_plan(_plan(stop=94.0, thesis_fingerprint=None), context)
+
+
 def test_old_plan_cannot_be_revalidated_later_with_stale_context():
     later = DECISION_AT + TacticalTimeframe.H4.seconds
     allowed, reasons = _validate(_plan(stop=94.0), _context(), evaluated_at=later)
@@ -227,6 +240,15 @@ def test_execution_validator_requires_exact_thesis_binding():
     assert "THESIS_EVIDENCE_FINGERPRINT_MISMATCH" in reasons
 
 
+def test_execution_validator_fails_closed_on_malformed_fingerprint_and_plan_evidence():
+    context = _context(evidence_fingerprint=None)
+    plan = replace(_plan(stop=94.0), evidence=(123,))
+    allowed, reasons = validate_execution_plan(plan, context, evaluated_at=DECISION_AT)
+    assert allowed is False
+    assert "THESIS_EVIDENCE_FINGERPRINT_INVALID" in reasons
+    assert "PLAN_EVIDENCE_MALFORMED" in reasons
+
+
 def test_bind_execution_plan_persists_one_immutable_thesis_fingerprint():
     context = _context()
     unbound = _plan(stop=94.0, thesis_fingerprint=None)
@@ -252,6 +274,7 @@ def test_medium_horizon_accepts_real_mexc_inclusive_close_semantics():
     context = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
     assert context.can_authorize_trade is False
     assert context.decision_at == snapshot.decision_at
+    assert context.evidence_ingested_at == snapshot.evidence_ingested_at
     assert len(context.evidence_fingerprint) == 64
     assert 0.0 < context.volatility_exposure_scalar <= 1.0
 
@@ -260,6 +283,13 @@ def test_medium_horizon_accepts_exclusive_replay_bucket_semantics():
     snapshot = _fresh_thesis_snapshot(inclusive_close=False)
     context = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
     assert context.decision_at == snapshot.decision_at
+
+
+def test_medium_horizon_rejects_current_download_backdated_to_historical_cut():
+    snapshot = _fresh_thesis_snapshot()
+    backdated = replace(snapshot, evidence_ingested_at=snapshot.decision_at + 1)
+    with pytest.raises(DataQualityError, match="first seen after decision cut"):
+        evaluate_medium_horizon_long(backdated, "BTCUSDT")
 
 
 def test_thesis_fingerprint_is_deterministic_and_changes_with_same_cut_revision():
@@ -287,7 +317,14 @@ def test_thesis_fingerprint_is_deterministic_and_changes_with_same_cut_revision(
     assert "THESIS_EVIDENCE_FINGERPRINT_MISMATCH" in reasons
 
 
-def test_medium_horizon_supports_adapter_minimum_of_60_daily_candles():
+def test_thesis_fingerprint_changes_when_first_seen_vintage_changes():
+    snapshot = _fresh_thesis_snapshot()
+    earlier = replace(snapshot, evidence_ingested_at=snapshot.decision_at - 1)
+    at_cut = replace(snapshot, evidence_ingested_at=snapshot.decision_at)
+    assert evaluate_medium_horizon_long(earlier, "BTCUSDT").evidence_fingerprint != evaluate_medium_horizon_long(at_cut, "BTCUSDT").evidence_fingerprint
+
+
+def test_medium_horizon_supports_60_retained_daily_candles_after_reserved_open_row():
     snapshot = _fresh_thesis_snapshot()
     d1 = snapshot.candles["BTCUSDT"][TacticalTimeframe.D1][-60:]
     context = evaluate_medium_horizon_long(
