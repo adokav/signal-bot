@@ -9,8 +9,9 @@ Research/advisory only: no order authority and no account-risk assumptions.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
+from hashlib import sha256
 from math import isfinite, sqrt
 from statistics import pstdev
 from typing import Sequence
@@ -31,6 +32,14 @@ from .tactical_long import (
 from .tactical_long_data import TacticalMarketSnapshot, TacticalTimeframe
 
 
+THESIS_BINDING_PREFIX = "MEDIUM_HORIZON_THESIS_SHA256="
+FAST_VOL_RETURN_LOOKBACK = 20
+# The tactical adapter supports a minimum of 60 candles. Sixty closes contain
+# 59 close-to-close returns, so the slow baseline is explicitly 59 returns
+# rather than silently requiring a 61st candle that the adapter does not promise.
+SLOW_VOL_RETURN_LOOKBACK = 59
+
+
 class ThesisState(str, Enum):
     LONG_ALLOWED = "LONG_ALLOWED"
     OBSERVE = "OBSERVE"
@@ -48,6 +57,7 @@ class MediumHorizonLongContext:
     volatility_exposure_scalar: float
     reasons: tuple[str, ...]
     evidence: tuple[str, ...]
+    evidence_fingerprint: str
 
     @property
     def can_authorize_trade(self) -> bool:
@@ -72,8 +82,8 @@ def _realized_vol_pct(candles: Sequence[Candle], lookback: int) -> float:
 
 def _volatility_exposure_scalar(d1: Sequence[Candle]) -> float:
     """Reduce exposure in unusually volatile regimes; never tighten the stop."""
-    fast = _realized_vol_pct(d1, 20)
-    slow = _realized_vol_pct(d1, 60)
+    fast = _realized_vol_pct(d1, FAST_VOL_RETURN_LOOKBACK)
+    slow = _realized_vol_pct(d1, SLOW_VOL_RETURN_LOOKBACK)
     if slow <= 0:
         return 0.5
     ratio = fast / slow
@@ -168,6 +178,70 @@ def _post_confirmation_h4_rows(h4: Sequence[Candle], protected_swing: Swing) -> 
     return tuple(row for row in h4 if row.close_time > protected_swing.confirmed_at)
 
 
+def _valid_fingerprint(value: str) -> bool:
+    if len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _thesis_evidence_fingerprint(
+    *,
+    symbol: str,
+    decision_at: int,
+    d1: Sequence[Candle],
+    h4: Sequence[Candle],
+) -> str:
+    """Hash the exact point-in-time D1/H4 evidence used by the thesis.
+
+    The hash includes timestamps, availability and every OHLCV value. A later
+    correction reconstructed at the same historical decision cut therefore has
+    a different lineage and cannot silently re-authorize an old plan.
+    """
+    digest = sha256()
+    digest.update(f"medium-horizon-v1|{symbol}|{decision_at}".encode("ascii"))
+    for timeframe, rows in ((TacticalTimeframe.D1, d1), (TacticalTimeframe.H4, h4)):
+        for row in rows:
+            digest.update(
+                (
+                    f"|{timeframe.value}|{row.open_time}|{row.close_time}|{row.available_at}|"
+                    f"{float(row.open).hex()}|{float(row.high).hex()}|{float(row.low).hex()}|"
+                    f"{float(row.close).hex()}|{float(row.volume).hex()}"
+                ).encode("ascii")
+            )
+    return digest.hexdigest()
+
+
+def _plan_thesis_bindings(plan: TradePlan) -> tuple[str, ...]:
+    return tuple(item for item in plan.evidence if item.startswith(THESIS_BINDING_PREFIX))
+
+
+def bind_execution_plan(plan: TradePlan, context: MediumHorizonLongContext) -> TradePlan:
+    """Return an immutable plan copy bound to one exact thesis evidence vintage.
+
+    Existing bindings cannot be replaced. A caller that wants to act on a new
+    evidence vintage must create a new plan rather than mutating/reviving the old
+    setup lineage.
+    """
+    if plan.symbol != context.symbol:
+        raise ValueError("cannot bind plan to a different symbol thesis")
+    if plan.decision_at != context.decision_at:
+        raise ValueError("cannot bind plan to a different decision cut")
+    if not _valid_fingerprint(context.evidence_fingerprint):
+        raise ValueError("cannot bind plan to malformed thesis fingerprint")
+
+    expected = f"{THESIS_BINDING_PREFIX}{context.evidence_fingerprint}"
+    existing = _plan_thesis_bindings(plan)
+    if existing:
+        if len(existing) != 1 or existing[0] != expected:
+            raise ValueError("plan already carries a different or ambiguous thesis binding")
+        return plan
+    return replace(plan, evidence=plan.evidence + (expected,))
+
+
 def evaluate_medium_horizon_long(snapshot: TacticalMarketSnapshot, symbol: str) -> MediumHorizonLongContext:
     """Build the thesis from point-in-time-valid D1/H4 structure before execution noise."""
     symbol = symbol.upper()
@@ -176,6 +250,12 @@ def evaluate_medium_horizon_long(snapshot: TacticalMarketSnapshot, symbol: str) 
 
     d1 = _validated_frame(snapshot, symbol, TacticalTimeframe.D1)
     h4 = _validated_frame(snapshot, symbol, TacticalTimeframe.H4)
+    fingerprint = _thesis_evidence_fingerprint(
+        symbol=symbol,
+        decision_at=snapshot.decision_at,
+        d1=d1,
+        h4=h4,
+    )
     daily_state, _ = _structure(d1, TacticalTimeframe.D1)
     h4_state, h4_swings = _structure(h4, TacticalTimeframe.H4)
     protected_swing = _protected_h4_low(h4_swings)
@@ -195,6 +275,7 @@ def evaluate_medium_horizon_long(snapshot: TacticalMarketSnapshot, symbol: str) 
             volatility_exposure_scalar=scalar,
             reasons=tuple(reasons_out),
             evidence=tuple(evidence + (["CONFIRMED_H4_PROTECTED_LOW"] if invalidation is not None else [])),
+            evidence_fingerprint=fingerprint,
         )
 
     if daily_state is StructureState.BEARISH:
@@ -233,20 +314,27 @@ def validate_execution_plan(
     *,
     evaluated_at: int,
 ) -> tuple[bool, tuple[str, ...]]:
-    """Validate one immutable plan/context decision cut only.
+    """Validate one immutable plan/context decision cut and evidence vintage.
 
-    A READY/TRIGGERED plan is never re-authorized at a later cut. Later scans
-    must build a new TradePlan and a new MediumHorizonLongContext. This keeps the
-    original thesis lineage immutable and prevents a broken setup from silently
-    reactivating after a later recovery or newly confirmed protected low.
+    A READY/TRIGGERED plan is never re-authorized at a later cut or against a
+    reconstructed same-cut evidence vintage. Later scans or corrected evidence
+    must build a new context and a newly bound plan.
     """
     reasons: list[str] = []
     evaluation_is_valid = type(evaluated_at) is int and evaluated_at > 0
     if not evaluation_is_valid:
         reasons.append("INVALID_EXECUTION_EVALUATION_TIME")
-    else:
-        if evaluated_at != plan.decision_at or evaluated_at != context.decision_at:
-            reasons.append("PLAN_VALIDATION_CUT_MISMATCH")
+    elif evaluated_at != plan.decision_at or evaluated_at != context.decision_at:
+        reasons.append("PLAN_VALIDATION_CUT_MISMATCH")
+
+    fingerprint_valid = _valid_fingerprint(context.evidence_fingerprint)
+    if not fingerprint_valid:
+        reasons.append("THESIS_EVIDENCE_FINGERPRINT_INVALID")
+    bindings = _plan_thesis_bindings(plan)
+    if len(bindings) != 1:
+        reasons.append("THESIS_BINDING_MISSING_OR_AMBIGUOUS")
+    elif fingerprint_valid and bindings[0] != f"{THESIS_BINDING_PREFIX}{context.evidence_fingerprint}":
+        reasons.append("THESIS_EVIDENCE_FINGERPRINT_MISMATCH")
 
     if plan.symbol != context.symbol:
         reasons.append("PLAN_CONTEXT_SYMBOL_MISMATCH")
