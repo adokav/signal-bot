@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from math import sqrt
+from math import isfinite, sqrt
 from statistics import pstdev
 from typing import Sequence
 
@@ -90,21 +90,36 @@ def _protected_h4_low(swings: Sequence) -> float | None:
     return lows[-1].price if lows else None
 
 
+def _validate_cadence(candles: Sequence[Candle], timeframe: TacticalTimeframe) -> None:
+    """Reject sparse/mixed-cadence higher-timeframe evidence.
+
+    BTC/ETH spot trades continuously, so D1/H4 research bars are expected to be
+    exact contiguous UTC buckets. Gaps or mixed durations are data-quality
+    failures rather than neutral evidence.
+    """
+    expected = timeframe.seconds
+    for index, row in enumerate(candles):
+        if row.close_time - row.open_time != expected:
+            raise DataQualityError(f"{timeframe.value} candle duration mismatch")
+        if index:
+            previous = candles[index - 1]
+            if row.open_time - previous.open_time != expected or row.open_time != previous.close_time:
+                raise DataQualityError(f"{timeframe.value} candle cadence gap or overlap")
+
+
 def _validated_frame(
     snapshot: TacticalMarketSnapshot,
     symbol: str,
     timeframe: TacticalTimeframe,
 ) -> tuple[Candle, ...]:
-    """Revalidate the thesis frame at the exact replay/live decision cut.
-
-    TacticalMarketSnapshot can also be manually reconstructed, so the policy
-    layer must not assume ingestion-time validation has already happened.
-    """
-    return visible_closed_candles(
+    """Revalidate the thesis frame at the exact replay/live decision cut."""
+    rows = visible_closed_candles(
         snapshot.candles[symbol][timeframe],
         decision_at=snapshot.decision_at,
         max_staleness_seconds=timeframe.seconds * 2,
     )
+    _validate_cadence(rows, timeframe)
+    return rows
 
 
 def evaluate_medium_horizon_long(snapshot: TacticalMarketSnapshot, symbol: str) -> MediumHorizonLongContext:
@@ -141,6 +156,8 @@ def evaluate_medium_horizon_long(snapshot: TacticalMarketSnapshot, symbol: str) 
         return context(ThesisState.NO_LONG, reasons_out=("INSUFFICIENT_DAILY_STRUCTURE",))
     if h4_state is StructureState.BEARISH:
         return context(ThesisState.NO_LONG, reasons_out=("H4_STRUCTURE_BEARISH",))
+    if h4_state is StructureState.INSUFFICIENT_DATA:
+        return context(ThesisState.NO_LONG, reasons_out=("INSUFFICIENT_H4_STRUCTURE",))
     if protected_low is None:
         return context(ThesisState.NO_LONG, invalidation=None, reasons_out=("NO_CONFIRMED_H4_PROTECTED_LOW",))
 
@@ -158,14 +175,17 @@ def validate_execution_plan(plan: TradePlan, context: MediumHorizonLongContext) 
         reasons.append("PLAN_CONTEXT_SYMBOL_MISMATCH")
     if plan.decision_at != context.decision_at:
         reasons.append("PLAN_CONTEXT_DECISION_TIME_MISMATCH")
-    if plan.state is PlanState.INVALIDATED:
-        reasons.append("EXECUTION_PLAN_INVALIDATED")
+    if plan.state not in {PlanState.READY, PlanState.TRIGGERED}:
+        reasons.append("EXECUTION_PLAN_NOT_ACTIONABLE")
     if context.state is not ThesisState.LONG_ALLOWED:
         reasons.append("MEDIUM_HORIZON_LONG_NOT_ALLOWED")
-    if context.structural_invalidation is None:
+
+    invalidation = context.structural_invalidation
+    if invalidation is None or not isfinite(invalidation) or invalidation <= 0:
         reasons.append("STRUCTURAL_INVALIDATION_UNKNOWN")
-    elif plan.hard_stop >= context.structural_invalidation:
+    elif plan.hard_stop >= invalidation:
         reasons.append("HARD_STOP_INSIDE_H4_STRUCTURE")
+
     if reasons:
         return False, tuple(reasons)
     return True, ()
