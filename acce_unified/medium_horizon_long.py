@@ -90,20 +90,48 @@ def _protected_h4_low(swings: Sequence) -> float | None:
     return lows[-1].price if lows else None
 
 
-def _validate_cadence(candles: Sequence[Candle], timeframe: TacticalTimeframe) -> None:
-    """Reject sparse/mixed-cadence higher-timeframe evidence.
+def _validate_candle_values(candles: Sequence[Candle], timeframe: TacticalTimeframe) -> None:
+    """Fail closed on non-finite or impossible OHLCV evidence."""
+    for row in candles:
+        values = (row.open, row.high, row.low, row.close, row.volume)
+        if not all(isfinite(value) for value in values):
+            raise DataQualityError(f"{timeframe.value} candle contains non-finite OHLCV")
+        if min(row.open, row.high, row.low, row.close) <= 0 or row.volume < 0:
+            raise DataQualityError(f"{timeframe.value} candle contains invalid OHLCV")
+        if row.high < max(row.open, row.close) or row.low > min(row.open, row.close) or row.high < row.low:
+            raise DataQualityError(f"{timeframe.value} candle OHLC geometry is inconsistent")
 
-    BTC/ETH spot trades continuously, so D1/H4 research bars are expected to be
-    exact contiguous UTC buckets. Gaps or mixed durations are data-quality
-    failures rather than neutral evidence.
+
+def _validate_cadence(candles: Sequence[Candle], timeframe: TacticalTimeframe) -> None:
+    """Reject sparse, shifted, or mixed-cadence higher-timeframe evidence.
+
+    MEXC encodes a bucket's close timestamp inclusively, so a 4H candle can be
+    represented as [open, open+14399]. Replay fixtures may use an exclusive
+    boundary [open, open+14400]. Both are accepted, but one frame must use one
+    convention consistently. Bucket opens must still be exact UTC boundaries.
     """
     expected = timeframe.seconds
+    if not candles:
+        raise DataQualityError(f"no {timeframe.value} candles")
+
+    first_duration = candles[0].close_time - candles[0].open_time
+    if first_duration not in {expected - 1, expected}:
+        raise DataQualityError(f"{timeframe.value} candle duration mismatch")
+    inclusive_close = first_duration == expected - 1
+
     for index, row in enumerate(candles):
-        if row.close_time - row.open_time != expected:
+        if row.open_time % expected != 0:
+            raise DataQualityError(f"{timeframe.value} candle is not UTC bucket aligned")
+        duration = row.close_time - row.open_time
+        required_duration = expected - 1 if inclusive_close else expected
+        if duration != required_duration:
             raise DataQualityError(f"{timeframe.value} candle duration mismatch")
         if index:
             previous = candles[index - 1]
-            if row.open_time - previous.open_time != expected or row.open_time != previous.close_time:
+            if row.open_time - previous.open_time != expected:
+                raise DataQualityError(f"{timeframe.value} candle cadence gap or overlap")
+            expected_open = previous.close_time + 1 if inclusive_close else previous.close_time
+            if row.open_time != expected_open:
                 raise DataQualityError(f"{timeframe.value} candle cadence gap or overlap")
 
 
@@ -118,6 +146,7 @@ def _validated_frame(
         decision_at=snapshot.decision_at,
         max_staleness_seconds=timeframe.seconds * 2,
     )
+    _validate_candle_values(rows, timeframe)
     _validate_cadence(rows, timeframe)
     return rows
 
@@ -160,6 +189,15 @@ def evaluate_medium_horizon_long(snapshot: TacticalMarketSnapshot, symbol: str) 
         return context(ThesisState.NO_LONG, reasons_out=("INSUFFICIENT_H4_STRUCTURE",))
     if protected_low is None:
         return context(ThesisState.NO_LONG, invalidation=None, reasons_out=("NO_CONFIRMED_H4_PROTECTED_LOW",))
+
+    latest_h4 = h4[-1]
+    if latest_h4.close <= protected_low:
+        return context(ThesisState.NO_LONG, reasons_out=("H4_PROTECTED_LOW_CLOSE_BREAK",))
+    if latest_h4.low <= protected_low:
+        # A wick/sweep below the protected low is not automatically a destroyed
+        # medium-horizon thesis, but it is also not permission to initiate risk
+        # until higher-timeframe structure confirms the reclaim.
+        return context(ThesisState.OBSERVE, reasons_out=("H4_PROTECTED_LOW_WICK_BREACH",))
 
     if daily_state is StructureState.BULLISH:
         if scalar < 1.0:
