@@ -56,22 +56,34 @@ def _context(*, state=ThesisState.LONG_ALLOWED, invalidation=95.0, symbol="BTCUS
     )
 
 
-def _fresh_thesis_snapshot():
-    """Retimestamp the generic fixture so every timeframe is fresh at one cut."""
+def _fresh_thesis_snapshot(*, inclusive_close: bool = True):
+    """Retimestamp the generic fixture into fresh, UTC-aligned buckets.
+
+    MEXC uses inclusive close timestamps (open+seconds-1). Replay fixtures may
+    use an exclusive boundary (open+seconds); the policy accepts either when a
+    whole frame uses one convention consistently.
+    """
     snapshot = _snapshot()
     decision_at = snapshot.decision_at
     candles = {}
     for symbol, frames in snapshot.candles.items():
         candles[symbol] = {}
         for timeframe, rows in frames.items():
-            final_close = decision_at - max(1, timeframe.seconds // 2)
-            first_open = final_close - len(rows) * timeframe.seconds
+            current_bucket_open = (decision_at // timeframe.seconds) * timeframe.seconds
+            final_open = current_bucket_open - timeframe.seconds
+            first_open = final_open - (len(rows) - 1) * timeframe.seconds
             shifted = []
             for index, row in enumerate(rows):
                 open_time = first_open + index * timeframe.seconds
-                close_time = open_time + timeframe.seconds
+                close_time = open_time + timeframe.seconds - (1 if inclusive_close else 0)
                 shifted.append(replace(row, open_time=open_time, close_time=close_time, available_at=close_time))
             candles[symbol][timeframe] = tuple(shifted)
+    return replace(snapshot, candles=candles)
+
+
+def _replace_frame(snapshot, symbol, timeframe, rows):
+    candles = {key: dict(frames) for key, frames in snapshot.candles.items()}
+    candles[symbol][timeframe] = tuple(rows)
     return replace(snapshot, candles=candles)
 
 
@@ -123,12 +135,18 @@ def test_execution_validator_rejects_nonfinite_structural_invalidation():
     assert "STRUCTURAL_INVALIDATION_UNKNOWN" in reasons
 
 
-def test_medium_horizon_context_never_has_trade_authority_and_preserves_cut():
-    snapshot = _fresh_thesis_snapshot()
+def test_medium_horizon_accepts_real_mexc_inclusive_close_semantics():
+    snapshot = _fresh_thesis_snapshot(inclusive_close=True)
     context = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
     assert context.can_authorize_trade is False
     assert context.decision_at == snapshot.decision_at
     assert 0.0 < context.volatility_exposure_scalar <= 1.0
+
+
+def test_medium_horizon_accepts_exclusive_replay_bucket_semantics():
+    snapshot = _fresh_thesis_snapshot(inclusive_close=False)
+    context = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
+    assert context.decision_at == snapshot.decision_at
 
 
 def test_volatility_changes_exposure_scalar_not_structural_invalidation():
@@ -141,40 +159,27 @@ def test_medium_horizon_rejects_future_or_open_daily_candle():
     snapshot = _fresh_thesis_snapshot()
     d1 = list(snapshot.candles["BTCUSDT"][TacticalTimeframe.D1])
     d1[-1] = replace(d1[-1], close_time=snapshot.decision_at + 60, available_at=snapshot.decision_at + 60)
-    candles = {symbol: dict(frames) for symbol, frames in snapshot.candles.items()}
-    candles["BTCUSDT"][TacticalTimeframe.D1] = tuple(d1)
     with pytest.raises(DataQualityError, match="future or open candle"):
-        evaluate_medium_horizon_long(replace(snapshot, candles=candles), "BTCUSDT")
+        evaluate_medium_horizon_long(_replace_frame(snapshot, "BTCUSDT", TacticalTimeframe.D1, d1), "BTCUSDT")
 
 
 def test_medium_horizon_rejects_stale_h4_frame():
     snapshot = _fresh_thesis_snapshot()
+    shift = 10 * TacticalTimeframe.H4.seconds
     h4 = tuple(
-        replace(row, open_time=row.open_time - 10 * TacticalTimeframe.H4.seconds,
-                close_time=row.close_time - 10 * TacticalTimeframe.H4.seconds,
-                available_at=row.available_at - 10 * TacticalTimeframe.H4.seconds)
+        replace(row, open_time=row.open_time - shift, close_time=row.close_time - shift, available_at=row.available_at - shift)
         for row in snapshot.candles["BTCUSDT"][TacticalTimeframe.H4]
     )
-    candles = {symbol: dict(frames) for symbol, frames in snapshot.candles.items()}
-    candles["BTCUSDT"][TacticalTimeframe.H4] = h4
     with pytest.raises(DataQualityError, match="latest candle is stale"):
-        evaluate_medium_horizon_long(replace(snapshot, candles=candles), "BTCUSDT")
+        evaluate_medium_horizon_long(_replace_frame(snapshot, "BTCUSDT", TacticalTimeframe.H4, h4), "BTCUSDT")
 
 
 def test_medium_horizon_rejects_h4_cadence_gap():
     snapshot = _fresh_thesis_snapshot()
     h4 = list(snapshot.candles["BTCUSDT"][TacticalTimeframe.H4])
-    last = h4[-1]
-    h4[-1] = replace(
-        last,
-        open_time=last.open_time + 60,
-        close_time=last.close_time + 60,
-        available_at=last.available_at + 60,
-    )
-    candles = {symbol: dict(frames) for symbol, frames in snapshot.candles.items()}
-    candles["BTCUSDT"][TacticalTimeframe.H4] = tuple(h4)
+    del h4[-2]
     with pytest.raises(DataQualityError, match="cadence gap or overlap"):
-        evaluate_medium_horizon_long(replace(snapshot, candles=candles), "BTCUSDT")
+        evaluate_medium_horizon_long(_replace_frame(snapshot, "BTCUSDT", TacticalTimeframe.H4, h4), "BTCUSDT")
 
 
 def test_medium_horizon_rejects_h4_duration_mismatch():
@@ -182,10 +187,26 @@ def test_medium_horizon_rejects_h4_duration_mismatch():
     h4 = list(snapshot.candles["BTCUSDT"][TacticalTimeframe.H4])
     last = h4[-1]
     h4[-1] = replace(last, close_time=last.close_time - 60, available_at=last.close_time - 60)
-    candles = {symbol: dict(frames) for symbol, frames in snapshot.candles.items()}
-    candles["BTCUSDT"][TacticalTimeframe.H4] = tuple(h4)
     with pytest.raises(DataQualityError, match="candle duration mismatch"):
-        evaluate_medium_horizon_long(replace(snapshot, candles=candles), "BTCUSDT")
+        evaluate_medium_horizon_long(_replace_frame(snapshot, "BTCUSDT", TacticalTimeframe.H4, h4), "BTCUSDT")
+
+
+def test_medium_horizon_rejects_shifted_non_utc_h4_buckets():
+    snapshot = _fresh_thesis_snapshot()
+    h4 = tuple(
+        replace(row, open_time=row.open_time - 60, close_time=row.close_time - 60, available_at=row.available_at - 60)
+        for row in snapshot.candles["BTCUSDT"][TacticalTimeframe.H4]
+    )
+    with pytest.raises(DataQualityError, match="not UTC bucket aligned"):
+        evaluate_medium_horizon_long(_replace_frame(snapshot, "BTCUSDT", TacticalTimeframe.H4, h4), "BTCUSDT")
+
+
+def test_medium_horizon_rejects_nonfinite_h4_ohlcv():
+    snapshot = _fresh_thesis_snapshot()
+    h4 = list(snapshot.candles["BTCUSDT"][TacticalTimeframe.H4])
+    h4[-1] = replace(h4[-1], high=float("nan"))
+    with pytest.raises(DataQualityError, match="non-finite OHLCV"):
+        evaluate_medium_horizon_long(_replace_frame(snapshot, "BTCUSDT", TacticalTimeframe.H4, h4), "BTCUSDT")
 
 
 def test_insufficient_h4_structure_is_no_long_even_with_a_confirmed_low(monkeypatch):
@@ -198,3 +219,37 @@ def test_insufficient_h4_structure_is_no_long_even_with_a_confirmed_low(monkeypa
     context = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
     assert context.state is ThesisState.NO_LONG
     assert "INSUFFICIENT_H4_STRUCTURE" in context.reasons
+
+
+def test_newly_closed_h4_break_below_protected_low_blocks_long(monkeypatch):
+    snapshot = _fresh_thesis_snapshot()
+    h4 = list(snapshot.candles["BTCUSDT"][TacticalTimeframe.H4])
+    last = h4[-1]
+    protected = last.low - 10.0
+    h4[-1] = replace(last, open=protected + 5.0, high=protected + 10.0, low=protected - 2.0, close=protected - 1.0)
+    snapshot = _replace_frame(snapshot, "BTCUSDT", TacticalTimeframe.H4, h4)
+    calls = iter((
+        (StructureState.BULLISH, ()),
+        (StructureState.BULLISH, (SimpleNamespace(kind=SwingKind.LOW, price=protected),)),
+    ))
+    monkeypatch.setattr(medium_horizon, "_structure", lambda candles, timeframe: next(calls))
+    context = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
+    assert context.state is ThesisState.NO_LONG
+    assert "H4_PROTECTED_LOW_CLOSE_BREAK" in context.reasons
+
+
+def test_h4_wick_below_protected_low_is_observe_not_new_long(monkeypatch):
+    snapshot = _fresh_thesis_snapshot()
+    h4 = list(snapshot.candles["BTCUSDT"][TacticalTimeframe.H4])
+    last = h4[-1]
+    protected = last.low - 10.0
+    h4[-1] = replace(last, open=protected + 3.0, high=protected + 10.0, low=protected - 2.0, close=protected + 5.0)
+    snapshot = _replace_frame(snapshot, "BTCUSDT", TacticalTimeframe.H4, h4)
+    calls = iter((
+        (StructureState.BULLISH, ()),
+        (StructureState.BULLISH, (SimpleNamespace(kind=SwingKind.LOW, price=protected),)),
+    ))
+    monkeypatch.setattr(medium_horizon, "_structure", lambda candles, timeframe: next(calls))
+    context = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
+    assert context.state is ThesisState.OBSERVE
+    assert "H4_PROTECTED_LOW_WICK_BREACH" in context.reasons
