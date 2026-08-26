@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from acce_unified.tactical_long import (
@@ -32,6 +34,14 @@ def _candle(index: int, *, high: float, low: float, close: float | None = None) 
         close=close if close is not None else (high + low) / 2,
         volume=100 + index,
     )
+
+
+@pytest.mark.parametrize("malformed", [float("nan"), float("inf"), 1.5, "901", True])
+def test_candle_rejects_malformed_ingestion_vintage(malformed):
+    candle = _candle(0, high=101.0, low=99.0)
+
+    with pytest.raises(DataQualityError, match="positive finite integer"):
+        replace(candle, ingested_at=malformed)
 
 
 def test_open_or_future_candle_is_rejected_instead_of_silently_dropped():
