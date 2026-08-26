@@ -104,7 +104,13 @@ def _fresh_thesis_snapshot(*, inclusive_close: bool = True):
             for index, row in enumerate(rows):
                 open_time = first_open + index * timeframe.seconds
                 close_time = open_time + timeframe.seconds - (1 if inclusive_close else 0)
-                shifted.append(replace(row, open_time=open_time, close_time=close_time, available_at=close_time))
+                shifted.append(replace(
+                    row,
+                    open_time=open_time,
+                    close_time=close_time,
+                    available_at=close_time,
+                    ingested_at=decision_at,
+                ))
             candles[symbol][timeframe] = tuple(shifted)
     return replace(snapshot, candles=candles)
 
@@ -292,6 +298,20 @@ def test_medium_horizon_rejects_current_download_backdated_to_historical_cut():
         evaluate_medium_horizon_long(backdated, "BTCUSDT")
 
 
+def test_medium_horizon_rejects_row_revision_first_seen_after_historical_cut():
+    snapshot = _fresh_thesis_snapshot()
+    d1 = list(snapshot.candles["BTCUSDT"][TacticalTimeframe.D1])
+    d1[-10] = replace(d1[-10], ingested_at=snapshot.decision_at + 1)
+
+    with pytest.raises(DataQualityError, match="first seen after decision cut"):
+        _replace_frame(
+            replace(snapshot, evidence_ingested_at=snapshot.decision_at),
+            "BTCUSDT",
+            TacticalTimeframe.D1,
+            d1,
+        )
+
+
 def test_thesis_fingerprint_is_deterministic_and_changes_with_same_cut_revision():
     snapshot = _fresh_thesis_snapshot()
     original = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
@@ -328,8 +348,16 @@ def test_thesis_fingerprint_changes_when_first_seen_vintage_changes():
         )
         for symbol, quote in snapshot.quotes.items()
     }
+    earlier_candles = {
+        symbol: {
+            timeframe: tuple(replace(row, ingested_at=earlier_ingestion) for row in rows)
+            for timeframe, rows in frames.items()
+        }
+        for symbol, frames in snapshot.candles.items()
+    }
     earlier = replace(
         snapshot,
+        candles=earlier_candles,
         quotes=earlier_quotes,
         evidence_ingested_at=earlier_ingestion,
     )
@@ -340,8 +368,10 @@ def test_thesis_fingerprint_changes_when_first_seen_vintage_changes():
     )
 
     assert earlier.decision_at == at_cut.decision_at == snapshot.decision_at
-    assert earlier.candles["BTCUSDT"][TacticalTimeframe.D1] == at_cut.candles["BTCUSDT"][TacticalTimeframe.D1]
-    assert earlier.candles["BTCUSDT"][TacticalTimeframe.H4] == at_cut.candles["BTCUSDT"][TacticalTimeframe.H4]
+    for timeframe in (TacticalTimeframe.D1, TacticalTimeframe.H4):
+        earlier_rows = earlier.candles["BTCUSDT"][timeframe]
+        at_cut_rows = at_cut.candles["BTCUSDT"][timeframe]
+        assert tuple(replace(row, ingested_at=at_cut.decision_at) for row in earlier_rows) == at_cut_rows
     assert evaluate_medium_horizon_long(earlier, "BTCUSDT").evidence_fingerprint != evaluate_medium_horizon_long(at_cut, "BTCUSDT").evidence_fingerprint
 
 
@@ -365,7 +395,12 @@ def test_volatility_changes_exposure_scalar_not_structural_invalidation():
 def test_medium_horizon_rejects_future_or_open_daily_candle():
     snapshot = _fresh_thesis_snapshot()
     d1 = list(snapshot.candles["BTCUSDT"][TacticalTimeframe.D1])
-    d1[-1] = replace(d1[-1], close_time=snapshot.decision_at + 60, available_at=snapshot.decision_at + 60)
+    d1[-1] = replace(
+        d1[-1],
+        close_time=snapshot.decision_at + 60,
+        available_at=snapshot.decision_at + 60,
+        ingested_at=snapshot.decision_at + 60,
+    )
     with pytest.raises(DataQualityError, match="future or open candle"):
         evaluate_medium_horizon_long(_replace_frame(snapshot, "BTCUSDT", TacticalTimeframe.D1, d1), "BTCUSDT")
 
