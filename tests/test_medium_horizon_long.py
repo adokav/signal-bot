@@ -5,8 +5,10 @@ import pytest
 
 import acce_unified.medium_horizon_long as medium_horizon
 from acce_unified.medium_horizon_long import (
+    THESIS_BINDING_PREFIX,
     MediumHorizonLongContext,
     ThesisState,
+    bind_execution_plan,
     evaluate_medium_horizon_long,
     validate_execution_plan,
 )
@@ -23,9 +25,18 @@ from tests.test_tactical_long_engine import _snapshot
 
 
 DECISION_AT = 1_700_000_000
+DEFAULT_THESIS_FP = "a" * 64
 
 
-def _plan(*, stop: float, symbol: str = "BTCUSDT", state: PlanState = PlanState.READY, decision_at: int = DECISION_AT) -> TradePlan:
+def _plan(
+    *,
+    stop: float,
+    symbol: str = "BTCUSDT",
+    state: PlanState = PlanState.READY,
+    decision_at: int = DECISION_AT,
+    thesis_fingerprint: str | None = DEFAULT_THESIS_FP,
+) -> TradePlan:
+    evidence = () if thesis_fingerprint is None else (f"{THESIS_BINDING_PREFIX}{thesis_fingerprint}",)
     return TradePlan(
         symbol=symbol,
         setup=TacticalSetup.LIQUIDITY_SWEEP_RECLAIM,
@@ -39,10 +50,18 @@ def _plan(*, stop: float, symbol: str = "BTCUSDT", state: PlanState = PlanState.
         target_2=120.0,
         estimated_round_trip_cost_pct=0.05,
         expires_at=decision_at + 86_400,
+        evidence=evidence,
     )
 
 
-def _context(*, state=ThesisState.LONG_ALLOWED, invalidation=95.0, symbol="BTCUSDT", decision_at=DECISION_AT):
+def _context(
+    *,
+    state=ThesisState.LONG_ALLOWED,
+    invalidation=95.0,
+    symbol="BTCUSDT",
+    decision_at=DECISION_AT,
+    evidence_fingerprint: str = DEFAULT_THESIS_FP,
+):
     return MediumHorizonLongContext(
         symbol=symbol,
         decision_at=decision_at,
@@ -53,6 +72,7 @@ def _context(*, state=ThesisState.LONG_ALLOWED, invalidation=95.0, symbol="BTCUS
         volatility_exposure_scalar=1.0,
         reasons=(),
         evidence=("TEST",),
+        evidence_fingerprint=evidence_fingerprint,
     )
 
 
@@ -196,11 +216,43 @@ def test_triggered_plan_cannot_be_reauthorized_at_later_cut():
     assert "PLAN_VALIDATION_CUT_MISMATCH" in reasons
 
 
+def test_execution_validator_requires_exact_thesis_binding():
+    context = _context()
+    allowed, reasons = _validate(_plan(stop=94.0, thesis_fingerprint=None), context)
+    assert allowed is False
+    assert "THESIS_BINDING_MISSING_OR_AMBIGUOUS" in reasons
+
+    allowed, reasons = _validate(_plan(stop=94.0, thesis_fingerprint="b" * 64), context)
+    assert allowed is False
+    assert "THESIS_EVIDENCE_FINGERPRINT_MISMATCH" in reasons
+
+
+def test_bind_execution_plan_persists_one_immutable_thesis_fingerprint():
+    context = _context()
+    unbound = _plan(stop=94.0, thesis_fingerprint=None)
+    bound = bind_execution_plan(unbound, context)
+    assert unbound.evidence == ()
+    assert bound.evidence == (f"{THESIS_BINDING_PREFIX}{context.evidence_fingerprint}",)
+    assert bind_execution_plan(bound, context) is bound
+    with pytest.raises(ValueError, match="different or ambiguous"):
+        bind_execution_plan(bound, _context(evidence_fingerprint="b" * 64))
+
+
+def test_same_cut_reconstructed_evidence_cannot_reauthorize_old_plan():
+    old_context = _context(evidence_fingerprint="a" * 64)
+    revised_context = _context(evidence_fingerprint="b" * 64)
+    old_plan = bind_execution_plan(_plan(stop=94.0, thesis_fingerprint=None), old_context)
+    allowed, reasons = _validate(old_plan, revised_context)
+    assert allowed is False
+    assert "THESIS_EVIDENCE_FINGERPRINT_MISMATCH" in reasons
+
+
 def test_medium_horizon_accepts_real_mexc_inclusive_close_semantics():
     snapshot = _fresh_thesis_snapshot(inclusive_close=True)
     context = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
     assert context.can_authorize_trade is False
     assert context.decision_at == snapshot.decision_at
+    assert len(context.evidence_fingerprint) == 64
     assert 0.0 < context.volatility_exposure_scalar <= 1.0
 
 
@@ -208,6 +260,39 @@ def test_medium_horizon_accepts_exclusive_replay_bucket_semantics():
     snapshot = _fresh_thesis_snapshot(inclusive_close=False)
     context = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
     assert context.decision_at == snapshot.decision_at
+
+
+def test_thesis_fingerprint_is_deterministic_and_changes_with_same_cut_revision():
+    snapshot = _fresh_thesis_snapshot()
+    original = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
+    repeated = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
+    assert repeated.evidence_fingerprint == original.evidence_fingerprint
+
+    d1 = list(snapshot.candles["BTCUSDT"][TacticalTimeframe.D1])
+    revised = d1[-10]
+    d1[-10] = replace(revised, volume=revised.volume + 1.0)
+    revised_context = evaluate_medium_horizon_long(
+        _replace_frame(snapshot, "BTCUSDT", TacticalTimeframe.D1, d1),
+        "BTCUSDT",
+    )
+    assert revised_context.decision_at == original.decision_at
+    assert revised_context.evidence_fingerprint != original.evidence_fingerprint
+
+    old_plan = bind_execution_plan(_plan(stop=94.0, thesis_fingerprint=None), original)
+    allowed, reasons = validate_execution_plan(old_plan, revised_context, evaluated_at=original.decision_at)
+    assert allowed is False
+    assert "THESIS_EVIDENCE_FINGERPRINT_MISMATCH" in reasons
+
+
+def test_medium_horizon_supports_adapter_minimum_of_60_daily_candles():
+    snapshot = _fresh_thesis_snapshot()
+    d1 = snapshot.candles["BTCUSDT"][TacticalTimeframe.D1][-60:]
+    context = evaluate_medium_horizon_long(
+        _replace_frame(snapshot, "BTCUSDT", TacticalTimeframe.D1, d1),
+        "BTCUSDT",
+    )
+    assert context.decision_at == snapshot.decision_at
+    assert 0.0 < context.volatility_exposure_scalar <= 1.0
 
 
 def test_volatility_changes_exposure_scalar_not_structural_invalidation():
