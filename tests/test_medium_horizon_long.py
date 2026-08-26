@@ -1,14 +1,23 @@
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
+import acce_unified.medium_horizon_long as medium_horizon
 from acce_unified.medium_horizon_long import (
     MediumHorizonLongContext,
     ThesisState,
     evaluate_medium_horizon_long,
     validate_execution_plan,
 )
-from acce_unified.tactical_long import DataQualityError, PlanState, StructureState, TacticalSetup, TradePlan
+from acce_unified.tactical_long import (
+    DataQualityError,
+    PlanState,
+    StructureState,
+    SwingKind,
+    TacticalSetup,
+    TradePlan,
+)
 from acce_unified.tactical_long_data import TacticalTimeframe
 from tests.test_tactical_long_engine import _snapshot
 
@@ -102,6 +111,18 @@ def test_execution_validator_never_revives_invalidated_plan():
     assert "EXECUTION_PLAN_INVALIDATED" in reasons
 
 
+def test_execution_validator_rejects_observe_plan_as_non_actionable():
+    allowed, reasons = validate_execution_plan(_plan(stop=94.0, state=PlanState.OBSERVE), _context())
+    assert allowed is False
+    assert "EXECUTION_PLAN_NOT_ACTIONABLE" in reasons
+
+
+def test_execution_validator_rejects_nonfinite_structural_invalidation():
+    allowed, reasons = validate_execution_plan(_plan(stop=94.0), _context(invalidation=float("nan")))
+    assert allowed is False
+    assert "STRUCTURAL_INVALIDATION_UNKNOWN" in reasons
+
+
 def test_medium_horizon_context_never_has_trade_authority_and_preserves_cut():
     snapshot = _fresh_thesis_snapshot()
     context = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
@@ -138,3 +159,42 @@ def test_medium_horizon_rejects_stale_h4_frame():
     candles["BTCUSDT"][TacticalTimeframe.H4] = h4
     with pytest.raises(DataQualityError, match="latest candle is stale"):
         evaluate_medium_horizon_long(replace(snapshot, candles=candles), "BTCUSDT")
+
+
+def test_medium_horizon_rejects_h4_cadence_gap():
+    snapshot = _fresh_thesis_snapshot()
+    h4 = list(snapshot.candles["BTCUSDT"][TacticalTimeframe.H4])
+    last = h4[-1]
+    h4[-1] = replace(
+        last,
+        open_time=last.open_time + 60,
+        close_time=last.close_time + 60,
+        available_at=last.available_at + 60,
+    )
+    candles = {symbol: dict(frames) for symbol, frames in snapshot.candles.items()}
+    candles["BTCUSDT"][TacticalTimeframe.H4] = tuple(h4)
+    with pytest.raises(DataQualityError, match="cadence gap or overlap"):
+        evaluate_medium_horizon_long(replace(snapshot, candles=candles), "BTCUSDT")
+
+
+def test_medium_horizon_rejects_h4_duration_mismatch():
+    snapshot = _fresh_thesis_snapshot()
+    h4 = list(snapshot.candles["BTCUSDT"][TacticalTimeframe.H4])
+    last = h4[-1]
+    h4[-1] = replace(last, close_time=last.close_time - 60, available_at=last.close_time - 60)
+    candles = {symbol: dict(frames) for symbol, frames in snapshot.candles.items()}
+    candles["BTCUSDT"][TacticalTimeframe.H4] = tuple(h4)
+    with pytest.raises(DataQualityError, match="candle duration mismatch"):
+        evaluate_medium_horizon_long(replace(snapshot, candles=candles), "BTCUSDT")
+
+
+def test_insufficient_h4_structure_is_no_long_even_with_a_confirmed_low(monkeypatch):
+    snapshot = _fresh_thesis_snapshot()
+    calls = iter((
+        (StructureState.BULLISH, ()),
+        (StructureState.INSUFFICIENT_DATA, (SimpleNamespace(kind=SwingKind.LOW, price=95.0),)),
+    ))
+    monkeypatch.setattr(medium_horizon, "_structure", lambda candles, timeframe: next(calls))
+    context = evaluate_medium_horizon_long(snapshot, "BTCUSDT")
+    assert context.state is ThesisState.NO_LONG
+    assert "INSUFFICIENT_H4_STRUCTURE" in context.reasons
