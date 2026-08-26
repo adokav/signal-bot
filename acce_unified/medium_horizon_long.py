@@ -175,7 +175,9 @@ def validate_execution_plan(plan: TradePlan, context: MediumHorizonLongContext) 
         reasons.append("PLAN_CONTEXT_SYMBOL_MISMATCH")
     if plan.decision_at != context.decision_at:
         reasons.append("PLAN_CONTEXT_DECISION_TIME_MISMATCH")
-    if plan.state not in {PlanState.READY, PlanState.TRIGGERED}:
+    if plan.state is PlanState.INVALIDATED:
+        reasons.append("EXECUTION_PLAN_INVALIDATED")
+    elif plan.state not in {PlanState.READY, PlanState.TRIGGERED}:
         reasons.append("EXECUTION_PLAN_NOT_ACTIONABLE")
     if context.state is not ThesisState.LONG_ALLOWED:
         reasons.append("MEDIUM_HORIZON_LONG_NOT_ALLOWED")
