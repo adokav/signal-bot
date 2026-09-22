@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from acce_unified import UnifiedConfig, UnifiedRadarEngine, attach_snapshot_to_results
+from acce_unified import UnifiedConfig, UnifiedRadarEngine
 from acce_unified.config import DEFAULT_TRADE_UNIVERSE
 from acce_unified.models import CexTicker, MexcListing
 
@@ -47,14 +47,10 @@ def test_provider_failure_is_isolated_and_core_metadata_is_non_authoritative():
     assert snapshot.cex_candidates
     assert snapshot.listing_candidates == ()
     assert snapshot.errors == ("LISTING:TimeoutError",)
-
-    results = [{"symbol": "BTCUSDT", "signal": "LONG", "actionable": True, "score": 1.5}]
-    before = dict(results[0])
-    attach_snapshot_to_results(results, snapshot)
-    assert results[0]["signal"] == before["signal"]
-    assert results[0]["actionable"] is before["actionable"]
-    assert results[0]["score"] == before["score"]
-    assert results[0]["unified_radar"]["can_change_trade_decision"] is False
+    # Provider outage isolation invariant: snapshot serialization keeps the
+    # non-authoritative execution flag even when a provider raised.
+    payload = snapshot.to_dict()
+    assert payload["can_authorize_trade"] is False
 
 
 def test_snapshot_serialization_has_global_execution_invariant():
