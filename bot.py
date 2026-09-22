@@ -12,7 +12,7 @@ from typing import Any
 import requests
 from flask import Flask, jsonify
 
-from acce_unified import UnifiedConfig, UnifiedRadarEngine
+from acce_unified import UnifiedConfig, UnifiedRadarEngine, build_trade_universe
 from acce_unified.listing_fundamentals import ListingFundamentalMetricsProvider
 from acce_unified.tactical_long_data import MexcTacticalMarketData
 from acce_unified.tactical_long_engine import TacticalLongEngine
@@ -40,7 +40,8 @@ FUNDAMENTAL_PROVIDER = ListingFundamentalMetricsProvider(
     cache_ttl_seconds=CONFIG.fundamental_cache_ttl_seconds,
     max_assets=CONFIG.fundamental_max_assets,
 )
-ENGINE = UnifiedRadarEngine(CONFIG, {}, fundamental_provider=FUNDAMENTAL_PROVIDER)
+TRADE_UNIVERSE = build_trade_universe()
+ENGINE = UnifiedRadarEngine(CONFIG, TRADE_UNIVERSE, fundamental_provider=FUNDAMENTAL_PROVIDER)
 TACTICAL_DATA = MexcTacticalMarketData(timeout_seconds=CONFIG.request_timeout_seconds)
 TACTICAL_ENGINE = TacticalLongEngine()
 APP = Flask(__name__)
@@ -90,14 +91,27 @@ def _save_state() -> None:
 def _api(method: str, payload: dict[str, Any] | None = None) -> Any:
     if not TOKEN:
         return None
-    response = HTTP.post(
-        f"https://api.telegram.org/bot{TOKEN}/{method}",
-        json=payload or {}, timeout=20,
-    )
-    response.raise_for_status()
-    body = response.json()
+    try:
+        response = HTTP.post(
+            f"https://api.telegram.org/bot{TOKEN}/{method}",
+            json=payload or {}, timeout=20,
+        )
+    except requests.RequestException as exc:
+        # Request URL and exception text can contain the bot token. Strip both.
+        raise RuntimeError(f"telegram_transport_error:{type(exc).__name__}") from None
+    if not response.ok:
+        # Response body may echo the URL, headers, or query params. Do not
+        # forward provider text into logs or exceptions.
+        raise RuntimeError(f"telegram_http_{response.status_code}:{method}")
+    try:
+        body = response.json()
+    except ValueError:
+        raise RuntimeError(f"telegram_bad_json:{method}") from None
     if not body.get("ok"):
-        raise RuntimeError(body.get("description") or method)
+        # Telegram description text is safe (does not contain the token) but
+        # keep a short fixed prefix so downstream logs cannot be spoofed.
+        description = str(body.get("description") or method)[:200]
+        raise RuntimeError(f"telegram_api_error:{description}")
     return body.get("result")
 
 

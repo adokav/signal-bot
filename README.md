@@ -1,11 +1,17 @@
 # Signal Bot v5 Core
 
-Signal Bot artık yalnız iki MEXC fırsat motorundan oluşur:
+Signal Bot şu an üç radar + bir macro observation daemon barındırır:
 
-1. **MEXC Likit 100 Long İlk 3**
-2. **MEXC doğrulanmış New Listing Patlama Radarı**
+1. **BTC / ETH Taktik Long Radarı** (MEXC spot; deterministik setup + R/R invariantları)
+2. **MEXC Likit 100 Long İlk 3** (MEXC 24s hacim, teknik + arz + rejim skoru)
+3. **MEXC Doğrulanmış New Listing Patlama Radarı** (duyuru + exchangeInfo diff teyidi)
+4. **Macro veri kolektörü** (FRED/BOJ, `run_service.py` ile; sadece observability, radar
+   skorlarını etkilemez)
 
-Eski çok amaçlı ajan, dinamik işlem evreni, Robinhood yan radarı, bağımsız sosyal/temel menüler, otomatik ağırlık öğrenme, ML sanal işlemler, parametre önerileri ve karmaşık Telegram komut merkezi üretim giriş noktasından kaldırılmıştır.
+> **Evrim durumu:** Bu üç radar SHADOW/research modunda çalışır ve *hiçbirinin* forward-return
+> edge'i henüz out-of-sample olarak doğrulanmamıştır. Yol haritası ve öncelikler
+> `docs/EVOLUTION_ROADMAP.md` içinde; kaldırılacak ölü modül envanteri
+> `docs/DEAD_CODE_AUDIT.md` içinde.
 
 ## Güvenlik sınırı
 
@@ -30,17 +36,20 @@ Bu sürüm `SHADOW / RADAR ONLY` çalışır. Emir oluşturmaz, API anahtarıyla
 
 ## Telegram
 
-Yalnız beş komut vardır:
+Altı komut vardır:
 
 ```text
-/panel   Sade kontrol paneli
-/longs   MEXC Likit 100 Long İlk 3
-/new     MEXC yeni listeleme adayları
-/status  Tarama ve veri sağlığı
-/scan    Şimdi yeniden tara
+/panel     Sade kontrol paneli
+/tactical  BTC ve ETH taktik long giriş/stop radarı
+/longs     MEXC Likit 100 Long İlk 3
+/new       MEXC yeni listeleme adayları
+/status    Tarama ve veri sağlığı
+/scan      Şimdi yeniden tara
 ```
 
-Eski `/social`, `/fundamentals`, `/filtered`, `/watch`, `/regime`, `/universe`, `/positions`, `/approvals` ve benzeri komutlar kaldırılmıştır.
+`/btceth` de `/tactical`'a alias'lanmıştır ama `setMyCommands` içinde görünmez.
+Eski `/social`, `/fundamentals`, `/filtered`, `/watch`, `/regime`, `/universe`,
+`/positions`, `/approvals` ve benzeri komutlar kaldırılmıştır.
 
 ## Çalıştırma
 
