@@ -20,9 +20,29 @@ trading/
 
 ## Bağımlılıklar
 
-Freqtrade **ana `bot.py` üretim servisinden ayrık** bir dependency setidir.
-`requirements-trading.txt` içinde tanımlanır. Render `bot.py` servisine
-yüklenmez; sadece dev/backtest ortamında kurulur.
+`requirements-trading.txt` içinde pandas + numpy + pyarrow (parquet)
+listelenir. **Ana `bot.py` üretim servisine yüklenmez** — Render sadece
+`requirements.txt` kurar. Freqtrade'in kendisi henüz bir dependency değil;
+Faz C testnet execution'a geçildiğinde eklenir ve `strategies/tsmom.py`
+Freqtrade `IStrategy` adaptör altında sarılır.
+
+## Kullanım (Faz A)
+
+```bash
+python -m venv .venv-trading
+source .venv-trading/bin/activate
+pip install -r requirements-trading.txt -r requirements-dev.txt
+
+# Binance perp verisi indir
+python -m trading.data.binance_perp BTCUSDT --out research/data/binance_perp
+
+# Backtest koştur
+python -m trading.backtest.walk_forward BTCUSDT \
+    --data-dir research/data/binance_perp \
+    --out research/data/backtest_btc.json
+```
+
+Detaylı runbook: `docs/BACKTEST_REPORT_v1.md`.
 
 ## AGENTS.md uyumu
 

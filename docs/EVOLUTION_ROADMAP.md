@@ -43,33 +43,29 @@ Baş test kombinasyonu: TSMOM + vol targeting + BTC top-of-book filter.
 
 ## Fazlar
 
-### Faz 0 — Temizlik ve iskelet (Hafta 1)
+### Faz 0 — Temizlik ve iskelet (Hafta 1) — TAMAMLANDI
 
-Şu anda burada.
-
-- [x] `bot.py:43` `trade_universe` bug fix (bugün).
+- [x] `bot.py:43` `trade_universe` bug fix.
 - [x] `bot.py:_api` Telegram HTTPError sanitize (AGENTS.md §3).
 - [x] README ↔ kod tutarsızlıklarını gider.
 - [x] Bu belge + `docs/DEAD_CODE_AUDIT.md`.
 - [x] `trading/` paket iskeleti.
-- [ ] Ölü kod silme (audit'te listelenen). Ayrı commit.
-- [ ] Freqtrade dev dependency ekleme (`requirements-trading.txt`).
+- [x] Ölü kod silme birinci dalga (~4400 satır, PR #100).
+- [x] `requirements-trading.txt` (Faz A dev deps).
 
 ### Faz A — Kanıt (Hafta 2-3)
 
-- [ ] Binance perpetual data adapter (`trading/data/binance_perp.py`):
-      klines + funding history + OI history + aggTrades → parquet.
-- [ ] Cost model bütünleşimi: funding accrual + taker fee tier + slippage
-      tahmini. `research/cost_model.py` içindeki snapshot mantığını canlı
-      cost function'a çevir.
-- [ ] Freqtrade strategy sarmalayıcı: `TacticalLongEngine.analyze()`
-      çıktısını `IStrategy.populate_entry_trend` / `populate_exit_trend`
-      kararlarına çevir.
-- [ ] TSMOM + vol targeting strategy'sini `trading/strategies/tsmom.py`
-      olarak yaz.
-- [ ] Purged + embargoed walk-forward CV harness'ı (`trading/backtest/`).
-- [ ] OOS raporlama: cost-adjusted Sharpe, expectancy, MFE/MAE, max DD,
-      calibration.
+- [x] Binance perpetual data adapter (`trading/data/binance_perp.py`):
+      klines + funding history + OI history → parquet.
+- [x] Cost model (`trading/backtest/cost_model.py`): funding accrual +
+      taker fee + slippage.
+- [x] TSMOM + vol targeting strategy (`trading/strategies/tsmom.py`).
+- [x] Purged + embargoed walk-forward CV harness
+      (`trading/backtest/walk_forward.py`).
+- [x] Backtest runbook (`docs/BACKTEST_REPORT_v1.md`) + GO/NO-GO eşiği.
+- [ ] **Sen çalıştırırsın:** Binance verisi indir, backtest'i koştur,
+      sonucu `docs/BACKTEST_REPORT_v1_RESULTS.md` olarak commit'le.
+- [ ] Freqtrade IStrategy sarmalayıcı — Faz C öncesi, testnet'e geçerken.
 
 ### Faz B — GO/NO-GO karar noktası (Hafta 4)
 
