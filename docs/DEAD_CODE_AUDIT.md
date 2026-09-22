@@ -49,19 +49,46 @@ Silme kararı ayrı bir commit'e bırakılmıştır ki geri dönüş kolay olsun
 - `acce_unified/observation_runtime.py`
 - `run_service.py` (macro kısmı Faz 0'da tutulacak; sonra karar)
 
-## Silme sıralaması (bir sonraki commit)
+## Silme sıralaması
 
-1. `acce_unified/anti_trap.py` + test.
-2. `acce_unified/long_alerts.py` + test.
-3. `acce_unified/long_opportunity.py` + test.
-4. `acce_unified/validation.py` + test.
-5. `acce_unified/research.py` + testler (`test_research_core.py`, `test_replay_causality.py`).
-6. `memecoin_radar/` + test.
-7. `tests/test_build_trade_plan.py` (broken reference).
-8. `engine.py` içindeki 4 formatlayıcı + `attach_snapshot_to_results` +
-   `UnifiedRadarRuntime`.
-9. `RadarSnapshot` içindeki 4 kullanılmayan alan + `cex.py::rank_cex_tickers`.
-10. `acce_unified/__init__.py` içindeki `__all__` ve import'ları güncelle.
-11. `.github/workflows/tests.yml` — silinen testlere referans varsa temizle.
+### Birinci dalga — tamamlandı
 
-Her adım kendi commit'i olmalı ki bisect kolay olsun.
+1. ✅ `acce_unified/anti_trap.py` + test.
+2. ✅ `acce_unified/long_alerts.py` + test.
+3. ✅ `acce_unified/long_opportunity.py` + test.
+4. ✅ `acce_unified/validation.py` + test.
+5. ✅ `acce_unified/research.py` + testler (`test_research_core.py`, `test_replay_causality.py`).
+6. ✅ `memecoin_radar/` + test.
+7. ✅ `tests/test_build_trade_plan.py` (broken reference) + `tests/golden/*.json` fixture'ları.
+8. ✅ `tests/test_legacy_position_monitoring.py` (broken reference).
+9. ✅ `tests/test_telegram_command_center.py` (broken reference, kaldırılmış komutlara ait).
+10. ✅ `engine.py` içindeki 4 formatlayıcı + `attach_snapshot_to_results` +
+    `UnifiedRadarRuntime` + `acce_unified/__init__.py::__all__` senkronu.
+11. ✅ `.github/workflows/tests.yml` — silinen testlerin ve `memecoin_radar` compile
+    girişinin temizliği.
+
+**Toplam:** ~5000+ satır Python kaynak + test silindi (dead code + broken tests +
+orphan golden fixtures).
+
+### İkinci dalga — sonraki temizlik PR'ında
+
+1. `RadarSnapshot.cex_candidates` alanı + `acce_unified/cex.py::rank_cex_tickers`.
+   `test_unified_cex.py` bu iş için baştan gözden geçirilecek.
+2. `RadarSnapshot.social_candidates` alanı + `test_social_radar.py` içinde alan
+   doğrulayan testler.
+3. `RadarSnapshot.fundamental_candidates` alanı + `test_fundamental_radar.py`
+   içinde alan doğrulayan testler.
+4. `RadarSnapshot.listing_filtered_candidates` alanı + `test_listing_report_details.py`
+   uyarlaması.
+
+`bot.py` UI hiçbirini göstermiyor. Ancak testleri surgical düzenlemek yerine
+kendi PR'ında yapılacak.
+
+### Üçüncü dalga — Faz A karar noktası
+
+- `acce_unified/observation_archive.py` (602 satır): Faz A backtest harness'ının
+  input feature'ı olarak yeniden bağlanacak veya silinecek.
+- `macro_*.py` (11 dosya, ~2500 satır): Faz A'da backtest feature'ı olarak
+  yeniden bağlanacak veya silinecek. Şu an sadece `/macro-research` endpoint'inde
+  observability.
+- `acce_unified/social.py` (870): Faz A'da feature testi.

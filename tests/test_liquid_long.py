@@ -4,7 +4,6 @@ from acce_unified import (
     DEFAULT_TRADE_UNIVERSE,
     UnifiedConfig,
     UnifiedRadarEngine,
-    format_liquid_long_report,
 )
 from acce_unified.liquid_long import (
     build_market_context,
@@ -229,7 +228,3 @@ def test_engine_builds_separate_mexc_liquid_top_five():
     assert snapshot.liquid_market_context["regime"] == "RISK_ON"
     assert len(snapshot.liquid_long_candidates) == 5
     assert "DROPUSDT" not in {row.symbol for row in snapshot.liquid_long_candidates}
-    report = format_liquid_long_report(snapshot)
-    assert "MEXC LİKİT 100" in report
-    assert "dolaşan 800.00M" in report
-    assert "otomatik emir oluşturmaz" in report
