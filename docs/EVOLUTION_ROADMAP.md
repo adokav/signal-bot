@@ -53,19 +53,40 @@ Baş test kombinasyonu: TSMOM + vol targeting + BTC top-of-book filter.
 - [x] Ölü kod silme birinci dalga (~4400 satır, PR #100).
 - [x] `requirements-trading.txt` (Faz A dev deps).
 
-### Faz A — Kanıt (Hafta 2-3)
+### Faz A — Kanıt (Hafta 2-3) — v1 TAMAMLANDI, VERDICT: NO-GO
 
 - [x] Binance perpetual data adapter (`trading/data/binance_perp.py`):
       klines + funding history + OI history → parquet.
+- [x] `trading/data/binance_vision.py` — CI'da 451 çözümü, historical
+      zip dumps.
 - [x] Cost model (`trading/backtest/cost_model.py`): funding accrual +
       taker fee + slippage.
 - [x] TSMOM + vol targeting strategy (`trading/strategies/tsmom.py`).
 - [x] Purged + embargoed walk-forward CV harness
       (`trading/backtest/walk_forward.py`).
 - [x] Backtest runbook (`docs/BACKTEST_REPORT_v1.md`) + GO/NO-GO eşiği.
-- [ ] **Sen çalıştırırsın:** Binance verisi indir, backtest'i koştur,
-      sonucu `docs/BACKTEST_REPORT_v1_RESULTS.md` olarak commit'le.
-- [ ] Freqtrade IStrategy sarmalayıcı — Faz C öncesi, testnet'e geçerken.
+- [x] **v1 backtest çalıştırıldı** — GitHub Actions workflow_dispatch.
+      Sonuç `docs/BACKTEST_REPORT_v1_RESULTS.md`: **NO-GO** (Sharpe -0.31,
+      578 trade, cost drag %70, cumulative DD -%122).
+
+### Faz A2a — Küçük düzeltmeler (Hafta 3-4)
+
+Cost drag ve overlapping trades'i adres alır. Yapısal bug değil,
+hiperparametre revizyonu:
+
+- [x] Single-position mode (aynı anda 1 açık pozisyon).
+- [x] `max_leverage: 3.0 → 1.0` — vol targeting kalır ama cap 1x.
+- [x] `time_stop_seconds: 48h → 7 gün` — whipsaw azaltma.
+- [x] `horizon_hours default: 96 → 168`.
+- [ ] Backtest tekrar koştur → v2 sonucu.
+- [ ] `docs/BACKTEST_REPORT_v2_RESULTS.md`.
+
+### Faz A2b — Cross-sectional momentum (Hafta 4-5, v2 hâlâ NO-GO ise)
+
+- [ ] `trading/strategies/tsmom_cs.py` — Binance top-N perp evreni, aylık
+      rebalance, top-3 uzun.
+- [ ] Vision adapter'ı N sembol için genişlet.
+- [ ] Backtest → v3 sonucu.
 
 ### Faz B — GO/NO-GO karar noktası (Hafta 4)
 
