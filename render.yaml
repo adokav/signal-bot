@@ -3,7 +3,13 @@ services:
     name: signal-bot-v5-core
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python run_service.py
+    # Production runs bot.py directly. run_service.py wrapped bot with the
+    # macro collector daemon; the dashboard override that has been in effect
+    # for the last several deploys already runs bot.py, so this file now
+    # matches reality. The macro pipeline is scheduled for removal in the
+    # Faz A cleanup wave once the backtest verdict is in (see
+    # docs/EVOLUTION_ROADMAP.md and docs/DEAD_CODE_AUDIT.md).
+    startCommand: python bot.py
     disk:
       name: signal-bot-data
       mountPath: /data
@@ -19,32 +25,6 @@ services:
         value: "1"
       - key: TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS
         value: "5"
-
-      # Live point-in-time macro evidence collection. This does not score or
-      # modify trading signals; it only archives first-seen raw observations.
-      - key: MACRO_DATA_COLLECTION_ENABLED
-        value: "1"
-      - key: MACRO_DATA_COLLECTION_INTERVAL_SECONDS
-        value: "21600"
-      - key: MACRO_OBSERVATION_ARCHIVE_PATH
-        value: /data/macro_observations.jsonl
-      - key: MACRO_DATA_STATUS_PATH
-        value: /data/macro_status.json
-      - key: FRED_API_KEY
-        sync: false
-
-      # One-shot historical research reconstruction. It runs in an isolated
-      # daemon, writes only under /data/research/macro and cannot affect signals.
-      # A fingerprint marker prevents the same date/config range from rebuilding
-      # on every redeploy. The end is lagged >=8 days so 7d labels are complete.
-      - key: MACRO_HISTORICAL_BACKFILL_ENABLED
-        value: "1"
-      - key: MACRO_HISTORICAL_START_DATE
-        value: "2017-08-18"
-      - key: MACRO_HISTORICAL_END_LAG_DAYS
-        value: "8"
-      - key: MACRO_HISTORICAL_ROOT
-        value: /data/research/macro
 
       # Exactly two MEXC opportunity engines
       - key: UNIFIED_ENGINE_ENABLED
@@ -80,14 +60,15 @@ services:
       - key: UNIFIED_LIQUID_REQUIRE_SUPPLY_DATA
         value: "true"
 
-      # Point-in-time research archive. The bot still scans every 120 seconds,
-      # while immutable ML/replay observations are sampled every 30 minutes.
+      # Point-in-time research archive. Disabled by default until Faz A
+      # backtest closes and we decide whether to feed the archive into the
+      # backtest harness or remove the module entirely (see
+      # docs/DEAD_CODE_AUDIT.md third wave). Also — the archive writes to
+      # /data, which requires the persistent disk to have working write
+      # permissions; keeping it off avoids adding /data noise to the fix
+      # for the disk permission issue currently under investigation.
       - key: LIQUID_OBSERVATION_ARCHIVE_ENABLED
-        value: "true"
-      - key: LIQUID_OBSERVATION_ARCHIVE_PATH
-        value: /data/liquid100_observations.sqlite3
-      - key: LIQUID_OBSERVATION_ARCHIVE_INTERVAL_SECONDS
-        value: "1800"
+        value: "false"
 
       # Verified MEXC new listings
       - key: UNIFIED_LISTING_TOP_N

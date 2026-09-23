@@ -413,6 +413,14 @@ def telegram_loop() -> None:
     if not TOKEN or not CHAT_ID:
         log.warning("TOKEN/CHAT_ID yok; Telegram komut dinleyicisi başlamadı")
         return
+    # A previously-set webhook conflicts with getUpdates (Telegram HTTP 409).
+    # Idempotent: returns True whether or not a webhook existed. Does not fix
+    # the case where a different instance is polling the same token, but
+    # covers the common redeploy-after-webhook-experiment failure mode.
+    try:
+        _api("deleteWebhook", {"drop_pending_updates": False})
+    except Exception as exc:
+        log.warning("Webhook temizlenemedi (getUpdates yine denenecek): %s", exc)
     try:
         _api("setMyCommands", {"commands": COMMANDS})
     except Exception as exc:

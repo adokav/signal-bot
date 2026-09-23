@@ -77,7 +77,10 @@ def _session(user_agent: str) -> requests.Session:
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=frozenset({"GET"}),
     )
-    session.mount("https://", HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=8))
+    # pool_maxsize matches the widest ThreadPoolExecutor fan-out we run against
+    # a single host (Liquid-100 klines uses max_workers=10). An 8-slot pool
+    # spammed "Connection pool is full" in production every scan.
+    session.mount("https://", HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=16))
     return session
 
 
