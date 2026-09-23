@@ -222,3 +222,11 @@ def test_run_backtest_end_to_end_on_uptrend_series():
     assert report.trades > 0
     assert report.aggregate is not None
     assert report.aggregate.n_trades == report.trades
+    assert report.benchmark is not None
+    assert report.benchmark.n_daily_bars == len(daily)
+    assert report.go_no_go is not None
+    # verdict fields are populated regardless of pass/fail
+    payload = report.to_dict()
+    assert payload["benchmark"] is not None
+    assert payload["go_no_go"]["overall_go"] in (True, False)
+    assert payload["can_authorize_trade"] is False
