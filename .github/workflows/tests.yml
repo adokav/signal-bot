@@ -39,6 +39,7 @@ jobs:
             tests/test_trading_cost_model.py \
             tests/test_tsmom.py \
             tests/test_walk_forward.py \
+            tests/test_benchmark.py \
             tests/test_observation_archive_cadence.py \
             tests/test_macro_data.py \
             tests/test_macro_treasury.py \

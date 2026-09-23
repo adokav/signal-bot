@@ -28,6 +28,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from trading.backtest.benchmark import (
+    BuyHoldMetrics,
+    GoNoGoVerdict,
+    compute_buy_and_hold,
+    evaluate_go_no_go,
+)
 from trading.backtest.cost_model import (
     DEFAULT_SLIPPAGE_BPS,
     DEFAULT_TAKER_FEE_BPS,
@@ -332,6 +338,8 @@ class BacktestReport:
     params: TsmomParams
     folds: list[FoldMetrics] = field(default_factory=list)
     aggregate: FoldMetrics | None = None
+    benchmark: "BuyHoldMetrics | None" = None
+    go_no_go: "GoNoGoVerdict | None" = None
     total_days: int = 0
     daily_bars: int = 0
     hourly_bars: int = 0
@@ -347,6 +355,8 @@ class BacktestReport:
             "hourly_bars": self.hourly_bars,
             "trades": self.trades,
             "embargo_days": self.embargo_days,
+            "benchmark": self.benchmark.to_dict() if self.benchmark else None,
+            "go_no_go": self.go_no_go.to_dict() if self.go_no_go else None,
             "folds": [asdict(fold) for fold in self.folds],
             "aggregate": asdict(self.aggregate) if self.aggregate else None,
             "can_authorize_trade": False,
@@ -432,11 +442,25 @@ def run_backtest(
         fold_metrics.append(compute_fold_metrics(fold.name, fold_trades))
 
     aggregate = compute_fold_metrics("aggregate_all_folds", trades)
+    benchmark = compute_buy_and_hold(
+        daily=daily,
+        funding=funding,
+        taker_fee_bps=taker_fee_bps,
+        slippage_bps=slippage_bps,
+    )
+    go_no_go = evaluate_go_no_go(
+        strategy_sharpe=aggregate.sharpe_annualized,
+        strategy_max_dd_pct=aggregate.max_drawdown_pct,
+        benchmark=benchmark,
+        fold_sharpes=[fold.sharpe_annualized for fold in fold_metrics],
+    )
     return BacktestReport(
         symbol=symbol.upper(),
         params=params,
         folds=fold_metrics,
         aggregate=aggregate,
+        benchmark=benchmark,
+        go_no_go=go_no_go,
         total_days=total_days,
         daily_bars=len(daily),
         hourly_bars=len(hourly),
@@ -532,11 +556,28 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     print(f"trades: {report.trades}")
     if report.aggregate:
         print(
-            f"aggregate: net={report.aggregate.mean_net_pct:.3f}% "
-            f"sharpe={report.aggregate.sharpe_annualized:.2f} "
-            f"hit={report.aggregate.hit_rate:.1%} "
+            f"strategy : net={report.aggregate.mean_net_pct:.3f}%  "
+            f"sharpe={report.aggregate.sharpe_annualized:.2f}  "
+            f"hit={report.aggregate.hit_rate:.1%}  "
             f"maxdd={report.aggregate.max_drawdown_pct:.2f}%"
         )
+    if report.benchmark:
+        print(
+            f"benchmark: net={report.benchmark.net_return_pct:.2f}%  "
+            f"sharpe={report.benchmark.sharpe_annualized:.2f}  "
+            f"maxdd={report.benchmark.max_drawdown_pct:.2f}%  "
+            f"({report.benchmark.holding_days:.0f}d B&H)"
+        )
+    if report.go_no_go:
+        v = report.go_no_go
+        checks = [
+            f"sharpe>0.8:{'ok' if v.sharpe_above_0_8 else 'FAIL'}",
+            f"beats_bnh:{'ok' if v.beats_benchmark_sharpe else 'FAIL'}",
+            f"dd<60%_bnh:{'ok' if v.drawdown_below_60_pct_of_benchmark else 'FAIL'}",
+            f"consistency:{v.consistency_folds_above_0_5}/{v.total_folds}",
+        ]
+        verdict = "GO" if v.overall_go else "NO-GO"
+        print(f"verdict  : {verdict} — " + " · ".join(checks))
     return 0
 
 
