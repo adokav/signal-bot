@@ -1,5 +1,8 @@
 # Signal Bot v5 Core
 
+[![tests](https://github.com/adokav/signal-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/adokav/signal-bot/actions/workflows/tests.yml)
+[![backtest](https://github.com/adokav/signal-bot/actions/workflows/backtest.yml/badge.svg)](https://github.com/adokav/signal-bot/actions/workflows/backtest.yml)
+
 Signal Bot şu an üç radar + bir macro observation daemon barındırır:
 
 1. **BTC / ETH Taktik Long Radarı** (MEXC spot; deterministik setup + R/R invariantları)
@@ -84,3 +87,17 @@ REDDIT_USER_AGENT=
 - State atomik olarak `/data/core_state.json` altında tutulur.
 - Sağlayıcı hataları emir üretmez ve son geçerli görünümü silmez.
 - Yeni özellik eklemek yerine önce out-of-sample kanıt aranır.
+
+## Faz A — Backtest (manuel tetiklemeli)
+
+TSMOM + volatility targeting hipotezini Binance USDⓈ-M perpetual verisi
+üzerinde doğrulamak için `backtest` GitHub Actions workflow'u manuel
+olarak koşturulur:
+
+1. **Actions** sekmesi → **backtest** workflow'u
+2. Sağ üstte **Run workflow** → sembol seç (`BTCUSDT` / `ETHUSDT` / `SOLUSDT`)
+3. ~2-5 dk bekle → run summary'de JSON blob ile verdict
+
+Ayrıntılar: `docs/BACKTEST_REPORT_v1.md`. GO/NO-GO eşiği:
+cost-adjusted OOS Sharpe > 0.8, BTC B&H'yi geçer, max DD B&H'nin
+%60'ından az, 3/4 fold tutarlı.
