@@ -91,10 +91,14 @@ def _save_state() -> None:
 def _api(method: str, payload: dict[str, Any] | None = None) -> Any:
     if not TOKEN:
         return None
+    # HTTP client timeout must exceed Telegram's server-side long-poll timeout.
+    # getUpdates uses timeout=20 (see telegram_loop); if the HTTP client also
+    # times out at 20 the two race and abort every poll cycle with a
+    # ReadTimeout even when the server is healthy. 30 covers 20+overhead.
     try:
         response = HTTP.post(
             f"https://api.telegram.org/bot{TOKEN}/{method}",
-            json=payload or {}, timeout=20,
+            json=payload or {}, timeout=30,
         )
     except requests.RequestException as exc:
         # Request URL and exception text can contain the bot token. Strip both.
