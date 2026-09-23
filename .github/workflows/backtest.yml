@@ -1,99 +1,128 @@
-name: Backtest
+name: backtest
+
+# Manual-trigger workflow that downloads Binance USDⓈ-M perpetual data
+# for the configured symbol, runs the walk-forward TSMOM backtest, and
+# uploads the resulting JSON report + parquet snapshots as build artifacts.
+#
+# This is a research job. It does not authorize any order, does not touch
+# the production bot.py service, and produces read-only artifacts.
+#
+# How to run:
+#   GitHub → Actions → backtest → Run workflow → pick a symbol
+#
+# The artifact is retained for 30 days on the workflow run page.
 
 on:
-  # Manuel: GitHub UI'dan Run workflow ile inputs ile tetikle
   workflow_dispatch:
     inputs:
-      days:
-        description: 'Kac gun geri backtest et'
-        required: false
-        default: '30'
-        type: string
-      min_grade:
-        description: 'Min quality grade'
-        required: false
-        default: 'B'
+      symbol:
+        description: "Binance USDⓈ-M perpetual symbol (e.g. BTCUSDT)"
+        required: true
+        default: BTCUSDT
         type: choice
         options:
-          - 'A+'
-          - 'A'
-          - 'B'
-          - 'C'
-          - 'D'
-      capital:
-        description: 'Baslangic kapital (USDT)'
+          - BTCUSDT
+          - ETHUSDT
+          - SOLUSDT
+      folds:
+        description: "Number of walk-forward folds"
         required: false
-        default: '100'
+        default: "4"
         type: string
-      symbols:
-        description: 'Semboller (virgul ile, bos = tum coinler)'
+      embargo_days:
+        description: "Embargo days between train and test slabs"
         required: false
-        default: ''
+        default: "3"
         type: string
-      end_date:
-        description: 'Backtest bitis tarihi YYYY-MM-DD (bos = bugun). Ornek: 2024-03-31 RISK_ON, 2022-07-31 RISK_OFF, 2023-10-31 CHOP'
+      horizon_hours:
+        description: "Max hours per trade for exit simulation (48 recommended)"
         required: false
-        default: ''
+        default: "96"
         type: string
-      data_source:
-        description: 'Veri kaynagi: mexc (default, recent ~60g) veya vision (Binance public archive, tarihsel rejimler icin)'
-        required: false
-        default: 'mexc'
-        type: choice
-        options:
-          - 'mexc'
-          - 'vision'
 
-  # Otomatik: main'e bot.py veya backtest pipeline ilgili commit gelirse
-  # default ayarlarla (7 gun / B grade / 100 USDT) koşsun.
-  push:
-    branches: [main]
-    paths:
-      - 'bot.py'
-      - 'scripts/backtest_summary.py'
-      - '.github/workflows/backtest.yml'
+permissions:
+  contents: read
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install deps
-        run: pip install -r requirements.txt
-
-      - name: Run backtest
-        env:
-          RUN_HISTORICAL_REPLAY: '1'
-          # Push event'te inputs bos kalir; varsayilan degerleri kullan.
-          HISTORICAL_REPLAY_DAYS: ${{ inputs.days || '30' }}
-          HISTORICAL_REPLAY_MIN_GRADE: ${{ inputs.min_grade || 'B' }}
-          HISTORICAL_REPLAY_SYMBOLS: ${{ inputs.symbols || '' }}
-          HISTORICAL_REPLAY_END_DATE: ${{ inputs.end_date || '' }}
-          # Data source auto-detect: end_date varsa veya data_source 'vision' ise
-          # Binance public archive kullan; yoksa MEXC (recent).
-          HISTORICAL_REPLAY_API_BASE: ${{ (inputs.data_source == 'vision' || inputs.end_date != '') && 'https://data.binance.vision' || 'https://api.mexc.com' }}
-          ACCOUNT_SIZE_USD: ${{ inputs.capital || '100' }}
-          TELEGRAM_BOT_TOKEN: ''
-          TELEGRAM_CHAT_ID: ''
-          TELEGRAM_COMMANDS_ENABLED: '0'
-          PYTHONUNBUFFERED: '1'
-        run: python bot.py
-
-      - name: Render summary
-        if: always()
-        run: python scripts/backtest_summary.py >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload report
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements.txt
+          -r requirements-dev.txt
+          -r requirements-trading.txt
+      - name: Download Binance perpetual data
+        run: |
+          set -euo pipefail
+          python -m trading.data.binance_perp "${{ github.event.inputs.symbol }}" \
+              --out research/data/binance_perp
+      - name: Run walk-forward backtest
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.walk_forward "${{ github.event.inputs.symbol }}" \
+              --data-dir research/data/binance_perp \
+              --out "research/data/backtest_${{ github.event.inputs.symbol }}.json" \
+              --folds "${{ github.event.inputs.folds }}" \
+              --embargo-days "${{ github.event.inputs.embargo_days }}" \
+              --horizon-hours "${{ github.event.inputs.horizon_hours }}"
+      - name: Emit run summary
+        run: |
+          set -euo pipefail
+          symbol="${{ github.event.inputs.symbol }}"
+          json="research/data/backtest_${symbol}.json"
+          echo "## Backtest — ${symbol}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          python -c "
+          import json, pathlib
+          data = json.loads(pathlib.Path('$json').read_text())
+          agg = data.get('aggregate') or {}
+          bench = data.get('benchmark') or {}
+          verdict = data.get('go_no_go') or {}
+          summary = {
+              'trades': data.get('trades'),
+              'daily_bars': data.get('daily_bars'),
+              'strategy': {
+                  'sharpe': agg.get('sharpe_annualized'),
+                  'mean_net_pct': agg.get('mean_net_pct'),
+                  'hit_rate': agg.get('hit_rate'),
+                  'max_dd_pct': agg.get('max_drawdown_pct'),
+                  'exit_reasons': agg.get('exit_reason_breakdown'),
+              },
+              'benchmark': {
+                  'sharpe': bench.get('sharpe_annualized'),
+                  'net_pct': bench.get('net_return_pct'),
+                  'max_dd_pct': bench.get('max_drawdown_pct'),
+                  'holding_days': bench.get('holding_days'),
+              },
+              'verdict': {
+                  'overall_go': verdict.get('overall_go'),
+                  'sharpe_above_0_8': verdict.get('sharpe_above_0_8'),
+                  'beats_benchmark_sharpe': verdict.get('beats_benchmark_sharpe'),
+                  'drawdown_below_60_pct_of_benchmark':
+                      verdict.get('drawdown_below_60_pct_of_benchmark'),
+                  'consistency': f\"{verdict.get('consistency_folds_above_0_5')}/{verdict.get('total_folds')}\",
+              },
+          }
+          print(json.dumps(summary, indent=2))
+          " >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "See the uploaded artifact for the full report and parquet snapshots." >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backtest-report
-          path: historical_replay_report.json
-          retention-days: 14
+          name: backtest-${{ github.event.inputs.symbol }}
+          path: |
+            research/data/backtest_*.json
+            research/data/binance_perp/*.parquet
+          retention-days: 30

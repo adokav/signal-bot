@@ -72,6 +72,17 @@ orphan golden fixtures).
 
 ### İkinci dalga — sonraki temizlik PR'ında
 
+**Orphan scripts:**
+
+- `scripts/backtest_summary.py` — eski `historical_replay_report.json`
+  formatını raporluyordu; artık kimse üretmiyor. Yeni backtest workflow'u
+  kendi Python summary bloğunu emit ediyor.
+- `scripts/build_macro_history.py`, `scripts/summarize_macro_evidence.py`
+  — macro pipeline hâlâ `run_service.py` içinde çalışıyor ama bu
+  script'lerin çağıranı yok; bir sonraki temizlikte değerlendirilecek.
+
+**RadarSnapshot alanları + test bağımlılıkları:**
+
 1. `RadarSnapshot.cex_candidates` alanı + `acce_unified/cex.py::rank_cex_tickers`.
    `test_unified_cex.py` bu iş için baştan gözden geçirilecek.
 2. `RadarSnapshot.social_candidates` alanı + `test_social_radar.py` içinde alan
