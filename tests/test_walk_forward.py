@@ -185,6 +185,57 @@ def test_compute_fold_metrics_positive_expectancy():
     assert metrics.max_drawdown_pct <= 0
 
 
+def _uptrend_daily_hourly(n_days=200):
+    closes = [100.0 * math.exp(0.003 * i) for i in range(n_days)]
+    daily = _daily(closes)
+    hourly = []
+    for i in range(len(daily) - 1):
+        for h in range(24):
+            price = daily[i].close * (1 + 0.001 * h)
+            open_time = daily[i].close_time + 1 + h * 3600
+            close_time = open_time + 3599
+            hourly.append(
+                Candle(
+                    open_time=open_time,
+                    close_time=close_time,
+                    available_at=close_time,
+                    open=price,
+                    high=price * 1.005,
+                    low=price * 0.995,
+                    close=price,
+                    volume=1.0,
+                    quote_volume=price,
+                )
+            )
+    return daily, hourly
+
+
+def test_single_position_mode_fires_strictly_fewer_trades():
+    daily, hourly = _uptrend_daily_hourly()
+    kwargs = dict(
+        symbol="BTCUSDT",
+        daily=daily,
+        hourly=hourly,
+        funding=None,
+        params=TsmomParams(),
+        n_folds=3,
+        embargo_days=2,
+        horizon_hours=168,
+    )
+    default_report = run_backtest(**kwargs, single_position=True)
+    overlapping_report = run_backtest(**kwargs, single_position=False)
+    # Overlapping mode fires a trade on every daily close where the signal
+    # remains LONG; single-position mode skips days that fall inside an
+    # already-open trade. Strict inequality is the load-bearing invariant.
+    assert overlapping_report.trades > default_report.trades
+
+
+def test_default_params_use_conservative_leverage_and_week_time_stop():
+    params = TsmomParams()
+    assert params.max_leverage == pytest.approx(1.0)
+    assert params.time_stop_seconds == 7 * 24 * 3600
+
+
 def test_run_backtest_end_to_end_on_uptrend_series():
     # 150 daily bars, upward drift + realistic volatility
     closes = [100.0 * math.exp(0.003 * i) for i in range(150)]

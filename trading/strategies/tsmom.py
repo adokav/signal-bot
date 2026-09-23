@@ -85,9 +85,17 @@ class TsmomParams:
     lookback_days: int = 60
     realized_vol_lookback_days: int = 30
     target_annualized_vol_pct: float = 40.0
-    max_leverage: float = 3.0
+    # Cap raised the strategy's max drawdown to -122% in the first Faz A run
+    # (see docs/BACKTEST_REPORT_v1.md history). Effective 1x notional now:
+    # vol targeting still scales positions down when realized vol is high,
+    # but never above unit leverage. Real cost drag drops with fewer forced
+    # exits, and cumulative equity math cannot compound past -100%.
+    max_leverage: float = 1.0
     atr_lookback_days: int = 14
-    time_stop_seconds: int = 48 * 3600
+    # 48 h expiry cycled trades faster than the trend it was trying to catch
+    # (578 trades / 3 years). One week keeps at least one full swing per
+    # trade and roughly halves the round-trip cost drag.
+    time_stop_seconds: int = 7 * 24 * 3600
     target_1_atr_mult: float = 1.0
     target_2_atr_mult: float = 2.0
     stop_atr_mult: float = 1.5

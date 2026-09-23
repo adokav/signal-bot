@@ -382,9 +382,19 @@ def run_backtest(
     embargo_days: int = 3,
     taker_fee_bps: float = DEFAULT_TAKER_FEE_BPS,
     slippage_bps: float = DEFAULT_SLIPPAGE_BPS,
-    horizon_hours: int = 96,
+    horizon_hours: int = 168,
+    single_position: bool = True,
 ) -> BacktestReport:
-    """Run a purged walk-forward backtest and return per-fold + aggregate metrics."""
+    """Run a purged walk-forward backtest and return per-fold + aggregate metrics.
+
+    ``single_position`` (default True) prevents the harness from opening a new
+    trade while a previously opened one is still active. Without this the first
+    Faz A run stacked 5-10 overlapping longs on the same capital and produced
+    a cumulative equity curve with -122% max drawdown — mathematically only
+    possible if you assume infinite balance sheet, which no real trader has.
+    ``False`` restores the original event-independent simulation (useful for
+    signal-quality diagnostics where you want every fired signal counted).
+    """
 
     if len(daily) < params.lookback_days + params.realized_vol_lookback_days + 2:
         raise ValueError("not enough daily bars for the configured lookbacks")
@@ -397,30 +407,37 @@ def run_backtest(
         params.realized_vol_lookback_days,
         params.atr_lookback_days,
     )
+    # In single_position mode we skip any decision day that falls inside the
+    # previous trade's holding window. exit_time is a UTC epoch; the next
+    # trade may enter starting from the first daily close AFTER exit_time.
+    active_exit_time: int | None = None
     for i in range(min_start, len(daily) - 1):
+        decision_time = daily[i].close_time
+        if single_position and active_exit_time is not None and decision_time < active_exit_time:
+            continue
         decision = evaluate_tsmom(
             daily[: i + 1],
             symbol=symbol,
-            decision_at=daily[i].close_time,
+            decision_at=decision_time,
             params=params,
         )
         if decision.signal is not TsmomSignal.LONG or decision.plan is None:
             continue
-        post = _hourly_after(daily[i].close_time, hourly, horizon_hours=horizon_hours)
+        post = _hourly_after(decision_time, hourly, horizon_hours=horizon_hours)
         if not post:
             continue
-        trades.append(
-            simulate_trade(
-                symbol=symbol,
-                plan=decision.plan,
-                scale=decision.position_scale,
-                entry_time=daily[i].close_time,
-                hourly_after_entry=post,
-                funding_history=funding,
-                taker_fee_bps=taker_fee_bps,
-                slippage_bps=slippage_bps,
-            )
+        trade = simulate_trade(
+            symbol=symbol,
+            plan=decision.plan,
+            scale=decision.position_scale,
+            entry_time=decision_time,
+            hourly_after_entry=post,
+            funding_history=funding,
+            taker_fee_bps=taker_fee_bps,
+            slippage_bps=slippage_bps,
         )
+        trades.append(trade)
+        active_exit_time = trade.exit_time
 
     total_days = len(daily)
     folds = enumerate_folds(
@@ -534,7 +551,17 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     )
     parser.add_argument("--folds", type=int, default=4)
     parser.add_argument("--embargo-days", type=int, default=3)
-    parser.add_argument("--horizon-hours", type=int, default=96)
+    parser.add_argument(
+        "--horizon-hours",
+        type=int,
+        default=168,
+        help="max hours per trade for exit simulation; must be >= time-stop",
+    )
+    parser.add_argument(
+        "--allow-overlapping",
+        action="store_true",
+        help="disable single-position mode (allow stacked trades)",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     daily = _load_candles(args.data_dir / f"{args.symbol.upper()}_klines_1d.parquet")
@@ -550,6 +577,7 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         n_folds=args.folds,
         embargo_days=args.embargo_days,
         horizon_hours=args.horizon_hours,
+        single_position=not args.allow_overlapping,
     )
     write_report(report, args.out)
     print(f"wrote {args.out}")
