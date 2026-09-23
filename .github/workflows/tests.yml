@@ -36,6 +36,7 @@ jobs:
             tests/test_listing_report_details.py \
             tests/test_liquid_observation_archive.py \
             tests/test_binance_perp.py \
+            tests/test_binance_vision.py \
             tests/test_trading_cost_model.py \
             tests/test_tsmom.py \
             tests/test_walk_forward.py \

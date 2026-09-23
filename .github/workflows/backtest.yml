@@ -59,10 +59,15 @@ jobs:
           -r requirements.txt
           -r requirements-dev.txt
           -r requirements-trading.txt
-      - name: Download Binance perpetual data
+      - name: Download Binance perpetual data (via data.binance.vision)
+        # The live fapi.binance.com endpoint returns HTTP 451 for GitHub
+        # Actions runners (Azure US IP ranges are geo-blocked). The
+        # data.binance.vision CDN carries the same historical klines +
+        # funding as monthly zip dumps and has no geographic ACL, so it
+        # stays reachable from CI.
         run: |
           set -euo pipefail
-          python -m trading.data.binance_perp "${{ github.event.inputs.symbol }}" \
+          python -m trading.data.binance_vision "${{ github.event.inputs.symbol }}" \
               --out research/data/binance_perp
       - name: Run walk-forward backtest
         run: |
