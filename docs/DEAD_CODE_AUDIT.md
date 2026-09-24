@@ -70,30 +70,33 @@ Silme kararı ayrı bir commit'e bırakılmıştır ki geri dönüş kolay olsun
 **Toplam:** ~5000+ satır Python kaynak + test silindi (dead code + broken tests +
 orphan golden fixtures).
 
-### İkinci dalga — sonraki temizlik PR'ında
+### İkinci dalga — tamamlandı
 
 **Orphan scripts:**
 
-- `scripts/backtest_summary.py` — eski `historical_replay_report.json`
-  formatını raporluyordu; artık kimse üretmiyor. Yeni backtest workflow'u
-  kendi Python summary bloğunu emit ediyor.
+- ✅ `scripts/backtest_summary.py` — silindi. Eski `historical_replay_report.json`
+  formatını raporluyordu; artık kimse üretmiyor.
 - `scripts/build_macro_history.py`, `scripts/summarize_macro_evidence.py`
   — macro pipeline hâlâ `run_service.py` içinde çalışıyor ama bu
   script'lerin çağıranı yok; bir sonraki temizlikte değerlendirilecek.
 
 **RadarSnapshot alanları + test bağımlılıkları:**
 
-1. `RadarSnapshot.cex_candidates` alanı + `acce_unified/cex.py::rank_cex_tickers`.
-   `test_unified_cex.py` bu iş için baştan gözden geçirilecek.
-2. `RadarSnapshot.social_candidates` alanı + `test_social_radar.py` içinde alan
-   doğrulayan testler.
-3. `RadarSnapshot.fundamental_candidates` alanı + `test_fundamental_radar.py`
-   içinde alan doğrulayan testler.
-4. `RadarSnapshot.listing_filtered_candidates` alanı + `test_listing_report_details.py`
-   uyarlaması.
+1. ✅ `RadarSnapshot.cex_candidates` alanı + `acce_unified/cex.py::rank_cex_tickers`
+   silindi. `test_unified_cex.py` opportunity_proxy ve trade universe testlerine
+   indirgendi. `cex.py`'de yalnız `liquid_long.py`'nin kullandığı üç yardımcı
+   (`is_stable_or_synthetic`, `is_leveraged_token`, `opportunity_proxy`) kaldı.
+2. ✅ `RadarSnapshot.social_candidates` alanı silindi. Test `listing_candidates`
+   üzerinde metadata doğrulamasına dönüştürüldü.
+3. ✅ `RadarSnapshot.fundamental_candidates` alanı silindi. Test aynı şekilde
+   `listing_candidates` üzerinde metadata doğrulamasına dönüştürüldü.
+4. ✅ `RadarSnapshot.listing_filtered_candidates` alanı silindi. Engine artık
+   `partition_mexc_listings` yerine `rank_mexc_listings` çağırıyor —
+   eşik-altı adaylar snapshot'a hiç girmiyor. `test_listing_report_details.py`
+   fixture'ları güncellendi. `docs/UNIFIED_ENGINE.md` "yeni listeleme fırsat
+   hunisi" bölümü tek çıktı modeline yeniden yazıldı.
 
-`bot.py` UI hiçbirini göstermiyor. Ancak testleri surgical düzenlemek yerine
-kendi PR'ında yapılacak.
+`bot.py` UI hiçbirini göstermiyordu; hiçbir davranışsal regresyon yok.
 
 ### Üçüncü dalga — Faz A karar noktası
 

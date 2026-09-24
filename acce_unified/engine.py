@@ -8,7 +8,6 @@ import time
 from dataclasses import replace
 from typing import Any
 
-from .cex import rank_cex_tickers
 from .config import UnifiedConfig
 from .fundamentals import FundamentalMetricsProvider
 from .liquid_long import (
@@ -19,7 +18,7 @@ from .liquid_long import (
     select_liquid_universe,
     supply_gate_ready,
 )
-from .listings import partition_mexc_listings
+from .listings import rank_mexc_listings
 from .models import MexcListing, RadarSnapshot
 from .providers import MexcNewListingProvider, MexcPublicProvider
 from .social import SocialIntelligenceProvider
@@ -86,26 +85,16 @@ class UnifiedRadarEngine:
 
     def scan_once(self, *, now: int | None = None) -> RadarSnapshot:
         timestamp = int(now if now is not None else time.time())
-        cex_candidates = []
         liquid_long_candidates = []
         liquid_universe_size = 0
         liquid_enriched_size = 0
         liquid_supply_ready_size = 0
         liquid_market_context: dict[str, Any] = {}
         listing_candidates = []
-        listing_filtered_candidates = []
-        social_candidates = []
-        fundamental_candidates = []
         errors: list[str] = []
         if self.config.cex_enabled:
             try:
                 tickers = self.cex_provider.fetch_tickers()
-                cex_candidates = rank_cex_tickers(
-                    tickers,
-                    trade_universe=self.trade_universe,
-                    top_n=self.config.cex_top_n,
-                    min_quote_volume=self.config.cex_min_quote_volume,
-                )
                 try:
                     metrics_fetcher = getattr(
                         self.cex_provider, "fetch_long_metrics", None
@@ -254,7 +243,7 @@ class UnifiedRadarEngine:
                     except Exception as exc:
                         errors.append(f"SOCIAL:{type(exc).__name__}")
                         log.warning("Social intelligence radar failed: %s", exc)
-                listing_candidates, listing_filtered_candidates = partition_mexc_listings(
+                listing_candidates = rank_mexc_listings(
                     listings,
                     trade_universe=self.trade_universe,
                     top_n=self.config.listing_top_n,
@@ -263,59 +252,18 @@ class UnifiedRadarEngine:
                     require_open_spot=self.config.listing_require_open_spot,
                     require_supply_data=self.config.listing_require_supply_data,
                 )
-                social_candidates = sorted(
-                    (
-                        item
-                        for item in (*listing_candidates, *listing_filtered_candidates)
-                        if (
-                            int(
-                                (item.metadata.get("social") or {}).get(
-                                    "mentions_window"
-                                )
-                                or 0
-                            )
-                            > 0
-                            or (item.metadata.get("social") or {}).get("status")
-                            == "READY"
-                        )
-                    ),
-                    key=lambda item: (
-                        (item.metadata.get("social") or {}).get("community_gate")
-                        == "PASS",
-                        int((item.metadata.get("social") or {}).get("viral_potential") or 0),
-                        int((item.metadata.get("social") or {}).get("attention_score") or 0),
-                    ),
-                    reverse=True,
-                )
-                fundamental_candidates = sorted(
-                    (
-                        item
-                        for item in (*listing_candidates, *listing_filtered_candidates)
-                        if (item.metadata.get("fundamentals") or {}).get("status") == "READY"
-                    ),
-                    key=lambda item: (
-                        int((item.metadata.get("fundamentals") or {}).get("fundamental_score") or 0),
-                        int((item.metadata.get("fundamentals") or {}).get("coverage_pct") or 0),
-                        item.score,
-                    ),
-                    reverse=True,
-                )
             except Exception as exc:
                 errors.append(f"LISTING:{type(exc).__name__}")
                 log.warning("PhenomenonX MEXC listing radar failed: %s", exc)
         return RadarSnapshot(
             generated_at=timestamp,
             mode=self.config.mode,
-            cex_candidates=tuple(cex_candidates),
             liquid_long_candidates=tuple(liquid_long_candidates),
             liquid_universe_size=liquid_universe_size,
             liquid_enriched_size=liquid_enriched_size,
             liquid_supply_ready_size=liquid_supply_ready_size,
             liquid_market_context=liquid_market_context,
             listing_candidates=tuple(listing_candidates),
-            listing_filtered_candidates=tuple(listing_filtered_candidates),
-            social_candidates=tuple(social_candidates),
-            fundamental_candidates=tuple(fundamental_candidates),
             errors=tuple(errors),
         )
 

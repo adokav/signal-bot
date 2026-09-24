@@ -59,23 +59,18 @@ class RadarCandidate:
 class RadarSnapshot:
     generated_at: int
     mode: str
-    cex_candidates: tuple[RadarCandidate, ...] = ()
     liquid_long_candidates: tuple[RadarCandidate, ...] = ()
     liquid_universe_size: int = 0
     liquid_enriched_size: int = 0
     liquid_supply_ready_size: int = 0
     liquid_market_context: dict[str, Any] = field(default_factory=dict)
     listing_candidates: tuple[RadarCandidate, ...] = ()
-    listing_filtered_candidates: tuple[RadarCandidate, ...] = ()
-    social_candidates: tuple[RadarCandidate, ...] = ()
-    fundamental_candidates: tuple[RadarCandidate, ...] = ()
     errors: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "generated_at": self.generated_at,
             "mode": self.mode,
-            "cex_candidates": [item.to_dict() for item in self.cex_candidates],
             "liquid_long_candidates": [
                 item.to_dict() for item in self.liquid_long_candidates
             ],
@@ -84,13 +79,6 @@ class RadarSnapshot:
             "liquid_supply_ready_size": self.liquid_supply_ready_size,
             "liquid_market_context": dict(self.liquid_market_context),
             "listing_candidates": [item.to_dict() for item in self.listing_candidates],
-            "listing_filtered_candidates": [
-                item.to_dict() for item in self.listing_filtered_candidates
-            ],
-            "social_candidates": [item.to_dict() for item in self.social_candidates],
-            "fundamental_candidates": [
-                item.to_dict() for item in self.fundamental_candidates
-            ],
             "errors": list(self.errors),
             "can_authorize_trade": False,
         }

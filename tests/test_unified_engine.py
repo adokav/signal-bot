@@ -34,7 +34,7 @@ class WeakListing:
 
 def test_provider_failure_is_isolated_and_core_metadata_is_non_authoritative():
     cfg = UnifiedConfig(
-        cex_enabled=True, listing_enabled=True, cex_top_n=3,
+        cex_enabled=True, listing_enabled=True,
         fundamental_enabled=False,
     )
     engine = UnifiedRadarEngine(
@@ -44,7 +44,6 @@ def test_provider_failure_is_isolated_and_core_metadata_is_non_authoritative():
         listing_provider=BrokenListing(),
     )
     snapshot = engine.scan_once(now=1_700_000_000)
-    assert snapshot.cex_candidates
     assert snapshot.listing_candidates == ()
     assert snapshot.errors == ("LISTING:TimeoutError",)
     # Provider outage isolation invariant: snapshot serialization keeps the
@@ -65,11 +64,10 @@ def test_snapshot_serialization_has_global_execution_invariant():
     assert payload["can_authorize_trade"] is False
     assert payload["mode"] == "SHADOW"
     assert "listing_candidates" in payload
-    assert "listing_filtered_candidates" in payload
     assert "dex_candidates" not in payload
 
 
-def test_engine_keeps_below_threshold_listing_for_watch_flow():
+def test_engine_drops_below_threshold_listings_from_the_public_candidate_list():
     cfg = UnifiedConfig(
         cex_enabled=False, listing_enabled=True, social_enabled=False,
         fundamental_enabled=False,
@@ -81,9 +79,7 @@ def test_engine_keeps_below_threshold_listing_for_watch_flow():
         listing_provider=WeakListing(),
     ).scan_once(now=1_700_000_000)
 
+    # Below-threshold listings must not leak into the public candidate list —
+    # the bot UI reads only `listing_candidates` and never showed the filtered
+    # bucket (see docs/DEAD_CODE_AUDIT.md Wave 2).
     assert snapshot.listing_candidates == ()
-    assert len(snapshot.listing_filtered_candidates) == 1
-    candidate = snapshot.listing_filtered_candidates[0]
-    assert candidate.symbol == "NOVAUSDT"
-    assert candidate.metadata["filter_reasons"]
-    assert candidate.execution_eligible is False

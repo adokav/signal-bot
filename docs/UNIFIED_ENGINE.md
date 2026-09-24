@@ -142,14 +142,14 @@ ile hesaplanır ve yalnız ilk beş gösterilir. Bu sıralama keşif metadata's�
 
 ## MEXC yeni listeleme fırsat hunisi
 
-PhenomenonX her gözlemi önce puanlar, sonra iki görünüm üretir:
+PhenomenonX her gözlemi önce puanlar, sonra tek görünüm üretir:
 
-- `listing_candidates` / **Güçlü Adaylar**: yeni olay, açık Spot, arz verisi,
-  düşüş ve kalite kapılarını geçen adaylar;
-- `listing_filtered_candidates` / **İzleme Havuzu**: eşik altında veya
-  `CROWDED` olan adaylar ve bunların açık filtre gerekçeleri.
-- `fundamental_candidates` / **Temel Radar**: kimliği doğrulanmış adayların
-  piyasa değeri, FDV, dolaşım, arz açıklığı ve global devir metrikleri.
+- `listing_candidates` / **Güçlü Adaylar**: yeni olay, açık Spot, arz
+  verisi, düşüş ve kalite kapılarını geçen adaylar. Adayların temel/sosyal
+  değerleri her satırın `metadata.fundamentals` ve `metadata.social`
+  alanları içinde taşınır — ayrı `fundamental_candidates` /
+  `social_candidates` / `listing_filtered_candidates` snapshot alanları
+  Dead Code Wave 2 ile silindi (bot UI hiçbirini göstermiyordu).
 
 Yeni olay yalnız ilk kurulumdan sonra görülmüş resmî Spot başlığı veya iki
 ardışık `exchangeInfo` taramasında görülen yeni paritedir. Futures/perpetual

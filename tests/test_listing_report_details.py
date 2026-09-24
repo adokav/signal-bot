@@ -59,17 +59,11 @@ def test_new_listing_report_ranks_only_accepted_rows_with_supply_and_extremes():
             _candidate("BUSDT", 95),
             _candidate("CUSDT", 80),
         ],
-        "listing_filtered_candidates": [
-            _candidate("DUSDT", 99),
-            _candidate("EUSDT", 98),
-        ],
     }
     report = format_new(snapshot)
 
     assert "DOĞRULANMIŞ ADAYLAR" in report
     assert report.index("BUSDT") < report.index("CUSDT") < report.index("AUSDT")
-    assert "DUSDT" not in report
-    assert "EUSDT" not in report
     assert "Arz: dolaşan 25.00M · toplam 100.00M · max 120.00M" in report
     assert "ATH $2.50 (%-60.0) · ATL $0.05 (%+1900.0)" in report
 
@@ -78,19 +72,12 @@ def test_pending_provider_does_not_invent_supply_or_price_extremes():
     report = format_new(
         {
             "listing_candidates": [_candidate("WAITUSDT", 88, ready=False)],
-            "listing_filtered_candidates": [],
         }
     )
     assert "Arz ve ATH/ATL: PROVIDER_COOLDOWN" in report
     assert "dolaşan 0" not in report
 
 
-def test_filtered_only_snapshot_reports_no_verified_candidate():
-    report = format_new(
-        {
-            "listing_candidates": [],
-            "listing_filtered_candidates": [_candidate("OLDUSDT", 100)],
-        }
-    )
+def test_empty_snapshot_reports_no_verified_candidate():
+    report = format_new({"listing_candidates": []})
     assert "Son 72 saatte doğrulanmış aktif aday yok." in report
-    assert "OLDUSDT" not in report

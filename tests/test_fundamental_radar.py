@@ -180,8 +180,11 @@ def test_engine_keeps_fundamentals_separate_from_opportunity_score():
         fundamental_provider=_FundamentalProvider(),
     ).scan_once(now=1_700_000_000)
 
-    assert len(snapshot.fundamental_candidates) == 1
-    candidate = snapshot.fundamental_candidates[0]
+    # Fundamentals ride along on `listing_candidates` metadata now; the
+    # separate `fundamental_candidates` snapshot field was removed in Dead
+    # Code Wave 2 because the bot UI never rendered it.
+    assert len(snapshot.listing_candidates) == 1
+    candidate = snapshot.listing_candidates[0]
     assert candidate.metadata["fundamentals"]["fundamental_score"] >= 75
     assert candidate.score != candidate.metadata["fundamentals"]["fundamental_score"]
     assert candidate.execution_eligible is False

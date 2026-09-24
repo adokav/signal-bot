@@ -41,15 +41,6 @@ def _snapshot():
                 },
             }
         ],
-        "listing_filtered_candidates": [
-            {
-                "symbol": "OLDUSDT",
-                "score": 99,
-                "stage": "FILTERED",
-                "risk_flags": ["eski market"],
-                "metadata": {"quote_volume": 1_000_000_000},
-            }
-        ],
         "liquid_market_context": {"regime": "RISK_ON", "positive_breadth_pct": 64},
     }
 

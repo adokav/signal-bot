@@ -158,6 +158,10 @@ def test_engine_keeps_social_ranking_separate_from_market_score():
         listing_enabled=True,
         social_enabled=True,
         fundamental_enabled=False,
+        # Fundamentals are disabled here so no supply data is attached to
+        # the fixture; drop the supply gate that would otherwise filter it
+        # before the social metadata assertion can run.
+        listing_require_supply_data=False,
     )
     snapshot = UnifiedRadarEngine(
         config,
@@ -166,8 +170,11 @@ def test_engine_keeps_social_ranking_separate_from_market_score():
         social_provider=_SocialProvider(),
     ).scan_once(now=1_700_000_000)
 
-    assert len(snapshot.social_candidates) == 1
-    candidate = snapshot.social_candidates[0]
+    # Social signals ride along on `listing_candidates` metadata now; the
+    # separate `social_candidates` snapshot field was removed in Dead Code
+    # Wave 2 because the bot UI never rendered it.
+    assert len(snapshot.listing_candidates) == 1
+    candidate = snapshot.listing_candidates[0]
     assert candidate.symbol == "NOVAUSDT"
     assert candidate.metadata["social"]["stage"] in {"EMERGING", "CONFIRMED"}
     assert candidate.metadata["social"]["community_gate"] == "PASS"
