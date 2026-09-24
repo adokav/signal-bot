@@ -53,7 +53,17 @@ Baş test kombinasyonu: TSMOM + vol targeting + BTC top-of-book filter.
 - [x] Ölü kod silme birinci dalga (~4400 satır, PR #100).
 - [x] `requirements-trading.txt` (Faz A dev deps).
 
-### Faz A — Kanıt (Hafta 2-3) — v1 TAMAMLANDI, VERDICT: NO-GO
+### Faz A — Kanıt (Hafta 2-3) — CLOSED: NO-GO
+
+Hipotez çürütüldü. Detaylı belge: `docs/BACKTEST_REPORT_v1_RESULTS.md`.
+v1 Sharpe -0.31 (agresif parametreler) → v2 Sharpe -0.03 (muhafazakar).
+İki bağımsız parametre setinde negatif Sharpe → parametre değil hipotez
+sorunu. Kripto tek-sembol TSMOM long-only edge'i 2020 sonrası büyük
+ölçüde arbitraj edildi.
+
+`trading/` chassis'i silinmez — gelecekteki hipotez denemeleri için
+altyapı olarak durur (`docs/BACKTEST_REPORT_v1_RESULTS.md` "Chassis
+geleceği" bölümüne bakın).
 
 - [x] Binance perpetual data adapter (`trading/data/binance_perp.py`):
       klines + funding history + OI history → parquet.
@@ -69,55 +79,47 @@ Baş test kombinasyonu: TSMOM + vol targeting + BTC top-of-book filter.
       Sonuç `docs/BACKTEST_REPORT_v1_RESULTS.md`: **NO-GO** (Sharpe -0.31,
       578 trade, cost drag %70, cumulative DD -%122).
 
-### Faz A2a — Küçük düzeltmeler (Hafta 3-4)
+### Faz A2a — Küçük düzeltmeler (Hafta 3-4) — TAMAMLANDI, VERDICT: NO-GO (v2)
 
-Cost drag ve overlapping trades'i adres alır. Yapısal bug değil,
-hiperparametre revizyonu:
+Cost drag ve overlapping trades'i adres aldı. Yapısal fix'ler
+hedeflediği sorunları çözdü ama edge açılmadı:
 
 - [x] Single-position mode (aynı anda 1 açık pozisyon).
 - [x] `max_leverage: 3.0 → 1.0` — vol targeting kalır ama cap 1x.
 - [x] `time_stop_seconds: 48h → 7 gün` — whipsaw azaltma.
 - [x] `horizon_hours default: 96 → 168`.
-- [ ] Backtest tekrar koştur → v2 sonucu.
-- [ ] `docs/BACKTEST_REPORT_v2_RESULTS.md`.
+- [x] Backtest tekrar koştur → v2 sonucu (Sharpe -0.03, 189 trade).
+- [x] `docs/BACKTEST_REPORT_v1_RESULTS.md` v2 sonucu ile güncellendi
+      (v1 + v2 tek belgede karşılaştırıldı).
 
-### Faz A2b — Cross-sectional momentum (Hafta 4-5, v2 hâlâ NO-GO ise)
+v1 → v2 delta: Sharpe -0.31 → -0.03, trade 578 → 189 (%67 azalma), max
+DD -%122 → -%46. Üç yapısal fix işini yaptı ama Sharpe hâlâ sıfıra
+yakın — "hiç trade yapmakla aynı". İki bağımsız parametre setinde de
+negatif Sharpe → parametre değil hipotez sorunu.
 
-- [ ] `trading/strategies/tsmom_cs.py` — Binance top-N perp evreni, aylık
-      rebalance, top-3 uzun.
+### Faz A2b — Cross-sectional momentum — ERTELENDİ
+
+Tek-sembol TSMOM yerine Binance top-N perp evreninde aylık rebalance +
+top-3 uzun denemesi. Faz A hipotezi çürütüldükten sonra bu da aynı
+akademik momentum ailesinden geldiği için düşük öncelik. Ertelendi:
+
+- [ ] `trading/strategies/tsmom_cs.py`.
 - [ ] Vision adapter'ı N sembol için genişlet.
 - [ ] Backtest → v3 sonucu.
 
-### Faz B — GO/NO-GO karar noktası (Hafta 4)
+Gelecekte kullanılırsa yeni bir "Faz E: Alternative strategies research"
+altında açılır. `trading/` chassis üzerinde çalışır — sadece bir strategy
+modülü + `walk_forward` yönlendirmesi.
 
-- [ ] İlk OOS raporu (`docs/BACKTEST_REPORT_v1.md`).
-- [ ] Karar:
-  - **GO:** en az bir hipotez cost-adjusted OOS Sharpe > 0.8 **ve** BTC B&H'yi
-    Sharpe/DD kombinasyonunda geçiyor. → Faz C'ye geç.
-  - **NO-GO:** düzeltmeler, ek feature keşfi, veya kombinasyon. Faz
-    A'ya geri dön.
+### Faz B / Faz C / Faz D — İPTAL
 
-Bu karar noktasında dürüst raporlama zorunludur: sonuç "iyi değil"se
-"iyi" gibi sunulmaz.
+TSMOM edge'ine bağımlı fazlardı. Edge çıkmadığı için execution katmanı
+(order manager, sizing, exit ladder) ve testnet + mikro live aşamaları
+şu an anlamsız. `trading/` chassis'inin altyapısı `docs/BACKTEST_REPORT_v1_RESULTS.md`
+"Chassis geleceği" bölümündeki şekilde beklemede kalır.
 
-### Faz C — Execution katmanı (Hafta 5-6, sadece GO ise)
-
-- [ ] Binance testnet order manager (Freqtrade native destekle):
-      idempotent, position-mode aware, partial-fill safe.
-- [ ] Sizing: risk-per-trade %0.5, aggregate cap, leverage cap, drawdown
-      circuit breaker.
-- [ ] Katmanlı exit: T1 partial + stop-to-entry + T2 ATR-trail + time-stop.
-- [ ] AGENTS.md §10 gerekleri: notional/leverage/slippage cap'leri kod
-      düzeyinde zorunlu; duplicate order koruması; provider outage'da
-      "successful order" varsayımı yok.
-
-### Faz D — Testnet + mikro live (Hafta 7-8)
-
-- [ ] Binance testnet paper trade, 200-500 sinyal.
-- [ ] Live/backtest divergence < %15 metriği.
-- [ ] Yeşilse mikro kaybedilebilir sermaye ($100-500) ile 2 hafta.
-- [ ] Metrik "kâr" değil, **testnet ↔ live divergence** ve slippage
-      dağılımı.
+Gelecekteki bir hipotez GO alırsa Faz C+D o zaman planlanır. Bugün
+üzerinde çalışılmıyor.
 
 ## Kesin çizgiler
 
@@ -133,5 +135,11 @@ Bu karar noktasında dürüst raporlama zorunludur: sonuç "iyi değil"se
 
 ## Şu anki durum
 
-`Faz 0` içindeyiz. Bir sonraki iş: dead code audit'i onaylat, silme
-commit'ini yap, sonra `trading/` paketi + Freqtrade dev bağımlılığı ekle.
+Faz 0 ve Faz A tamamlandı. Faz A çürütüldü (NO-GO), Faz A2b ertelendi,
+Faz B/C/D iptal. `trading/` chassis'i gelecekteki hipotez denemeleri için
+altyapı olarak bekliyor.
+
+**Sonraki iş:** signal-bot v5 core geliştirmesine geri dön. Ölü kod dalga 2
+(RadarSnapshot slot temizliği) → v5 core iyileştirmeleri (UX, gate
+mantıkları, manipülasyon riski metrikleri, alert paterni). Detay:
+`docs/DEAD_CODE_AUDIT.md` "Wave 2" bölümü.

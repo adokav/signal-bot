@@ -66,8 +66,80 @@ Beklenen etki:
 
 **Hâlâ B&H'yi (Sharpe 0.80) geçmeyebilir.** Geçmezse Faz A2b → cross-sectional momentum.
 
+## v2 sonucu — A2a fix'lerinden sonra (2026-09-23 21:20 UTC)
+
+Aynı sembol (BTCUSDT), aynı 3 yıl vision data, single-position + max_leverage=1.0 +
+7-day time-stop:
+
+```
+strategy : sharpe=-0.03  net=-0.009%/trade × 189 trades  maxdd=-46.12%  hit=55.6%
+benchmark: sharpe= 0.80  net=+182%                       maxdd=-75.45%  (1095d B&H)
+verdict  : NO-GO — sharpe>0.8:FAIL · beats_bnh:FAIL · dd<60%_bnh:FAIL · consistency:0/4
+```
+
+Exit reason breakdown:
+
+| Reason | Count | Share |
+|---|---:|---:|
+| SERIES_END (data window expired) | 64 | 34% |
+| SERIES_END_RESIDUAL | 28 | 15% |
+| STOP | 40 | 21% |
+| TARGET_2 | 34 | 18% |
+| RESIDUAL_STOP_BREAKEVEN | 23 | 12% |
+
+### v1 → v2 karşılaştırması
+
+| Metric | v1 | v2 | Δ |
+|---|---:|---:|---|
+| Trades | 578 | 189 | -67% ✓ single-position + 7d time-stop |
+| Sharpe | -0.31 | -0.03 | +0.28 ✓ ama hâlâ sıfıra yakın |
+| Mean net/trade | -0.061% | -0.009% | 7× ✓ cost drag yenildi |
+| Hit rate | 51.9% | 55.6% | +3.7 pp coinflip'e yakın |
+| Max DD | -122% | -46% | ✓ leverage cap işini yaptı |
+| Consistency | 0/4 | 0/4 | Fold-fold hâlâ yapısal |
+
+### Yorum
+
+Üç yapısal fix (single-position, leverage 1x, 7d time-stop) hedeflediği
+sorunları çözdü. Ama **edge açılmadı** — Sharpe -0.03 istatistiksel olarak
+"hiç trade yapmakla aynı". BTC son 3 yıl B&H'yi geçmek TSMOM long-only
+single-symbol yaklaşımıyla mümkün değil.
+
+## Karar: Faz A CLOSED — NO-GO
+
+Faz A hipotezi (Time-series momentum + volatility targeting, tek sembol,
+long-only, Binance perp) **çürütüldü**:
+
+- v1 (agresif parametreler, overlapping trades): Sharpe -0.31
+- v2 (muhafazakar parametreler, tek pozisyon): Sharpe -0.03
+
+İki bağımsız parametre setinde de negatif Sharpe → parametre ayarı meselesi
+değil, hipotez meselesi. Akademik literatürle tutarlı: 2020 sonrası kripto
+tek-sembol TSMOM edge'i büyük ölçüde arbitraj edildi (institutional +
+market-maker akışı, funding market'in olgunlaşması).
+
+## Chassis geleceği
+
+`trading/` paketi silinmez — Faz A altyapısı gelecekteki hipotez denemeleri
+için hazır kalır:
+
+- `trading/data/binance_perp.py` + `binance_vision.py` — Binance USDⓈ-M
+  perpetual veri adaptörleri (live REST + CDN zip dumps)
+- `trading/backtest/cost_model.py` — funding + taker fee + slippage
+  cost function
+- `trading/backtest/walk_forward.py` — purged walk-forward CV harness
+- `trading/backtest/benchmark.py` — B&H + otomatik GO/NO-GO verdict
+- `.github/workflows/backtest.yml` — manuel-trigger backtest workflow
+
+Bu chassis üzerine yeni bir hipotez (cross-sectional momentum, funding
+carry, spot-perp basis, vs.) test etmek "Faz E: Alternative strategies
+research" olarak istenildiği zaman açılabilir. Ana giriş noktası:
+`trading/strategies/` altına yeni bir strategy modülü + `walk_forward`'ün
+`evaluate_*` çağrısını yenisine yönlendir.
+
 ## Kaynak
 
-- Backtest artifact: `research/data/backtest_BTCUSDT.json`
-  (GitHub Actions run #52, 2026-09-23 21:07 UTC, 3 yıl BTCUSDT vision data)
-- Workflow log ZIP: yerelde saklanan `8982f5a2-logs_97269602992.zip`
+- v1 backtest artifact: `research/data/backtest_BTCUSDT.json`
+  (GitHub Actions run #52, 2026-09-23 21:07 UTC)
+- v2 backtest artifact: aynı yol, sonraki koşu (2026-09-23 21:20 UTC)
+- Workflow log ZIP: yerelde `8982f5a2-logs_97269602992.zip`
