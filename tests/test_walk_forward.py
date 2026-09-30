@@ -411,3 +411,158 @@ def test_cli_writes_json_markdown_and_records_trial(tmp_path):
         "--trial-registry", str(registry), "--record-trial",
     ])
     assert len(TrialRegistry(registry).load()) == 1
+
+
+# --- variants: pure TSMOM (signal_exit) and the always_long control ---------
+
+
+def _daily_hourly_from(closes):
+    daily = _daily(closes)
+    hourly = []
+    for i in range(len(daily) - 1):
+        for h in range(24):
+            price = daily[i].close * (1 + 0.0005 * h)
+            open_time = daily[i].close_time + 1 + h * 3600
+            close_time = open_time + 3599
+            hourly.append(Candle(
+                open_time=open_time, close_time=close_time, available_at=close_time,
+                open=price, high=price * 1.005, low=price * 0.995, close=price,
+                volume=1.0, quote_volume=price,
+            ))
+    return daily, hourly
+
+
+def _up_then_down(up=150, down=120):
+    closes = [100.0 * math.exp(0.003 * i) for i in range(up)]
+    peak = closes[-1]
+    closes += [peak * math.exp(-0.004 * (k + 1)) for k in range(down)]
+    return _daily_hourly_from(closes)
+
+
+def test_control_variant_disables_only_the_momentum_filter():
+    from trading.strategies.tsmom import TsmomSignal, evaluate_tsmom
+
+    closes = [100.0 * math.exp(-0.003 * i) for i in range(120)]
+    daily = _daily(closes)
+    default = evaluate_tsmom(daily, symbol="BTCUSDT", decision_at=daily[-1].close_time)
+    control = evaluate_tsmom(
+        daily, symbol="BTCUSDT", decision_at=daily[-1].close_time, require_positive_momentum=False,
+    )
+    assert default.signal is TsmomSignal.NO_TRADE
+    assert control.signal is TsmomSignal.LONG
+    assert "CONTROL_NO_MOMENTUM_FILTER" in control.reasons
+
+
+def test_signal_exit_holds_until_the_signal_flips():
+    daily, hourly = _up_then_down()
+    report = run_backtest(
+        symbol="BTCUSDT", daily=daily, hourly=hourly, params=TsmomParams(),
+        n_folds=3, embargo_days=2, variant="signal_exit",
+    )
+    assert report.variant == "signal_exit"
+    assert report.trades >= 1
+    reasons = report.aggregate.exit_reason_breakdown
+    assert "SIGNAL_EXIT" in reasons
+    assert not {"TIME_STOP", "TARGET_2", "STOP"} & set(reasons)
+    payload = report.to_dict()
+    assert payload["variant"] == "signal_exit"
+    assert any("signal_exit" in note for note in payload["notes"])
+    json.loads(json.dumps(payload, allow_nan=False))
+
+
+def test_signal_exit_trade_outlives_the_ladder_time_stop():
+    from trading.backtest.walk_forward import _HourlySeries, _simulate
+
+    daily, hourly = _up_then_down()
+    result = _simulate(
+        symbol="BTCUSDT", daily=daily, hourly=_HourlySeries(hourly), funding=None,
+        params=TsmomParams(), taker_fee_bps=4.0, slippage_bps=2.0, horizon_hours=168,
+        single_position=True, variant="signal_exit",
+    )
+    first = result.trades[0]
+    assert first.plan is None
+    assert first.exit_time - first.entry_time > TsmomParams().time_stop_seconds
+    assert first.exit_reason == "SIGNAL_EXIT"
+
+
+def test_signal_exit_catastrophic_stop_fires_on_a_crash_bar():
+    from trading.backtest.walk_forward import _HourlySeries, _simulate
+
+    closes = [100.0 * math.exp(0.003 * i) for i in range(160)]
+    daily, hourly = _daily_hourly_from(closes)
+    crash_index = 24 * 70 + 5  # well after the first entry at day 60
+    bar = hourly[crash_index]
+    hourly[crash_index] = Candle(
+        open_time=bar.open_time, close_time=bar.close_time, available_at=bar.available_at,
+        open=bar.open, high=bar.high, low=bar.open * 0.6, close=bar.close,
+        volume=1.0, quote_volume=bar.close,
+    )
+    result = _simulate(
+        symbol="BTCUSDT", daily=daily, hourly=_HourlySeries(hourly), funding=None,
+        params=TsmomParams(), taker_fee_bps=4.0, slippage_bps=2.0, horizon_hours=168,
+        single_position=True, variant="signal_exit",
+    )
+    stopped = [t for t in result.trades if t.exit_reason == "CATASTROPHIC_STOP"]
+    assert stopped and stopped[0].exit_time == bar.close_time
+    assert stopped[0].net_return_pct < 0
+
+
+def test_always_long_control_trades_where_the_filter_would_not():
+    closes = [100.0 * math.exp(-0.002 * i) for i in range(200)]
+    daily, hourly = _daily_hourly_from(closes)
+    ladder = run_backtest(symbol="BTCUSDT", daily=daily, hourly=hourly, params=TsmomParams(),
+                          n_folds=3, embargo_days=2)
+    control = run_backtest(symbol="BTCUSDT", daily=daily, hourly=hourly, params=TsmomParams(),
+                           n_folds=3, embargo_days=2, variant="always_long")
+    assert ladder.trades == 0
+    assert control.trades > 0
+
+
+def test_unknown_variant_is_rejected():
+    daily, hourly = _uptrend_daily_hourly()
+    with pytest.raises(ValueError, match="unknown variant"):
+        run_backtest(symbol="BTCUSDT", daily=daily, hourly=hourly, params=TsmomParams(),
+                     n_folds=3, embargo_days=2, variant="yolo")
+
+
+def test_perturbation_keys_only_touch_parameters_the_variant_uses():
+    from trading.backtest.walk_forward import PERTURBATION_KEYS_BY_VARIANT
+
+    assert "target_1_atr_mult" not in PERTURBATION_KEYS_BY_VARIANT["signal_exit"]
+    assert "lookback_days" not in PERTURBATION_KEYS_BY_VARIANT["always_long"]
+    assert "lookback_days" in PERTURBATION_KEYS_BY_VARIANT["ladder"]
+
+
+def test_trial_identities_are_stable_and_variants_are_preregistered():
+    from pathlib import Path
+
+    from trading.backtest.walk_forward import _trial_params
+    from trading.research.robustness import TrialRegistry, trial_id_for
+    from trading.strategies.tsmom_dossier import TSMOM_FAMILY
+
+    def tid(variant):
+        return trial_id_for(family=TSMOM_FAMILY, params=_trial_params(TsmomParams(), True, variant), dataset={})
+
+    assert tid("ladder") == "144a046334c32016"  # the v2 identity recorded before variants existed
+    committed = {r.trial_id for r in TrialRegistry(Path("research/trials/registry.jsonl")).selection_trials(TSMOM_FAMILY)}
+    assert {tid("ladder"), tid("signal_exit"), tid("always_long")} <= committed
+    assert len({tid("ladder"), tid("signal_exit"), tid("always_long")}) == 3
+
+
+def test_cli_variant_selects_its_dossier(tmp_path):
+    import pandas as pd
+
+    from trading.backtest.walk_forward import _cli
+
+    daily, hourly = _up_then_down()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    for name, rows in (("1d", daily), ("1h", hourly)):
+        pd.DataFrame([vars(c) for c in rows]).to_parquet(data_dir / f"BTCUSDT_klines_{name}.parquet")
+    out = tmp_path / "report.json"
+    assert _cli([
+        "BTCUSDT", "--data-dir", str(data_dir), "--out", str(out), "--folds", "3",
+        "--embargo-days", "2", "--trial-registry", str(tmp_path / "t.jsonl"), "--variant", "signal_exit",
+    ]) == 0
+    assert "Saf TSMOM" in out.with_suffix(".md").read_text()
+    assert json.loads(out.read_text())["variant"] == "signal_exit"

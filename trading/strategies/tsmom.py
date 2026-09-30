@@ -184,12 +184,17 @@ def evaluate_tsmom(
     symbol: str,
     decision_at: int,
     params: TsmomParams = TsmomParams(),
+    require_positive_momentum: bool = True,
 ) -> TsmomDecision:
     """Return the TSMOM decision for the last visible daily bar.
 
     The strategy consumes DAILY candles ordered chronologically. It uses only
     closed candles by construction: the caller must have already filtered
     open candles at the data-adapter boundary (`parse_klines` enforces this).
+
+    ``require_positive_momentum=False`` exists only for the ablation control
+    run ("always long, same exits"); it is deliberately not a ``TsmomParams``
+    field so existing trial identities stay unchanged.
     """
 
     needed = max(
@@ -219,7 +224,7 @@ def evaluate_tsmom(
         target_vol_pct=params.target_annualized_vol_pct,
         max_leverage=params.max_leverage,
     )
-    if trailing_return <= 0:
+    if require_positive_momentum and trailing_return <= 0:
         return TsmomDecision(
             decision_at=decision_at,
             symbol=symbol.upper(),
@@ -262,7 +267,11 @@ def evaluate_tsmom(
         entry_price=entry,
         plan=plan,
         reasons=(
-            f"MOMENTUM_POSITIVE_{params.lookback_days}D",
+            (
+                f"MOMENTUM_POSITIVE_{params.lookback_days}D"
+                if trailing_return > 0
+                else "CONTROL_NO_MOMENTUM_FILTER"
+            ),
             f"VOL_SCALE_{scale:.2f}X",
             f"ATR_{atr:.2f}PCT",
         ),

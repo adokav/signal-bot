@@ -77,7 +77,9 @@ from trading.research.robustness import (
 from trading.strategies.tsmom import (
     ExitPlan,
     TsmomParams,
+    TsmomDecision,
     TsmomSignal,
+    atr_pct,
     evaluate_tsmom,
 )
 
@@ -85,15 +87,21 @@ from trading.strategies.tsmom import (
 TRADING_DAYS_PER_YEAR = 365
 ENTRY_DELAY_STRESS_HOURS = (1, 4)
 DECAY_HORIZONS_HOURS = (1, 4, 12, 24, 72, 168)
-PERTURBATION_KEYS = (
-    "lookback_days",
-    "realized_vol_lookback_days",
-    "target_annualized_vol_pct",
-    "atr_lookback_days",
-    "stop_atr_mult",
-    "target_1_atr_mult",
-    "target_2_atr_mult",
-)
+VARIANTS = ("ladder", "signal_exit", "always_long")
+# Pure TSMOM holds until the signal flips; this stop only guards against a
+# regime break (about four daily ATRs, ~12-16% on BTC). Fixed before any
+# signal_exit result was seen.
+CATASTROPHIC_STOP_ATR_MULT = 4.0
+_SIGNAL_KEYS = ("realized_vol_lookback_days", "target_annualized_vol_pct", "atr_lookback_days")
+_LADDER_KEYS = ("stop_atr_mult", "target_1_atr_mult", "target_2_atr_mult")
+# Only parameters that can change a variant's trades are perturbed; varying
+# an unused parameter would report fake robustness.
+PERTURBATION_KEYS_BY_VARIANT = {
+    "ladder": ("lookback_days", *_SIGNAL_KEYS, *_LADDER_KEYS),
+    "signal_exit": ("lookback_days", *_SIGNAL_KEYS),
+    "always_long": (*_SIGNAL_KEYS, *_LADDER_KEYS),
+}
+PERTURBATION_KEYS = PERTURBATION_KEYS_BY_VARIANT["ladder"]
 DSR_PASS_PROBABILITY = 0.95
 
 
@@ -109,7 +117,7 @@ class SimulatedTrade:
     exit_time: int
     entry_price: float
     exit_price: float
-    plan: ExitPlan
+    plan: ExitPlan | None  # None for signal_exit trades (no target ladder)
     scale: float
     gross_return_pct: float  # price return × scale
     cost: CostBreakdown  # per unit notional
@@ -206,10 +214,36 @@ def simulate_trade(
     exit_candle, exit_price, reason, mfe, mae = _walk_exit(
         hourly_after_entry, plan, entry_time=entry_time
     )
-    price_return_pct = (exit_price / plan.entry_price - 1.0) * 100.0
+    return _finalize_trade(
+        symbol=symbol, plan=plan, scale=scale, entry_time=entry_time,
+        entry_price=plan.entry_price, exit_time=exit_candle.close_time,
+        exit_price=exit_price, reason=reason, mfe=mfe, mae=mae,
+        funding_history=funding_history, taker_fee_bps=taker_fee_bps,
+        slippage_bps=slippage_bps, regime=regime,
+    )
+
+
+def _finalize_trade(
+    *,
+    symbol: str,
+    plan: ExitPlan | None,
+    scale: float,
+    entry_time: int,
+    entry_price: float,
+    exit_time: int,
+    exit_price: float,
+    reason: str,
+    mfe: float,
+    mae: float,
+    funding_history: Sequence[FundingRow] | None,
+    taker_fee_bps: float,
+    slippage_bps: float,
+    regime: str,
+) -> SimulatedTrade:
+    price_return_pct = (exit_price / entry_price - 1.0) * 100.0
     cost = round_trip_cost_pct(
         entry_time=entry_time,
-        exit_time=exit_candle.close_time,
+        exit_time=exit_time,
         funding_history=funding_history,
         taker_fee_bps=taker_fee_bps,
         slippage_bps=slippage_bps,
@@ -217,8 +251,8 @@ def simulate_trade(
     return SimulatedTrade(
         symbol=symbol,
         entry_time=entry_time,
-        exit_time=exit_candle.close_time,
-        entry_price=plan.entry_price,
+        exit_time=exit_time,
+        entry_price=entry_price,
         exit_price=exit_price,
         plan=plan,
         scale=scale,
@@ -230,6 +264,45 @@ def simulate_trade(
         exit_reason=reason,
         regime=regime,
     )
+
+
+def _walk_signal_exit(
+    *,
+    daily: Sequence[Candle],
+    decisions: dict[int, TsmomDecision],
+    entry_index: int,
+    entry_time: int,
+    entry_price: float,
+    stop_price: float,
+    hourly: "_HourlySeries",
+) -> tuple[int, float, str, float, float]:
+    """Hold until the daily signal is no longer LONG (pure TSMOM).
+
+    - Hourly bars are scanned for the catastrophic stop; the stop fills at
+      its level (same convention as the ladder walk).
+    - At each subsequent daily close the signal is re-evaluated from data
+      visible at that close; the first non-LONG close exits at that close.
+    - Data running out exits at the last daily close as ``SERIES_END``.
+
+    Returns exit time, exit price, reason, MFE and MAE (percentage points).
+    """
+
+    mfe = 0.0
+    mae = 0.0
+    cursor = entry_time
+    for j in range(entry_index + 1, len(daily)):
+        day_close = daily[j].close_time
+        for bar in hourly.window(cursor, day_close):
+            mfe = max(mfe, (bar.high / entry_price - 1.0) * 100.0)
+            mae = min(mae, (bar.low / entry_price - 1.0) * 100.0)
+            if bar.low <= stop_price:
+                return bar.close_time, stop_price, "CATASTROPHIC_STOP", mfe, mae
+        cursor = day_close
+        decision = decisions.get(j)
+        if decision is None or decision.signal is not TsmomSignal.LONG:
+            return day_close, daily[j].close, "SIGNAL_EXIT", mfe, mae
+    last = daily[-1]
+    return last.close_time, last.close, "SERIES_END", mfe, mae
 
 
 class _HourlySeries:
@@ -397,6 +470,7 @@ def compute_fold_metrics(
 class BacktestReport:
     symbol: str
     params: TsmomParams
+    variant: str = "ladder"
     folds: list[FoldMetrics] = field(default_factory=list)
     aggregate: FoldMetrics | None = None
     benchmark: BuyHoldMetrics | None = None
@@ -425,6 +499,7 @@ class BacktestReport:
     def to_dict(self) -> dict:
         return {
             "symbol": self.symbol,
+            "variant": self.variant,
             "params": asdict(self.params),
             "total_days": self.total_days,
             "daily_bars": self.daily_bars,
@@ -487,23 +562,46 @@ def _simulate(
     single_position: bool,
     entry_delay_hours: int = 0,
     label_regimes: bool = False,
+    variant: str = "ladder",
 ) -> _SimulationResult:
     if entry_delay_hours < 0:
         raise ValueError("entry delay cannot be negative")
+    if variant not in VARIANTS:
+        raise ValueError(f"unknown variant {variant!r}")
     trades: list[SimulatedTrade] = []
     long_signal_times: list[int] = []
     skipped = 0
     closes = [c.close for c in daily]
-    active_exit_time: int | None = None
-    for i in range(_min_start(params), len(daily) - 1):
-        decision_time = daily[i].close_time
-        decision = evaluate_tsmom(
-            daily[: i + 1], symbol=symbol, decision_at=decision_time, params=params
+    start = _min_start(params)
+    decisions = {
+        i: evaluate_tsmom(
+            daily[: i + 1], symbol=symbol, decision_at=daily[i].close_time, params=params,
+            require_positive_momentum=variant != "always_long",
         )
+        for i in range(start, len(daily))
+    }
+    active_exit_time: int | None = None
+    for i in range(start, len(daily) - 1):
+        decision_time = daily[i].close_time
+        decision = decisions[i]
         if decision.signal is not TsmomSignal.LONG or decision.plan is None:
             continue
         long_signal_times.append(decision_time)
         if single_position and active_exit_time is not None and decision_time < active_exit_time:
+            continue
+        if variant == "signal_exit":
+            trade = _signal_exit_trade(
+                symbol=symbol, daily=daily, decisions=decisions, index=i, hourly=hourly,
+                params=params, scale=decision.position_scale, funding=funding,
+                taker_fee_bps=taker_fee_bps, slippage_bps=slippage_bps,
+                entry_delay_hours=entry_delay_hours,
+                regime=trend_vol_regime(closes[: i + 1]) if label_regimes else "UNKNOWN",
+            )
+            if trade is None:
+                skipped += 1
+                continue
+            trades.append(trade)
+            active_exit_time = trade.exit_time
             continue
         plan = decision.plan
         entry_time = decision_time
@@ -545,6 +643,48 @@ def _simulate(
         trades.append(trade)
         active_exit_time = trade.exit_time
     return _SimulationResult(trades, long_signal_times, skipped)
+
+
+def _signal_exit_trade(
+    *,
+    symbol: str,
+    daily: Sequence[Candle],
+    decisions: dict[int, TsmomDecision],
+    index: int,
+    hourly: _HourlySeries,
+    params: TsmomParams,
+    scale: float,
+    funding: Sequence[FundingRow] | None,
+    taker_fee_bps: float,
+    slippage_bps: float,
+    entry_delay_hours: int,
+    regime: str,
+) -> SimulatedTrade | None:
+    decision_time = daily[index].close_time
+    entry_time = decision_time
+    entry_price = daily[index].close
+    if entry_delay_hours:
+        delayed = hourly.window(decision_time, decision_time + entry_delay_hours * 3600)
+        if not delayed:
+            return None
+        entry_time = delayed[-1].close_time
+        entry_price = delayed[-1].close
+    atr = atr_pct(daily[: index + 1], lookback=params.atr_lookback_days)
+    stop_price = entry_price * (1.0 - CATASTROPHIC_STOP_ATR_MULT * atr / 100.0)
+    if stop_price <= 0:
+        return None
+    exit_time, exit_price, reason, mfe, mae = _walk_signal_exit(
+        daily=daily, decisions=decisions, entry_index=index, entry_time=entry_time,
+        entry_price=entry_price, stop_price=stop_price, hourly=hourly,
+    )
+    if exit_time <= entry_time:
+        return None
+    return _finalize_trade(
+        symbol=symbol, plan=None, scale=scale, entry_time=entry_time,
+        entry_price=entry_price, exit_time=exit_time, exit_price=exit_price,
+        reason=reason, mfe=mfe, mae=mae, funding_history=funding,
+        taker_fee_bps=taker_fee_bps, slippage_bps=slippage_bps, regime=regime,
+    )
 
 
 def _year_of(trade: SimulatedTrade) -> str:
@@ -640,6 +780,7 @@ def run_backtest(
     n_trials: int = 1,
     other_trial_sharpes: Sequence[float] = (),
     seed: int = 0,
+    variant: str = "ladder",
 ) -> BacktestReport:
     """Run the purged walk-forward backtest and the §17/§18/§19/§41 evidence set.
 
@@ -647,13 +788,21 @@ def run_backtest(
     open; ``False`` restores event-independent simulation for diagnostics.
     ``n_trials`` is the number of distinct strategy configurations tried in
     this family, including this one (from the trial registry).
+
+    ``variant``:
+    - ``ladder`` — TSMOM entry + ATR ladder exits (Faz A2a);
+    - ``signal_exit`` — pure TSMOM: hold until the 60d signal flips, with a
+      catastrophic stop only (``horizon_hours`` is not used);
+    - ``always_long`` — ablation control: momentum filter off, ladder exits.
     """
 
+    if variant not in VARIANTS:
+        raise ValueError(f"unknown variant {variant!r}; expected one of {VARIANTS}")
     if len(daily) < params.lookback_days + params.realized_vol_lookback_days + 2:
         raise ValueError("not enough daily bars for the configured lookbacks")
     if not hourly:
         raise ValueError("hourly bars required for exit simulation")
-    if horizon_hours * 3600 < params.time_stop_seconds:
+    if variant != "signal_exit" and horizon_hours * 3600 < params.time_stop_seconds:
         raise ValueError(
             f"horizon_hours={horizon_hours} is shorter than the plan time-stop "
             f"({params.time_stop_seconds // 3600}h); trades would be cut by the data window"
@@ -665,6 +814,7 @@ def run_backtest(
         symbol=symbol, daily=daily, hourly=hourly_series, funding=funding,
         taker_fee_bps=taker_fee_bps, slippage_bps=slippage_bps,
         horizon_hours=horizon_hours, single_position=single_position,
+        variant=variant,
     )
     base = _simulate(params=params, label_regimes=True, **common)
     trades = base.trades
@@ -732,7 +882,7 @@ def run_backtest(
             return mean(values), len(values)
 
         stability = run_perturbation(
-            base_dict, keys=PERTURBATION_KEYS, evaluate=_evaluate,
+            base_dict, keys=PERTURBATION_KEYS_BY_VARIANT[variant], evaluate=_evaluate,
             metric_name="expectancy_pct", base_metric=base_expectancy,
         )
 
@@ -763,6 +913,16 @@ def run_backtest(
     ]
     if funding is None:
         notes.append("Funding verisi yok: maliyetler olduğundan düşük gösterilir.")
+    if variant == "signal_exit":
+        notes.append(
+            "signal_exit: pozisyon 60g sinyali dönene kadar tutulur; vol ölçeği girişte sabitlenir "
+            f"(günlük yeniden dengeleme yok); felaket stop'u {CATASTROPHIC_STOP_ATR_MULT:g}×ATR14."
+        )
+    elif variant == "always_long":
+        notes.append(
+            "always_long: ablasyon kontrolü — momentum filtresi kapalı, çıkışlar ladder ile aynı. "
+            "Deploy adayı değildir; filtrenin katkısını ölçer."
+        )
     return BacktestReport(
         symbol=symbol.upper(),
         params=params,
@@ -770,6 +930,7 @@ def run_backtest(
         aggregate=aggregate,
         benchmark=benchmark,
         go_no_go=go_no_go,
+        variant=variant,
         total_days=total_days,
         daily_bars=len(daily),
         hourly_bars=len(hourly),
@@ -806,6 +967,7 @@ def evidence_summary(report: BacktestReport) -> dict:
     perf = report.performance
     return {
         "symbol": report.symbol,
+        "variant": report.variant,
         "trades": report.trades,
         "horizon_hours": report.horizon_hours,
         "performance": perf.to_dict() if perf else None,
@@ -892,8 +1054,11 @@ def _load_funding(path: Path) -> list[FundingRow]:
     ]
 
 
-def _trial_params(params: TsmomParams, single_position: bool) -> dict:
-    return {**asdict(params), "single_position": single_position}
+def _trial_params(params: TsmomParams, single_position: bool, variant: str = "ladder") -> dict:
+    # The ladder variant keeps its historical identity (no "variant" key) so
+    # the v1/v2 registry entries still match and N is not inflated.
+    base = {**asdict(params), "single_position": single_position}
+    return base if variant == "ladder" else {**base, "variant": variant}
 
 
 def _cli(argv: Iterable[str] | None = None) -> int:
@@ -901,12 +1066,7 @@ def _cli(argv: Iterable[str] | None = None) -> int:
 
     from trading.research.report import StrategyReport
     from trading.research.robustness import TrialRecord, TrialRegistry, trial_id_for
-    from trading.strategies.tsmom_dossier import (
-        TSMOM_BLOW_UP_SCENARIOS,
-        TSMOM_FAMILY,
-        TSMOM_FRAGILITY_ANSWERS,
-        TSMOM_HYPOTHESIS,
-    )
+    from trading.strategies.tsmom_dossier import TSMOM_FAMILY, dossier_for
 
     parser = argparse.ArgumentParser(
         description="Run the TSMOM walk-forward backtest on stored parquet data."
@@ -924,6 +1084,8 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--allow-overlapping", action="store_true",
                         help="disable single-position mode (allow stacked trades)")
     parser.add_argument("--perturb", action="store_true", help="run parameter perturbation (§15)")
+    parser.add_argument("--variant", choices=VARIANTS, default="ladder",
+                        help="ladder (Faz A2a), signal_exit (pure TSMOM) or always_long (control)")
     parser.add_argument("--trial-registry", type=Path, default=Path("research/trials/registry.jsonl"))
     parser.add_argument("--record-trial", action="store_true",
                         help="append this configuration to the trial registry")
@@ -937,7 +1099,7 @@ def _cli(argv: Iterable[str] | None = None) -> int:
 
     params = TsmomParams()
     single_position = not args.allow_overlapping
-    trial_params = _trial_params(params, single_position)
+    trial_params = _trial_params(params, single_position, args.variant)
     trial_id = trial_id_for(family=TSMOM_FAMILY, params=trial_params, dataset={})
     registry = TrialRegistry(args.trial_registry)
     prior = registry.selection_trials(TSMOM_FAMILY)
@@ -953,13 +1115,15 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         n_folds=args.folds, embargo_days=args.embargo_days,
         horizon_hours=args.horizon_hours, single_position=single_position,
         perturb=args.perturb, n_trials=n_trials, other_trial_sharpes=other_sharpes,
+        variant=args.variant,
     )
     write_report(report, args.out)
     md_path = args.report_md or args.out.with_suffix(".md")
+    hypothesis, answers, scenarios = dossier_for(args.variant)
     strategy_report = StrategyReport(
-        hypothesis=TSMOM_HYPOTHESIS,
-        fragility_answers=TSMOM_FRAGILITY_ANSWERS,
-        blow_up_scenarios=TSMOM_BLOW_UP_SCENARIOS,
+        hypothesis=hypothesis,
+        fragility_answers=answers,
+        blow_up_scenarios=scenarios,
         evidence=evidence_summary(report),
     )
     md_path.parent.mkdir(parents=True, exist_ok=True)
@@ -970,7 +1134,7 @@ def _cli(argv: Iterable[str] | None = None) -> int:
             trial_id=trial_id,
             family=TSMOM_FAMILY,
             kind="SELECTION_CANDIDATE",
-            description="walk_forward CLI run",
+            description=f"walk_forward CLI run (variant={args.variant})",
             params=trial_params,
             dataset={"symbol": symbol, "daily_bars": len(daily), "first_close": daily[0].close_time,
                      "last_close": daily[-1].close_time},
@@ -980,7 +1144,7 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         ))
 
     print(f"wrote {args.out} and {md_path}")
-    print(f"trades: {report.trades}  (trials in family: {n_trials})")
+    print(f"variant: {args.variant}  trades: {report.trades}  (trials in family: {n_trials})")
     perf = report.performance
     if perf:
         pf = f"{perf.profit_factor:.2f}" if perf.profit_factor is not None else "n/a"

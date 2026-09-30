@@ -195,6 +195,38 @@ doğru gerekçeyle: zayıf pozitif, istatistiksel olarak anlamlı değil,
 B&H'nin gerisinde. Saf TSMOM (sinyal dönene kadar tutma) hâlâ test
 edilmedi; bu yeni bir deneme olur (N=3).
 
+## Faz A3 — Ön-kayıtlı varyant karşılaştırması (protokol, sonuçlardan önce yazıldı)
+
+Amaç: iki soruyu sonuçlar görülmeden önce sabitlenmiş kurallarla yanıtlamak.
+(1) Saf TSMOM (sinyal dönene kadar tut) swing merdiveninden farklı mı?
+(2) 60 günlük momentum filtresi herhangi bir şey katıyor mu?
+
+**Koşular** (Actions → backtest; hepsi `BTCUSDT`, `lookback_months=72`,
+folds 4, embargo 3, horizon 168, perturb açık):
+
+| variant | Ne test ediyor |
+|---|---|
+| `ladder` | Faz A2a tasarımı (72 ay; aynı `trial_id`, yeni deneme değil) |
+| `signal_exit` | Saf TSMOM: sinyal dönüşünde çık, yalnızca 4×ATR14 felaket stop'u |
+| `always_long` | Kontrol: momentum filtresi kapalı, ladder ile aynı çıkışlar |
+
+**Deneme sayısı:** iki varyant `research/trials/registry.jsonl`'a sonuçlardan
+önce kaydedildi. Ailede N=4 (v1, ladder, signal_exit, always_long); deflated
+Sharpe her koşuda N=4 ile hesaplanır.
+
+**Önceden sabitlenmiş karar kuralları:**
+
+1. *Filtrenin katkısı* = `ladder` EV − `always_long` EV (72 ay). Fark ≤ 0
+   ise 60 günlük filtre edge eklemiyor; getiri merdiven + BTC betasıdır.
+2. *Saf TSMOM* ancak terfi aşaması `BACKTEST_PASSED_PAPER_REQUIRED` olursa
+   paper aşamasına aday olur. 30'dan az işlem (`INSUFFICIENT`) sonucu,
+   Sharpe ne çıkarsa çıksın **sonuçsuz** sayılır. Beklenti: 6 yılda
+   yaklaşık 10-30 işlem, yani büyük olasılıkla sonuçsuz.
+3. `ladder`'ın 36 ve 72 aylık sonuçları farklıysa ikisi de raporlanır; hangisi
+   daha iyi görünüyorsa o seçilmez.
+4. Sonuçları gördükten sonra yapılan her parametre veya kural değişikliği yeni
+   bir deneme olarak kayda girer (N artar).
+
 ## Chassis geleceği
 
 `trading/` paketi silinmez — Faz A altyapısı gelecekteki hipotez denemeleri

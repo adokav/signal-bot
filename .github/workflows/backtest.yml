@@ -44,6 +44,20 @@ on:
         required: false
         default: true
         type: boolean
+      lookback_months:
+        description: "Months of history (36 = ~3y; 72 = ~6y, the pre-declared variant comparison window)"
+        required: false
+        default: "36"
+        type: string
+      variant:
+        description: "ladder = TSMOM + ATR ladder (Faz A2a) · signal_exit = pure TSMOM · always_long = control"
+        required: true
+        default: ladder
+        type: choice
+        options:
+          - ladder
+          - signal_exit
+          - always_long
 
 permissions:
   contents: read
@@ -73,13 +87,15 @@ jobs:
         run: |
           set -euo pipefail
           python -m trading.data.binance_vision "${{ github.event.inputs.symbol }}" \
-              --out research/data/binance_perp
+              --out research/data/binance_perp \
+              --lookback-months "${{ github.event.inputs.lookback_months }}"
       - name: Run walk-forward backtest
         run: |
           set -euo pipefail
           python -m trading.backtest.walk_forward "${{ github.event.inputs.symbol }}" \
               --data-dir research/data/binance_perp \
-              --out "research/data/backtest_${{ github.event.inputs.symbol }}.json" \
+              --out "research/data/backtest_${{ github.event.inputs.symbol }}_${{ github.event.inputs.variant }}.json" \
+              --variant "${{ github.event.inputs.variant }}" \
               --folds "${{ github.event.inputs.folds }}" \
               --embargo-days "${{ github.event.inputs.embargo_days }}" \
               --horizon-hours "${{ github.event.inputs.horizon_hours }}" \
@@ -90,9 +106,10 @@ jobs:
         run: |
           set -euo pipefail
           symbol="${{ github.event.inputs.symbol }}"
-          json="research/data/backtest_${symbol}.json"
+          variant="${{ github.event.inputs.variant }}"
+          json="research/data/backtest_${symbol}_${variant}.json"
           {
-            echo "## Backtest — ${symbol}"
+            echo "## Backtest — ${symbol} · ${variant}"
             echo ""
             echo '```json'
             python -c "
@@ -104,6 +121,7 @@ jobs:
           stab = data.get('parameter_stability') or {}
           promo = data.get('promotion') or {}
           summary = {
+              'variant': data.get('variant'),
               'trades': data.get('trades'),
               'horizon_hours': data.get('horizon_hours'),
               'strategy': {k: perf.get(k) for k in (
@@ -125,7 +143,7 @@ jobs:
             echo ""
             echo "<details><summary>Strateji raporu (hipotez, kırılganlık, WHAT COULD BLOW UP THIS ACCOUNT?)</summary>"
             echo ""
-            cat "research/data/backtest_${symbol}.md"
+            cat "research/data/backtest_${symbol}_${variant}.md"
             echo ""
             echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -133,7 +151,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backtest-${{ github.event.inputs.symbol }}
+          name: backtest-${{ github.event.inputs.symbol }}-${{ github.event.inputs.variant }}
           path: |
             research/data/backtest_*.json
             research/data/backtest_*.md
