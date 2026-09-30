@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 
 import pytest
@@ -165,6 +166,7 @@ def test_compute_fold_metrics_positive_expectancy():
                     self.total_pct = total
 
             self.cost = _C(cost)
+            self.scaled_cost_pct = cost
             self.mfe_pct = mfe
             self.mae_pct = mae
             self.entry_time = entry_time
@@ -268,7 +270,7 @@ def test_run_backtest_end_to_end_on_uptrend_series():
         params=TsmomParams(),
         n_folds=3,
         embargo_days=2,
-        horizon_hours=96,
+        horizon_hours=168,
     )
     assert report.trades > 0
     assert report.aggregate is not None
@@ -281,3 +283,131 @@ def test_run_backtest_end_to_end_on_uptrend_series():
     assert payload["benchmark"] is not None
     assert payload["go_no_go"]["overall_go"] in (True, False)
     assert payload["can_authorize_trade"] is False
+    # The whole evidence set must round-trip through strict JSON.
+    json.loads(json.dumps(payload, allow_nan=False))
+    assert payload["performance"]["n_trades"] == report.trades
+    assert payload["cost_stress"]["results"][0]["scenario"] == "base"
+    assert {row["delay_hours"] for row in payload["entry_delay_stress"]} == {1, 4}
+    assert payload["promotion"]["promotable_to_live"] is False
+    assert payload["promotion"]["can_authorize_trade"] is False
+    assert any("Funding verisi yok" in note for note in payload["notes"])
+
+
+def test_run_backtest_refuses_horizon_shorter_than_time_stop():
+    # The v2 CI run used horizon 96h against a 168h time-stop: half the
+    # trades were force-closed by the data window as SERIES_END.
+    daily, hourly = _uptrend_daily_hourly()
+    with pytest.raises(ValueError, match="shorter than the plan time-stop"):
+        run_backtest(
+            symbol="BTCUSDT", daily=daily, hourly=hourly, params=TsmomParams(),
+            n_folds=3, embargo_days=2, horizon_hours=96,
+        )
+
+
+def test_costs_are_charged_on_scaled_exposure_not_full_notional():
+    plan = _plan(100.0, atr_pct=2.0)
+    hourly = _hourly(0, [101.0, 102.5, 101.0, 103.5, 104.5])
+    full = simulate_trade(
+        symbol="BTCUSDT", plan=plan, scale=1.0, entry_time=0,
+        hourly_after_entry=hourly, funding_history=None,
+        taker_fee_bps=4.0, slippage_bps=2.0,
+    )
+    half = simulate_trade(
+        symbol="BTCUSDT", plan=plan, scale=0.5, entry_time=0,
+        hourly_after_entry=hourly, funding_history=None,
+        taker_fee_bps=4.0, slippage_bps=2.0,
+    )
+    assert half.net_return_pct == pytest.approx(full.net_return_pct * 0.5)
+    assert half.scaled_cost_pct == pytest.approx(full.cost.total_pct * 0.5)
+
+
+def test_simulate_trade_rejects_non_positive_scale():
+    plan = _plan(100.0)
+    with pytest.raises(ValueError):
+        simulate_trade(
+            symbol="BTCUSDT", plan=plan, scale=0.0, entry_time=0,
+            hourly_after_entry=_hourly(0, [100.5]), funding_history=None,
+            taker_fee_bps=4.0, slippage_bps=2.0,
+        )
+
+
+def test_sharpe_is_annualized_by_observed_trade_frequency():
+    # Two trades with 1-day holds inside a 365-day window: the strategy
+    # trades twice a year, not 365 times a year.
+    class _C:
+        total_pct = 0.0
+
+    class _T:
+        def __init__(self, net, entry):
+            self.net_return_pct = net
+            self.gross_return_pct = net
+            self.cost = _C()
+            self.scaled_cost_pct = 0.0
+            self.mfe_pct = 0.0
+            self.mae_pct = 0.0
+            self.entry_time = entry
+            self.exit_time = entry + 86_400
+            self.exit_reason = "TIME_STOP"
+
+    trades = [_T(1.0, 0), _T(3.0, 100 * 86_400)]
+    metrics = compute_fold_metrics("f", trades, span_days=365.0)
+    stdev = math.sqrt(2.0)
+    assert metrics.sharpe_annualized == pytest.approx((2.0 / stdev) * math.sqrt(2.0))
+
+
+def test_regime_labels_are_attached_to_trades_when_history_allows():
+    daily, hourly = _uptrend_daily_hourly(n_days=700)
+    report = run_backtest(
+        symbol="BTCUSDT", daily=daily, hourly=hourly, params=TsmomParams(),
+        n_folds=3, embargo_days=2, horizon_hours=168,
+    )
+    assert report.performance_by_regime
+    assert set(report.performance_by_regime) - {"UNKNOWN"}
+
+
+def test_perturbation_populates_stability_verdict():
+    daily, hourly = _uptrend_daily_hourly()
+    report = run_backtest(
+        symbol="BTCUSDT", daily=daily, hourly=hourly, params=TsmomParams(),
+        n_folds=3, embargo_days=2, horizon_hours=168, perturb=True,
+    )
+    assert report.parameter_stability is not None
+    assert report.parameter_stability.n_neighbors > 0
+    assert report.parameter_stability.verdict in {"ROBUST", "FRAGILE", "NO_EDGE"}
+    json.loads(json.dumps(report.to_dict(), allow_nan=False))
+
+
+def test_cli_writes_json_markdown_and_records_trial(tmp_path):
+    import pandas as pd
+
+    from trading.backtest.walk_forward import _cli
+    from trading.research.robustness import TrialRegistry
+
+    daily, hourly = _uptrend_daily_hourly()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    for name, rows in (("1d", daily), ("1h", hourly)):
+        pd.DataFrame([vars(c) for c in rows]).to_parquet(
+            data_dir / f"BTCUSDT_klines_{name}.parquet"
+        )
+    registry = tmp_path / "trials.jsonl"
+    out = tmp_path / "report.json"
+    assert _cli([
+        "BTCUSDT", "--data-dir", str(data_dir), "--out", str(out),
+        "--folds", "3", "--embargo-days", "2",
+        "--trial-registry", str(registry), "--record-trial",
+    ]) == 0
+    payload = json.loads(out.read_text())
+    assert payload["deflated_sharpe"] is None or payload["deflated_sharpe"]["n_trials"] == 1
+    markdown = out.with_suffix(".md").read_text()
+    assert markdown.rstrip().splitlines()[0].startswith("# Strateji raporu")
+    assert "## WHAT COULD BLOW UP THIS ACCOUNT?" in markdown
+    records = TrialRegistry(registry).load()
+    assert len(records) == 1 and records[0].kind == "SELECTION_CANDIDATE"
+    # Re-running the same configuration is not a new trial.
+    _cli([
+        "BTCUSDT", "--data-dir", str(data_dir), "--out", str(out),
+        "--folds", "3", "--embargo-days", "2",
+        "--trial-registry", str(registry), "--record-trial",
+    ])
+    assert len(TrialRegistry(registry).load()) == 1

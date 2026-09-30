@@ -118,6 +118,43 @@ değil, hipotez meselesi. Akademik literatürle tutarlı: 2020 sonrası kripto
 tek-sembol TSMOM edge'i büyük ölçüde arbitraj edildi (institutional +
 market-maker akışı, funding market'in olgunlaşması).
 
+## Düzeltme (2026-09-30) — v2 sonucu karar için geçersiz
+
+Quant spec revizyonu sırasında harness'ta v2 sonucunu etkileyen iki hata ve
+bir tasarım karışıklığı bulundu. Yukarıdaki "CLOSED — NO-GO" kararı bu
+yüzden **yeniden koşu yapılana kadar askıdadır**:
+
+1. **Horizon < time-stop.** Workflow varsayılanı `horizon_hours=96` idi,
+   strateji time-stop'u 168 saat. İşlemlerin %49'u (`SERIES_END` 64 +
+   `SERIES_END_RESIDUAL` 28) stratejinin kendi kuralıyla değil, veri
+   penceresinin kesilmesiyle kapandı. Harness artık bu durumda hata veriyor
+   (fail closed); workflow varsayılanı 168.
+2. **Maliyet ölçeklenmiyordu.** `simulate_trade` getiriyi vol-targeting
+   ölçeği (`scale`) ile çarpıyor ama fee + slippage + funding'i tam notional
+   üzerinden düşüyordu. v2'de `scale ≤ 1` olduğu için maliyet olduğundan
+   fazla gösterildi — sonuç stratejinin aleyhine çarpıktı. Artık
+   `net = (fiyat getirisi − birim maliyet) × scale`.
+3. **Sharpe yıllıklandırması.** `sqrt(365 / ortalama tutma)` stratejinin
+   hep pozisyonda olduğunu varsayıyordu; tek pozisyonlu ve arada düz kalan
+   bir strateji için Sharpe büyüklüğünü şişirir. Artık gözlenen işlem
+   frekansı (`n / takvim yılı`) kullanılıyor.
+4. **Test edilen hipotez saf TSMOM değildi.** Literatürdeki TSMOM pozisyonu
+   sinyal dönene kadar tutar. Bu harness girişi kısa vadeli bir ATR
+   merdiveniyle (T1 = 1 ATR, T2 = 2 ATR, stop = 1.5 ATR) birleştiriyor; bu
+   merdivenin trend takibi için ekonomik gerekçesi yok ve sağ kuyruğu
+   kesiyor. Çürütülen şey en fazla "TSMOM girişi + swing çıkışı"
+   kombinasyonudur. Saf TSMOM (sinyal-tabanlı çıkış) hiç test edilmedi.
+
+Dürüst durum: v1 NO-GO'su geçerli (−%122 DD yapısal olarak kabul edilemez).
+v2 "Sharpe −0.03" rakamı artık referans alınmamalı. Düzeltilmiş harness ile
+aynı parametreler yeniden koşulmalı; bu **yeni bir deneme sayılmaz**
+(`research/trials/registry.jsonl` içinde aynı `trial_id`). Saf TSMOM
+denemesi yapılırsa o yeni bir denemedir ve deflated Sharpe'ta N artar.
+
+Her backtest koşusu artık `backtest_SYMBOL.md` strateji raporunu da üretir:
+hipotez + feature/parametre gerekçeleri, 11 kırılganlık sorusu ve zorunlu son
+bölüm "WHAT COULD BLOW UP THIS ACCOUNT?" (`trading/strategies/tsmom_dossier.py`).
+
 ## Chassis geleceği
 
 `trading/` paketi silinmez — Faz A altyapısı gelecekteki hipotez denemeleri
