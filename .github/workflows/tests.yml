@@ -47,6 +47,7 @@ jobs:
             tests/test_research_robustness.py \
             tests/test_research_decay_features.py \
             tests/test_research_report_promotion.py \
+            tests/test_risk_gate.py \
             tests/test_observation_archive_cadence.py \
             tests/test_macro_data.py \
             tests/test_macro_treasury.py \
