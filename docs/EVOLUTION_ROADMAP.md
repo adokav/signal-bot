@@ -198,9 +198,11 @@ Durum: **✅** yapıldı · **◐** kısmi · **✗** bilinçli olarak yapılmad
 
 1. ✅ **Düzeltilmiş v2 yeniden koşusu** — run #54: NO-GO (zayıf pozitif,
    DSR 0.642, Sharpe 0.53 < B&H 0.80).
-2. **Adil TSMOM testi** — sinyal dönene kadar tut; stop yalnızca felaket
-   koruması. Ayrıca kontrol koşusu: "her gün long + aynı merdiven" (60g
-   filtresinin katkısını ölçer). İkisi de yeni denemedir, DSR'de N artar.
+2. ◐ **Adil TSMOM testi (Faz A3)** — `--variant signal_exit` ve
+   `always_long` kontrolü eklendi, deneme kaydına ön-kayıt yapıldı (N=4).
+   Protokol ve önceden sabitlenmiş karar kuralları
+   `docs/BACKTEST_REPORT_v1_RESULTS.md` "Faz A3" bölümünde. Bekleyen iş: üç
+   koşu (72 ay).
 3. **Taktik setup'ların tarihsel replay'i** — `TacticalLongEngine`'i
    Binance vision spot M5–D1 verisiyle geçmişte çalıştırmak. İleri kaydın
    ≥100 örneğe ulaşması aylar sürer; replay en hızlı kanıt yolu. MEXC ile

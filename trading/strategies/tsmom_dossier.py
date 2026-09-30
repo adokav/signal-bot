@@ -143,3 +143,99 @@ TSMOM_BLOW_UP_SCENARIOS = (
         protection="Stop'ları borsa tarafında bekleyen emir olarak koy, kill switch veri bayatlığında yeni emirleri durdurur, yeniden başlatma açık onay ister.",
     ),
 )
+
+
+# ---------------------------------------------------------------------------
+# Variant dossiers. Written and committed before either variant was run.
+# ---------------------------------------------------------------------------
+
+SIGNAL_EXIT_HYPOTHESIS = StrategyHypothesis(
+    name="Saf TSMOM — sinyal dönene kadar tut (BTCUSDT perp, long-only)",
+    market_logic=(
+        "Aynı zaman serisi momentumu mantığı, literatüre sadık tutma kuralıyla: "
+        "60 günlük getiri pozitif olduğu sürece long kalınır, günlük kapanışta "
+        "sıfır veya altına indiği ilk gün çıkılır. Trend takipçisinin edge'i az "
+        "sayıda büyük sağ-kuyruk hareketinden gelir; 1-2 ATR'de kâr alan bir "
+        "merdiven tam da bu kuyruğu keser. Vol hedefleme boyutu girişte "
+        "sabitler; 4×ATR felaket stop'u yalnızca rejim kırılmalarına karşıdır."
+    ),
+    feature_rationale=dict(TSMOM_HYPOTHESIS.feature_rationale),
+    parameter_rationale={
+        "lookback_days=60": "Literatürdeki 1-3 ay bandının ortası; ladder koşusuyla aynı, yeniden seçilmedi.",
+        "realized_vol_lookback_days=30": "AQR tarzı vol hedeflemede standart bir aylık pencere.",
+        "target_annualized_vol_pct=40": "Ölçek çoğu zaman 1x altında kalır; kaldıraç tavanı 1x korunur.",
+        "exit=sinyal dönüşü (günlük kapanış)": "Literatürdeki tutma kuralı: trend sürdükçe pozisyonda kal, sinyal bitince çık.",
+        "felaket stop=4×ATR14": "Yaklaşık dört günlük sigma; yalnızca rejim kırılmasında tetiklenir, tek işlem kaybını yaklaşık %12-16 ile sınırlar. Sonuç görülmeden sabitlendi.",
+    },
+)
+
+SIGNAL_EXIT_FRAGILITY_ANSWERS = {
+    **TSMOM_FRAGILITY_ANSWERS,
+    "regime_that_kills_edge": (
+        "Sıfır etrafında salınan 60 günlük getiri (chop): her dönüşte tam gidiş-dönüş "
+        "maliyeti ödenir. V-şeklinde çöküşte sinyal geç döner; zirveden önemli bir kısım "
+        "geri verilir, bunu yalnızca felaket stop'u sınırlar."
+    ),
+    "performance_without_top_feature": (
+        "Filtre çıkarılırsa strateji sürekli long olur, yani al-tut benchmark'ı. Bu varyant "
+        "için filtrenin katkısı doğrudan B&H karşılaştırmasıdır."
+    ),
+    "funding_anomaly": (
+        "Evet, ve bu varyantta daha güçlü: tutma süreleri haftalar-aylar sürer, pozitif "
+        "funding tüm süre boyunca birikir. Funding ×2 stres senaryosu belirleyicidir."
+    ),
+}
+
+SLOW_EXIT_SCENARIO = BlowUpScenario(
+    title="Çöküşte geç çıkış (gecikmeli sinyal)",
+    cause="60 günlük getiri ancak fiyat zirveden çok düştükten sonra negatife döner.",
+    early_warning="Fiyat 20/50 günlük ortalamaların çok altında, 60g getiri sıfıra yaklaşıyor, gerçekleşen vol hızla yükseliyor.",
+    loss_mechanism="Pozisyon trendin tersine dönüşünün büyük kısmını taşır; tek işlem kaybı birikmiş kârın önemli bölümünü siler.",
+    protection="4×ATR felaket stop'u, drawdown merdiveni, vol yükseldiğinde ölçeğin küçülmesi.",
+)
+
+SIGNAL_EXIT_BLOW_UP_SCENARIOS = (SLOW_EXIT_SCENARIO, *TSMOM_BLOW_UP_SCENARIOS)
+
+CONTROL_HYPOTHESIS = StrategyHypothesis(
+    name="Kontrol — her gün long + aynı ATR merdiveni (momentum filtresi yok)",
+    market_logic=(
+        "Bu bir hipotez değil, ablasyon kontrolüdür: 60 günlük momentum filtresi "
+        "kaldırılır; vol hedefleme, ATR merdiveni, tek pozisyon ve maliyet modeli "
+        "aynı kalır. Kontrol, filtreli ladder koşusuna yakın veya daha iyi sonuç "
+        "verirse filtre edge eklemiyor demektir; getiri merdiven geometrisinden ve "
+        "BTC betasından geliyordur. Deploy adayı değildir."
+    ),
+    feature_rationale={
+        "lookback_return_60d": "KULLANILMIYOR — kontrolün amacı tam olarak bu filtrenin katkısını ölçmek.",
+        "realized_vol_30d": TSMOM_HYPOTHESIS.feature_rationale["realized_vol_30d"],
+        "atr_14d": TSMOM_HYPOTHESIS.feature_rationale["atr_14d"],
+    },
+    parameter_rationale={
+        key: text for key, text in TSMOM_HYPOTHESIS.parameter_rationale.items()
+        if key != "lookback_days=60"
+    },
+)
+
+CONTROL_FRAGILITY_ANSWERS = {
+    **TSMOM_FRAGILITY_ANSWERS,
+    "most_important_feature": (
+        "Kontrolde sinyal feature'ı yok; sonuç tamamen çıkış merdiveninden, vol "
+        "ölçeklemeden ve BTC betasından gelir."
+    ),
+    "performance_without_top_feature": (
+        "Bu koşunun kendisi o sorunun cevabıdır: filtreli ladder (v2) ile arasındaki fark "
+        "60 günlük filtrenin katkısıdır."
+    ),
+}
+
+
+def dossier_for(variant: str):
+    """(hypothesis, fragility answers, blow-up scenarios) for a walk_forward variant."""
+
+    if variant == "ladder":
+        return TSMOM_HYPOTHESIS, TSMOM_FRAGILITY_ANSWERS, TSMOM_BLOW_UP_SCENARIOS
+    if variant == "signal_exit":
+        return SIGNAL_EXIT_HYPOTHESIS, SIGNAL_EXIT_FRAGILITY_ANSWERS, SIGNAL_EXIT_BLOW_UP_SCENARIOS
+    if variant == "always_long":
+        return CONTROL_HYPOTHESIS, CONTROL_FRAGILITY_ANSWERS, TSMOM_BLOW_UP_SCENARIOS
+    raise ValueError(f"unknown variant {variant!r}")
