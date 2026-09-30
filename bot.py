@@ -15,8 +15,13 @@ from flask import Flask, jsonify
 
 from acce_unified import UnifiedConfig, UnifiedRadarEngine, build_trade_universe
 from acce_unified.listing_fundamentals import ListingFundamentalMetricsProvider
+from acce_unified.forward_ledger import ForwardLedger, status_text, update_records
 from acce_unified.radar_gate import liquid_long_gate, status_line, tactical_gate
-from acce_unified.tactical_long_data import MexcTacticalMarketData
+from acce_unified.tactical_long_data import (
+    TACTICAL_SYMBOLS,
+    MexcTacticalMarketData,
+    TacticalTimeframe,
+)
 from acce_unified.tactical_long_engine import TacticalLongEngine
 
 logging.basicConfig(
@@ -53,6 +58,9 @@ TRADE_UNIVERSE = build_trade_universe()
 ENGINE = UnifiedRadarEngine(CONFIG, TRADE_UNIVERSE, fundamental_provider=FUNDAMENTAL_PROVIDER)
 TACTICAL_DATA = MexcTacticalMarketData(timeout_seconds=CONFIG.request_timeout_seconds)
 TACTICAL_ENGINE = TacticalLongEngine()
+FORWARD_LEDGER = ForwardLedger(Path(os.getenv(
+    "FORWARD_LEDGER_FILE", str(STATE_FILE.parent / "tactical_forward_ledger.json")
+)))
 APP = Flask(__name__)
 HTTP = requests.Session()
 LOCK = threading.RLock()
@@ -63,6 +71,8 @@ STATE: dict[str, Any] = {
     "tactical_last_states": {},
     "last_error": None,
     "tactical_last_error": None,
+    "forward_ledger_status": None,
+    "forward_ledger_error": None,
 }
 
 COMMANDS = [
@@ -345,7 +355,7 @@ def format_status(snapshot: dict[str, Any] | None) -> str:
     tactical_age = max(0, int(time.time()) - int(tactical.get("generated_at") or 0)) if tactical else 0
     age = max(0, int(time.time()) - generated) if generated else 0
     error_text = ", ".join(errors) if errors else str(STATE.get("last_error") or "yok")
-    return "\n".join([
+    return "\n".join(line for line in [
         "📊 SIGNAL BOT v5 CORE",
         "Mod: SHADOW / RADAR ONLY",
         f"Ana tarama: {age} sn önce" if generated else "Ana tarama: henüz yok",
@@ -356,8 +366,30 @@ def format_status(snapshot: dict[str, Any] | None) -> str:
         f"Ana hata: {error_text}",
         f"Taktik hata: {STATE.get('tactical_last_error') or 'yok'}",
         "Kanıt durumu: radar setup'ları backtest edilmedi, olasılık kalibrasyonu yok → azami statü WATCH",
+        str(STATE.get("forward_ledger_status") or "İleriye dönük kayıt: henüz yok"),
+        f"Kayıt hatası: {STATE.get('forward_ledger_error')}" if STATE.get("forward_ledger_error") else "",
         "Emir yetkisi: YOK",
-    ])
+    ] if line)
+
+
+def _update_forward_ledger(snapshot: Any, new_items: list[dict[str, Any]]) -> None:
+    """Advance the shadow track record; never breaks the radar, never overwrites a corrupt ledger."""
+
+    try:
+        records = FORWARD_LEDGER.load()
+        m5 = {
+            symbol: snapshot.candles[symbol][TacticalTimeframe.M5]
+            for symbol in TACTICAL_SYMBOLS
+        }
+        updated = update_records(records, new_assessments=new_items, m5_by_symbol=m5)
+        if updated != records:
+            FORWARD_LEDGER.save(updated)
+        STATE["forward_ledger_status"] = status_text(updated)
+        STATE["forward_ledger_error"] = None
+    except Exception as exc:
+        error = _safe_error(exc)
+        log.warning("İleriye dönük kayıt güncellenemedi: %s", error)
+        STATE["forward_ledger_error"] = error
 
 
 def scan_once() -> dict[str, Any] | None:
@@ -379,7 +411,8 @@ def scan_once() -> dict[str, Any] | None:
 
 def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
     try:
-        report = TACTICAL_ENGINE.analyze(TACTICAL_DATA.snapshot()).to_dict()
+        market = TACTICAL_DATA.snapshot()
+        report = TACTICAL_ENGINE.analyze(market).to_dict()
     except Exception as exc:
         error = _safe_error(exc)
         log.warning("Taktik radar taraması başarısız: %s", error)
@@ -391,6 +424,7 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
     with LOCK:
         previous = dict(STATE.get("tactical_last_states") or {})
         current: dict[str, str] = {}
+        new_setups: list[dict[str, Any]] = []
         for item in report.get("assessments") or []:
             symbol = str(item.get("symbol") or "?")
             state = str(item.get("state") or "NO_LONG")
@@ -398,12 +432,14 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
             current[symbol] = f"{state}:{setup}"
             old = previous.get(symbol)
             if old != current[symbol] and state in {"READY", "TRIGGERED"}:
+                new_setups.append(item)
                 alerts.append(
                     f"👀 {symbol} setup {state} — kanıtlanmamış (WATCH)\nSetup: {setup}\n"
                     + format_tactical({"assessments": [item]})
                 )
             elif old and old.split(":", 1)[0] in {"READY", "TRIGGERED"} and state == "NO_LONG":
                 alerts.append(f"⚠️ {symbol} Long formasyonu bozuldu.\nNeden: {', '.join(item.get('reasons') or ['NO_VALID_SETUP'])}")
+        _update_forward_ledger(market, new_setups)
         STATE["tactical_snapshot"] = report
         STATE["tactical_last_states"] = current
         STATE["tactical_last_error"] = None
