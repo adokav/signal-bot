@@ -155,6 +155,46 @@ Her backtest koşusu artık `backtest_SYMBOL.md` strateji raporunu da üretir:
 hipotez + feature/parametre gerekçeleri, 11 kırılganlık sorusu ve zorunlu son
 bölüm "WHAT COULD BLOW UP THIS ACCOUNT?" (`trading/strategies/tsmom_dossier.py`).
 
+## Düzeltilmiş v2 yeniden koşusu — run #54 (2026-09-30 22:37 UTC)
+
+Parametreler aynı (aynı `trial_id`, N=2), harness düzeltilmiş (horizon 168
+saat, maliyet ölçekle çarpılıyor, Sharpe gözlenen işlem frekansıyla
+yıllıklandırılıyor), parametre pertürbasyonu açık:
+
+```
+strategy : EV/trade=+0.249%  PF=1.19  sharpe=0.53  maxdd=-40.12%  win=66.7%  n=141 (ADEQUATE)
+benchmark: sharpe=0.80  net=+182.40%  maxdd=-75.45%
+cost     : COST_ROBUST    latency: LATENCY_ROBUST
+DSR      : 0.642 (N=2)
+stage    : REJECTED_AT_BACKTEST  (promotable_to_live=False)
+```
+
+### Yorum
+
+- **Düzeltmeler tabloyu değiştirdi.** Yanlı v2 −0.009%/işlem gösteriyordu;
+  düzeltilmiş koşu +0.249%/işlem. Kararı askıya almak doğruydu.
+- **Pozitif ama yetersiz.** Sharpe 0.53, hem 0.8 eşiğinin hem de B&H'nin
+  (0.80) altında → `out_of_sample` FAIL. Deflated Sharpe 0.642 < 0.95:
+  iki denemeden sonra bu sonuç şansla açıklanabilir.
+- **Risk-ayarlı olarak B&H'nin gerisinde.** Yaklaşık 50 işlem/yıl ×
+  %0.249 ≈ yıllık %12 (toplamsal, ≤1x) ve max DD −%40 → Calmar ≈ 0.3.
+  B&H ≈ yıllık %60 ve −%75 → ≈ 0.8. Strateji daha az düşüyor ama çok
+  daha az kazandırıyor.
+- **%66.7 isabet oranı edge göstergesi değil.** PF 1.19 ile ortalama
+  kazanç/kayıp oranı ≈ 0.6. Yüksek isabet, merdivenin geometrisinden
+  geliyor (T1 = 1 ATR hedef, stop = 1.5 ATR).
+- **Execution sorunu değil.** Maliyet ×1.5/×2 ve +1s/+4s giriş gecikmesi
+  sonucu bozmuyor. Sorun sinyal ve çıkış tasarımında.
+- **Henüz görülemeyenler.** Beta ayrışması (decay `excess_vs_baseline`),
+  yıl ve rejim dağılımı, walk-forward fold tutarlılığı, bootstrap aralığı
+  ve pertürbasyon kararı bu koşunun log'unda yoktu (yalnızca Summary
+  sayfasında ve artifact'taydı). CLI artık bunları log'a da basıyor.
+
+**Karar:** "TSMOM girişi + swing merdiveni" (Faz A2a) **NO-GO**, bu kez
+doğru gerekçeyle: zayıf pozitif, istatistiksel olarak anlamlı değil,
+B&H'nin gerisinde. Saf TSMOM (sinyal dönene kadar tutma) hâlâ test
+edilmedi; bu yeni bir deneme olur (N=3).
+
 ## Chassis geleceği
 
 `trading/` paketi silinmez — Faz A altyapısı gelecekteki hipotez denemeleri
