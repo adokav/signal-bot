@@ -53,7 +53,12 @@ Baş test kombinasyonu: TSMOM + vol targeting + BTC top-of-book filter.
 - [x] Ölü kod silme birinci dalga (~4400 satır, PR #100).
 - [x] `requirements-trading.txt` (Faz A dev deps).
 
-### Faz A — Kanıt (Hafta 2-3) — v1 NO-GO, v2 kararı ASKIDA
+### Faz A — Kanıt (Hafta 2-3) — v1 NO-GO; düzeltilmiş v2 (run #54) NO-GO
+
+> **Run #54 (2026-09-30):** düzeltilmiş harness ile EV +%0.249/işlem,
+> Sharpe 0.53 (B&H 0.80), DSR 0.642, max DD −%40 → `REJECTED_AT_BACKTEST`.
+> Zayıf pozitif, anlamlı değil, B&H'nin gerisinde. Ayrıntı:
+> `docs/BACKTEST_REPORT_v1_RESULTS.md`.
 
 > **Düzeltme (2026-09-30):** v2 sonucu iki harness hatasıyla ölçüldü
 > (horizon 96s < time-stop 168s; maliyet vol-ölçeğiyle çarpılmıyordu) ve
@@ -191,8 +196,8 @@ Durum: **✅** yapıldı · **◐** kısmi · **✗** bilinçli olarak yapılmad
 
 ### Sonraki adımlar (öncelik sırasıyla)
 
-1. **Düzeltilmiş v2 yeniden koşusu** — Actions → backtest → BTCUSDT
-   (aynı `trial_id`, N artmaz). v2 askısını kaldırır.
+1. ✅ **Düzeltilmiş v2 yeniden koşusu** — run #54: NO-GO (zayıf pozitif,
+   DSR 0.642, Sharpe 0.53 < B&H 0.80).
 2. **Adil TSMOM testi** — sinyal dönene kadar tut; stop yalnızca felaket
    koruması. Ayrıca kontrol koşusu: "her gün long + aynı merdiven" (60g
    filtresinin katkısını ölçer). İkisi de yeni denemedir, DSR'de N artar.
@@ -219,9 +224,9 @@ Durum: **✅** yapıldı · **◐** kısmi · **✗** bilinçli olarak yapılmad
 
 ## Şu anki durum
 
-Faz 0 tamamlandı. Faz A v1 NO-GO; v2 kararı düzeltilmiş harness ile
-yeniden koşuya kadar askıda. Faz Q (quant spec revizyonu) araştırma, risk
+Faz 0 tamamlandı. Faz A v1 NO-GO; düzeltilmiş v2 (run #54) NO-GO — zayıf
+pozitif ama anlamlı değil ve B&H'nin gerisinde. Faz Q (quant spec revizyonu) araştırma, risk
 ve dürüst etiketleme katmanlarını ekledi. Canlı radar SHADOW'da ve azami
 statü WATCH. Emir yolu yok; kanıt oluşmadan eklenmeyecek.
 
-**Sonraki iş:** "Faz Q → Sonraki adımlar" listesinin 1. ve 2. maddeleri.
+**Sonraki iş:** "Faz Q → Sonraki adımlar" listesinin 2. maddesi (adil TSMOM testi + kontrol koşusu).

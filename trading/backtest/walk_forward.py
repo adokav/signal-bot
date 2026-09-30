@@ -1001,6 +1001,29 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         print(f"DSR      : {report.deflated.deflated_sharpe_probability:.3f} (N={report.deflated.n_trials})")
     if report.promotion:
         print(f"stage    : {report.promotion.stage}  (promotable_to_live={report.promotion.promotable_to_live})")
+        # The CI log is the only channel some reviewers can read; print the
+        # full checklist and attribution, not just the headline.
+        for check in report.promotion.checks:
+            print(f"  check  : {check.name:<26} {check.state:<14} {check.detail}")
+    if report.aggregate:
+        print(f"exits    : {json.dumps(report.aggregate.exit_reason_breakdown, sort_keys=True)}")
+    for fold in report.folds:
+        print(f"  fold   : {fold.fold} n={fold.n_trades} EV={fold.expectancy_pct:+.3f}% sharpe={fold.sharpe_annualized:.2f}")
+    for year, perf_year in report.performance_by_year.items():
+        print(f"  year   : {year} n={perf_year.n_trades} EV={perf_year.expectancy_pct:+.3f}% maxdd={perf_year.max_drawdown_pct:.1f}%")
+    for regime, perf_regime in report.performance_by_regime.items():
+        print(f"  regime : {regime:<22} n={perf_regime.n_trades} EV={perf_regime.expectancy_pct:+.3f}%")
+    if report.decay:
+        for h in report.decay.horizons:
+            excess = "n/a" if h.excess_mean_pct is None else f"{h.excess_mean_pct:+.3f}%"
+            t_stat = "n/a" if h.independent_t_stat is None else f"{h.independent_t_stat:.2f}"
+            print(f"  decay  : {h.horizon_seconds // 3600:>4}h n_ind={h.n_independent} excess_vs_baseline={excess} t={t_stat}")
+    if report.parameter_stability:
+        s = report.parameter_stability
+        worst = "n/a" if s.worst_neighbor_metric is None else f"{s.worst_neighbor_metric:+.3f}%"
+        print(f"perturb  : {s.verdict} worst_neighbor={worst} isolated_peak={s.isolated_peak}")
+    if report.monte_carlo:
+        print(f"montecarlo: p05_maxdd={report.monte_carlo.p05_max_dd_pct:.1f}% median={report.monte_carlo.median_max_dd_pct:.1f}%")
     return 0
 
 
