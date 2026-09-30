@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ from flask import Flask, jsonify
 
 from acce_unified import UnifiedConfig, UnifiedRadarEngine, build_trade_universe
 from acce_unified.listing_fundamentals import ListingFundamentalMetricsProvider
+from acce_unified.radar_gate import liquid_long_gate, status_line, tactical_gate
 from acce_unified.tactical_long_data import MexcTacticalMarketData
 from acce_unified.tactical_long_engine import TacticalLongEngine
 
@@ -33,6 +35,13 @@ TACTICAL_SCAN_SECONDS = max(60, int(os.getenv("TACTICAL_SCAN_INTERVAL_SECONDS", 
 TACTICAL_ALERTS = os.getenv("TACTICAL_LONG_ALERTS_ENABLED", "1") == "1"
 
 CONFIG = UnifiedConfig.from_env()
+# A snapshot older than three scan cycles is stale evidence, not a current view.
+MAIN_MAX_AGE_SECONDS = 3 * max(60, int(CONFIG.scan_interval_seconds))
+TACTICAL_MAX_AGE_SECONDS = 3 * TACTICAL_SCAN_SECONDS
+EVIDENCE_FOOTER = (
+    "WATCH = setup tespit edildi, tarihsel doğrulama yok. Puan ve R/R olasılık değildir. "
+    "Otomatik emir veya pozisyon yetkisi yoktur."
+)
 FUNDAMENTAL_PROVIDER = ListingFundamentalMetricsProvider(
     demo_api_key=os.getenv("COINGECKO_DEMO_API_KEY", ""),
     pro_api_key=os.getenv("COINGECKO_PRO_API_KEY", ""),
@@ -64,6 +73,24 @@ COMMANDS = [
     {"command": "status", "description": "Tarama sağlığı ve veri durumu"},
     {"command": "scan", "description": "Şimdi yeniden tara"},
 ]
+
+
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _safe_error(exc: BaseException) -> str:
+    """Exception type plus a URL-redacted, truncated message.
+
+    Request exceptions can carry URLs with query parameters; nothing from
+    them may reach state files, logs, Telegram or the public endpoint
+    unredacted (AGENTS.md §3).
+    """
+
+    message = _URL_RE.sub("<url>", str(exc))
+    if TOKEN:
+        message = message.replace(TOKEN, "<token>")
+    message = message.strip()[:160]
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
 
 def _load_state() -> None:
@@ -208,18 +235,28 @@ def format_longs(snapshot: dict[str, Any] | None) -> str:
     ]
     if not rows:
         lines.append("Şu anda bütün kalite ve risk kapılarını geçen aday yok.")
+    now = int(time.time())
     for index, item in enumerate(rows, 1):
         meta = item.get("metadata") or {}
         metrics = meta.get("long_metrics") or {}
         fundamentals = meta.get("fundamentals") or {}
+        decision = liquid_long_gate(
+            item,
+            market_regime=context.get("regime"),
+            generated_at=snapshot.get("generated_at"),
+            now=now,
+            max_age_seconds=MAIN_MAX_AGE_SECONDS,
+        )
         lines.extend([
-            f"{index}. {item.get('symbol', '?')} — {int(item.get('score') or 0)}/100 · {item.get('stage') or '-'}",
+            f"{index}. {item.get('symbol', '?')} — radar puanı {int(item.get('score') or 0)}/100 · {item.get('stage') or '-'}",
+            f"   {status_line(decision)}",
             f"   1s %{float(metrics.get('change_1h_pct') or 0):+.1f} · 4s %{float(metrics.get('change_4h_pct') or 0):+.1f} · RSI {float(metrics.get('rsi14') or 0):.0f}",
             f"   Hacim ivmesi {float(metrics.get('volume_ratio') or 0):.1f}x · Spread {float(meta.get('spread_bps') or 0):.1f} bp",
             f"   MEXC 24s {_money(meta.get('quote_volume'))} · Dolaşım %{float(fundamentals.get('circulation_pct') or 0):.1f}",
             "",
         ])
-    lines.append("Radar puanı işlem emri değildir; tetik ve risk onayı ayrıca gerekir.")
+    lines.append("Radar puanı kalibre edilmemiş bir sıralamadır; işlem emri değildir.")
+    lines.append(EVIDENCE_FOOTER)
     return "\n".join(lines)
 
 
@@ -228,12 +265,15 @@ def format_tactical(report: dict[str, Any] | None) -> str:
     if not report:
         lines.extend(["Henüz geçerli radar taraması yok.", str(STATE.get("tactical_last_error") or "")])
         return "\n".join(line for line in lines if line)
+    now = int(time.time())
     for item in report.get("assessments") or []:
         symbol = str(item.get("symbol") or "?")
         state = str(item.get("state") or "NO_LONG")
         setup = str(item.get("setup") or "-")
         structure = str(item.get("structure_4h") or "?")
-        lines.append(f"{symbol} — {state}")
+        decision = tactical_gate(item, now=now, max_age_seconds=TACTICAL_MAX_AGE_SECONDS)
+        lines.append(f"{symbol} — setup durumu {state}")
+        lines.append(status_line(decision))
         lines.append(f"Yapı: {structure} · Setup: {setup}")
         plan = item.get("plan") or {}
         if plan:
@@ -241,8 +281,9 @@ def format_tactical(report: dict[str, Any] | None) -> str:
                 f"Giriş bölgesi: {_price(plan.get('entry_low'))} – {_price(plan.get('entry_high'))}",
                 f"Teknik geçersizlik: {_price(plan.get('technical_invalidation'))}",
                 f"Hard stop: {_price(plan.get('hard_stop'))}",
-                f"Hedef 1: {_price(plan.get('target_1'))} · R/R {float(plan.get('net_rr_1') or 0):.2f}",
-                f"Hedef 2: {_price(plan.get('target_2'))} · R/R {float(plan.get('net_rr_2') or 0):.2f}",
+                f"Hedef 1: {_price(plan.get('target_1'))} · net R/R {float(plan.get('net_rr_1') or 0):.2f}",
+                f"Hedef 2: {_price(plan.get('target_2'))} · net R/R {float(plan.get('net_rr_2') or 0):.2f}",
+                "Kalibre başarı olasılığı: YOK · Beklenen değer: YOK (tarihsel sonuç yok)",
             ])
         reasons = item.get("reasons") or []
         risks = item.get("risk_flags") or []
@@ -255,6 +296,7 @@ def format_tactical(report: dict[str, Any] | None) -> str:
             lines.append("Karar nedeni: " + ", ".join(reasons))
         lines.append("")
     lines.append("Plan araştırma çıktısıdır; otomatik emir veya pozisyon yetkisi yoktur.")
+    lines.append(EVIDENCE_FOOTER)
     return "\n".join(lines)
 
 
@@ -313,6 +355,7 @@ def format_status(snapshot: dict[str, Any] | None) -> str:
         f"Doğrulanmış yeni aday: {len((snapshot or {}).get('listing_candidates') or [])}",
         f"Ana hata: {error_text}",
         f"Taktik hata: {STATE.get('tactical_last_error') or 'yok'}",
+        "Kanıt durumu: radar setup'ları backtest edilmedi, olasılık kalibrasyonu yok → azami statü WATCH",
         "Emir yetkisi: YOK",
     ])
 
@@ -321,9 +364,10 @@ def scan_once() -> dict[str, Any] | None:
     try:
         snapshot = ENGINE.scan_once().to_dict()
     except Exception as exc:
-        log.exception("Tarama başarısız")
+        error = _safe_error(exc)
+        log.warning("Tarama başarısız: %s", error)
         with LOCK:
-            STATE["last_error"] = f"{type(exc).__name__}: {exc}"
+            STATE["last_error"] = error
             _save_state()
         return None
     with LOCK:
@@ -337,9 +381,10 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
     try:
         report = TACTICAL_ENGINE.analyze(TACTICAL_DATA.snapshot()).to_dict()
     except Exception as exc:
-        log.exception("Taktik radar taraması başarısız")
+        error = _safe_error(exc)
+        log.warning("Taktik radar taraması başarısız: %s", error)
         with LOCK:
-            STATE["tactical_last_error"] = f"{type(exc).__name__}: {exc}"
+            STATE["tactical_last_error"] = error
             _save_state()
         return None
     alerts: list[str] = []
@@ -353,7 +398,10 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
             current[symbol] = f"{state}:{setup}"
             old = previous.get(symbol)
             if old != current[symbol] and state in {"READY", "TRIGGERED"}:
-                alerts.append(f"🔔 {symbol} {state}\nSetup: {setup}\n" + format_tactical({"assessments": [item]}))
+                alerts.append(
+                    f"👀 {symbol} setup {state} — kanıtlanmamış (WATCH)\nSetup: {setup}\n"
+                    + format_tactical({"assessments": [item]})
+                )
             elif old and old.split(":", 1)[0] in {"READY", "TRIGGERED"} and state == "NO_LONG":
                 alerts.append(f"⚠️ {symbol} Long formasyonu bozuldu.\nNeden: {', '.join(item.get('reasons') or ['NO_VALID_SETUP'])}")
         STATE["tactical_snapshot"] = report
@@ -452,18 +500,42 @@ def telegram_loop() -> None:
             time.sleep(POLL_SECONDS)
 
 
+def _age_ok(generated_at: Any, max_age: int, now: int) -> bool:
+    try:
+        ts = int(generated_at)
+    except (TypeError, ValueError):
+        return False
+    return ts > 0 and 0 <= now - ts <= max_age
+
+
+def _error_code(value: Any) -> str | None:
+    # Public endpoint: expose only the exception class, never message text.
+    if not value:
+        return None
+    return str(value).split(": ", 1)[0].split()[0][:60]
+
+
 @APP.get("/")
 def health() -> Any:
     snapshot = _snapshot() or {}
     tactical = _tactical_snapshot() or {}
+    now = int(time.time())
+    main_fresh = _age_ok(snapshot.get("generated_at"), MAIN_MAX_AGE_SECONDS, now)
+    tactical_fresh = _age_ok(tactical.get("generated_at"), TACTICAL_MAX_AGE_SECONDS, now)
     return jsonify({
-        "ok": STATE.get("last_error") is None and STATE.get("tactical_last_error") is None,
+        # Healthy means fresh artifacts exist, not merely "no error recorded".
+        "ok": (
+            main_fresh and tactical_fresh
+            and STATE.get("last_error") is None and STATE.get("tactical_last_error") is None
+        ),
         "service": "signal-bot-v5-core",
+        "main_scan_fresh": main_fresh,
+        "tactical_scan_fresh": tactical_fresh,
         "last_scan_at": snapshot.get("generated_at"),
         "tactical_last_scan_at": tactical.get("generated_at"),
-        "errors": snapshot.get("errors") or [],
-        "last_error": STATE.get("last_error"),
-        "tactical_last_error": STATE.get("tactical_last_error"),
+        "errors": [_error_code(e) for e in snapshot.get("errors") or []],
+        "last_error": _error_code(STATE.get("last_error")),
+        "tactical_last_error": _error_code(STATE.get("tactical_last_error")),
         "can_authorize_trade": False,
     })
 
