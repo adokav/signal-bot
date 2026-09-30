@@ -49,6 +49,7 @@ jobs:
             tests/test_research_report_promotion.py \
             tests/test_risk_gate.py \
             tests/test_radar_gate.py \
+            tests/test_forward_ledger.py \
             tests/test_observation_archive_cadence.py \
             tests/test_macro_data.py \
             tests/test_macro_treasury.py \
