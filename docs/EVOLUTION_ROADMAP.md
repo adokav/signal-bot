@@ -53,13 +53,18 @@ Baş test kombinasyonu: TSMOM + vol targeting + BTC top-of-book filter.
 - [x] Ölü kod silme birinci dalga (~4400 satır, PR #100).
 - [x] `requirements-trading.txt` (Faz A dev deps).
 
-### Faz A — Kanıt (Hafta 2-3) — CLOSED: NO-GO
+### Faz A — Kanıt (Hafta 2-3) — v1 NO-GO, v2 kararı ASKIDA
 
-Hipotez çürütüldü. Detaylı belge: `docs/BACKTEST_REPORT_v1_RESULTS.md`.
+> **Düzeltme (2026-09-30):** v2 sonucu iki harness hatasıyla ölçüldü
+> (horizon 96s < time-stop 168s; maliyet vol-ölçeğiyle çarpılmıyordu) ve
+> test edilen tasarım saf TSMOM değil "TSMOM girişi + kısa ATR swing
+> merdiveni" idi. v1 NO-GO geçerli; v2 "−0.03" referans alınmamalı.
+> Ayrıntı: `docs/BACKTEST_REPORT_v1_RESULTS.md` "Düzeltme" bölümü.
+
+Aşağıdaki ilk yorum düzeltme öncesi yazıldı ve artık fazla kesin:
 v1 Sharpe -0.31 (agresif parametreler) → v2 Sharpe -0.03 (muhafazakar).
-İki bağımsız parametre setinde negatif Sharpe → parametre değil hipotez
-sorunu. Kripto tek-sembol TSMOM long-only edge'i 2020 sonrası büyük
-ölçüde arbitraj edildi.
+İki parametre setinde negatif Sharpe → "parametre değil hipotez sorunu"
+denmişti; oysa iki set de aynı swing çıkış merdivenini paylaşıyordu.
 
 `trading/` chassis'i silinmez — gelecekteki hipotez denemeleri için
 altyapı olarak durur (`docs/BACKTEST_REPORT_v1_RESULTS.md` "Chassis
@@ -121,6 +126,85 @@ TSMOM edge'ine bağımlı fazlardı. Edge çıkmadığı için execution katman�
 Gelecekteki bir hipotez GO alırsa Faz C+D o zaman planlanır. Bugün
 üzerinde çalışılmıyor.
 
+## Faz Q — Quant spec revizyonu (2026-09-30)
+
+43 maddelik quant araştırma/risk spec'ine göre yapılan revizyon. İlke:
+kanıt yoksa statü yükselmez, bilinmeyen güvenli değildir, araştırma çıktısı
+işlem yetkisi değildir.
+
+| PR | Kapsam |
+|---|---|
+| #112 | `trading/research/`: metrikler, kalibrasyon, EV, sağlamlık (maliyet stresi, pertürbasyon, bootstrap, Monte Carlo, deflated Sharpe, deneme kaydı), decay, göreli özellikler, betimleyici rejim, terfi kontrol listesi, strateji rapor kontratı. İki harness hatası düzeltildi. |
+| #113 | `trading/risk/`: boyutlandırma, drawdown merdiveni, portföy/korelasyon limitleri, kill switch, 12 soruluk kapı, statü sınıflandırması, aday kontratı |
+| #114 | Canlı radar dürüst etiketler (azami WATCH), bayat plan → REJECT; güvenli ve yanlış-sağlıklı olmayan health |
+| #115 | Taktik setup'lar için ileriye dönük gölge kayıt (paper kanıt) |
+
+### Spec uyum matrisi
+
+Durum: **✅** yapıldı · **◐** kısmi · **✗** bilinçli olarak yapılmadı.
+
+| § | Konu | Durum | Nerede / neden |
+|---|---|---|---|
+| 1 | Rol ve öncelik sırası | ✅ | Kapı sırası: veri → kanıt → portföy → execution; AGENTS.md |
+| 2 | Güven ≠ olasılık | ✅ | `calibration.py`; EV kalibre olmayan olasılığı reddeder; radar "YOK" yazar |
+| 3 | Üç temel soru | ✅ | `trade_gate.py` edge_observable / edge_validated / reward_sufficient |
+| 4 | Veri katmanı | ◐ | OHLCV + funding (Binance vision), MEXC spot + book ticker, OI yalnız canlı adaptörde. Tick, likidasyon, order book derinliği, CVD, dominance, TOTAL3, on-chain yok. Zaman damgası uyuşmazsa birleştirme reddedilir (`features.require_aligned`). |
+| 5 | Sayısal hesap deterministik kodda | ✅ | Tüm göstergeler Python; LLM yok |
+| 6 | Göreli ölçüler | ◐ | `features.py` z-score/persentil; radar kuralları hâlâ mutlak eşikli (bu yüzden WATCH) |
+| 7 | Önce rejim | ◐ | Betimleyici trend×vol ve rejim bazlı performans raporu; 11 rejimin çoğu eksik veri gerektiriyor |
+| 8 | Evren filtresi | ◐ | Likit-100 (hacim, spread); derinlik ve manipülasyon skoru yok |
+| 9 | Huni | ◐ | Aşama 1-2 ve 5 (risk evaluator) var; aşama 3 (AI) ve 4 (meta-model) yok |
+| 10 | Hızlı AI (Jev) rolü | ✗ | LLM entegrasyonu yok. Ön koşulları hazır: kayıt ve kalibrasyon |
+| 11 | Kalibrasyon | ✅ | Araç hazır; kalibre edilecek veri henüz yok |
+| 12 | Meta-model / EV | ◐ | EV fonksiyonu hazır; meta-model için veri yok |
+| 13 | Sürekli skor | ◐ | Radar puanları sürekli ama ağırlıklar öğrenilmedi → "kalibre edilmemiş sıralama" etiketi |
+| 14 | Önce hipotez | ✅ | `report.py` + `tsmom_dossier.py` |
+| 15 | Parametre hassasiyeti | ✅ | Pertürbasyon; FRAGILE ve izole tepe tespiti |
+| 16 | Backtest tasarımı | ◐ | Purge + embargo walk-forward; ayrı final holdout resmileştirilmedi; tek sembol (survivorship riski düşük ama genellenemez) |
+| 17 | Overfitting kontrolü | ✅ | Deneme kaydı, DSR, bootstrap, MC, maliyet ve giriş gecikmesi stresi (1 saat çözünürlük; saniye düzeyi yok) |
+| 18 | Metrikler | ✅ | `metrics.py` |
+| 19 | Decay | ✅ | ≥1 saat ufuklar; dakika ufukları mevcut veriyle ölçülemez |
+| 20 | Relative strength | ✅ | `features.relative_strength`; radarda ETHBTC zayıflık bayrağı |
+| 21 | Breakout tipleri | ✗ | OI, funding ve order flow verisi gerekiyor |
+| 22 | Spot vs perp | ✗ | MEXC spot ile Binance perp verisi birleştirilmedi |
+| 23 | Boyutlandırma | ✅ | `sizing.py` (evaluator) |
+| 24 | Korelasyon riski | ✅ | `portfolio.py`; bilinmeyen korelasyon korele sayılır. Korelasyon matrisi kaynağı henüz yok |
+| 25 | Portföy limitleri | ✅ | `portfolio.py` |
+| 26 | Drawdown'da risk azaltma | ✅ | `drawdown.py`; martingale reddedilir |
+| 27 | Execution engine | ✗ | Bilinçli olarak yok: edge kanıtlanmadan emir yolu yalnızca risk ekler; AGENTS.md §10 ayrı ve incelenmiş bir yol ister |
+| 28 | Bot ↔ borsa durumu | ✗ | Execution yok; kill switch girdisi hazır |
+| 29 | Stop/exit mantığı | ◐ | Taktik planlar giriş/geçersizlik/stop/hedef/bitiş içeriyor; ileri kayıtta 48 saat time-exit |
+| 30 | Kill switch | ✅ | `kill_switch.py` (evaluator + mandal); bağlanacak execution yok |
+| 31 | API güvenliği | ✅ | Secret'lar env'de; hata metni maskeleniyor; public endpoint allowlist; emir/çekim anahtarı yok |
+| 32 | Paper trading | ◐ | İleriye dönük gölge kayıt başladı (#115) |
+| 33 | Kademeli live | ✗ | Terfi listesinde paper/live/kill-switch-drill hep NOT_RUN |
+| 34 | Drift analizi | ◐ | Temel ileri kayıtta; kayan pencere karşılaştırması için veri yok |
+| 35 | Gelişmiş AI rolü | ✅ | Araştırmacı/denetçi; production kuralları yalnızca PR + CI ile değişir |
+| 36 | Günlük rapor | ✗ | İşlem yok; `/status` kısmi |
+| 37 | Trade log | ◐ | İleri kayıt: hash'li, değiştirilemez karar state'i |
+| 38 | Nihai kapı | ✅ | `trade_gate.py` |
+| 39 | Aday çıktısı | ◐ | `CandidateReport` kontratı; bot bazı alanları gösteriyor, kalanlar "YOK" |
+| 40 | Statü | ✅ | REJECT / WATCH / QUALIFIED / EXECUTION_READY |
+| 41 | Canlı öncesi testler | ✅ | `promotion.py`; backtest tek başına terfi ettiremez |
+| 42 | Kırılganlık soruları | ✅ | Her backtest raporunda |
+| 43 | WHAT COULD BLOW UP THIS ACCOUNT? | ✅ | Her backtest raporunun son bölümü |
+
+### Sonraki adımlar (öncelik sırasıyla)
+
+1. **Düzeltilmiş v2 yeniden koşusu** — Actions → backtest → BTCUSDT
+   (aynı `trial_id`, N artmaz). v2 askısını kaldırır.
+2. **Adil TSMOM testi** — sinyal dönene kadar tut; stop yalnızca felaket
+   koruması. Ayrıca kontrol koşusu: "her gün long + aynı merdiven" (60g
+   filtresinin katkısını ölçer). İkisi de yeni denemedir, DSR'de N artar.
+3. **Taktik setup'ların tarihsel replay'i** — `TacticalLongEngine`'i
+   Binance vision spot M5–D1 verisiyle geçmişte çalıştırmak. İleri kaydın
+   ≥100 örneğe ulaşması aylar sürer; replay en hızlı kanıt yolu. MEXC ile
+   Binance spot mikro yapı farkı raporda belirtilmeli.
+4. **Order-flow proxy** — vision kline'larındaki taker-buy hacmi ile CVD
+   yaklaşığı ve OI metrics dump'ları (§4, §21, §22).
+5. **Kapı entegrasyonu** — ileri kayıt veya replay ≥100 çözümlenmiş
+   örneğe ulaştığında `oos_expectancy_positive` ve EV bu kanıttan beslensin.
+
 ## Kesin çizgiler
 
 - OOS validation atlanmaz. Faz A ↔ Faz C arasında bir "kanıt eşiği" vardır.
@@ -135,11 +219,9 @@ Gelecekteki bir hipotez GO alırsa Faz C+D o zaman planlanır. Bugün
 
 ## Şu anki durum
 
-Faz 0 ve Faz A tamamlandı. Faz A çürütüldü (NO-GO), Faz A2b ertelendi,
-Faz B/C/D iptal. `trading/` chassis'i gelecekteki hipotez denemeleri için
-altyapı olarak bekliyor.
+Faz 0 tamamlandı. Faz A v1 NO-GO; v2 kararı düzeltilmiş harness ile
+yeniden koşuya kadar askıda. Faz Q (quant spec revizyonu) araştırma, risk
+ve dürüst etiketleme katmanlarını ekledi. Canlı radar SHADOW'da ve azami
+statü WATCH. Emir yolu yok; kanıt oluşmadan eklenmeyecek.
 
-**Sonraki iş:** signal-bot v5 core geliştirmesine geri dön. Ölü kod dalga 2
-(RadarSnapshot slot temizliği) → v5 core iyileştirmeleri (UX, gate
-mantıkları, manipülasyon riski metrikleri, alert paterni). Detay:
-`docs/DEAD_CODE_AUDIT.md` "Wave 2" bölümü.
+**Sonraki iş:** "Faz Q → Sonraki adımlar" listesinin 1. ve 2. maddeleri.
