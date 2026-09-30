@@ -11,8 +11,11 @@ kripto-adapted variant popularized by Liu & Tsyvinski 2018. The signal:
   volatility-targeting overlay: same signal, but riskier assets get
   smaller notional so the *risk contribution* is stable across bars.
 - **Exit contract.** Emit an ``ExitPlan`` for the harness: T1 partial exit
-  at +ATR_1x, stop-to-entry after T1, T2 at +ATR_2x. Time-stop at 48h. The
-  harness applies these against realized OHLC.
+  at +ATR_1x, stop-to-entry after T1, T2 at +ATR_2x, time-stop from
+  ``TsmomParams.time_stop_seconds``. The harness applies these against
+  realized OHLC. This ladder is a swing-trade convention, not part of the
+  momentum literature (which holds until the signal flips); see
+  ``tsmom_dossier.py``.
 
 The strategy is a pure function of a daily candle series and does not
 authorize trades (AGENTS.md §4). It emits deterministic ``TsmomDecision``
