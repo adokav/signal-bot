@@ -307,3 +307,62 @@ D2_EMA50 %94. Bu üç işlem çıkarılınca işlem başına ortalama +7.1 / +2.
 - Bu, protokolün RİSK_AZALTIR sorusu.
 - Keşif sonucu görüldükten sonra seçilecek olursa, bu açıkça yazılarak ayrı
   bir ön-kayıtla ve kullanıcının onayıyla test edilmeli.
+
+## Ön-tarih testi: 2018-09 → 2020-09 (ek, 2026-10-01, sonuçtan önce)
+
+**Neden:**
+
+- Keşif, "trend bozulunca çık" kuralının (D1_20_10) asıl değeri taşıdığını
+  gösterdi, ama aday kuralı sağlanmadı (yukarıda).
+- Kullanıcı, bu hipotezin el değmemiş verilerde test edilmesini onayladı
+  (2026-10-01).
+- Hipotez **keşif sonucu görüldükten sonra** seçildi; bu açıkça kayıtlıdır.
+- Test penceresi, bu döngü için hiç kullanılmamış eski bir dönemdir. 2017–2020
+  verisi daha önce yalnızca kısa vadeli dönüş testinde (#26) kullanıldı.
+- Planlanan 2017–2024 atlası bu dönemi de görecek. Bu yüzden test,
+  **atlastan önce** yapılır.
+
+**Test edilenler (k = 2, α = 0.025):**
+
+| Döngü | Tanım |
+|---|---|
+| D1_20_10 | Keşifteki kural, değişmeden |
+| D1_20_10_VOL | Aynı işlemler; her işlemin payı 1/N × min(1, %50 / coinin son 30 günlük yıllık oynaklığı) |
+
+D1_20_10_VOL'un oynaklık hedefi literatürden gelir, keşifte hiç
+denenmedi. Oynaklığı bilinmeyen işlem bu portföye girmez ve sayılır.
+
+**Evren:**
+
+- Majör evreni, **perp şartı olmadan**: Binance'te 2019-09'dan önce perp
+  yoktu.
+- Diğer kurallar aynı: BTC ve ETH, 30 günlük hacme göre ilk 10, en büyük meme
+  coin, olgunluk ve süreklilik.
+- 2018-09'dan önce 12 üyeli ay yok. Şubat 2018'deki uzun borsa kesintisi
+  süreklilik kuralı gereği bütün çiftleri "yeniden listelenmiş" sayar. Bu
+  yüzden pencere 2018-09'da başlar.
+
+**Pencere ve veri:**
+
+- Pencere 2018-09-01 → 2020-10-01. Yarılar 2019-09-01'de ayrılır.
+- Veri 2020-10-01 itibarıyla mühürlü. Bu, keşif penceresinin başlangıcıdır;
+  iki pencere örtüşmez.
+
+**Karar:**
+
+- "Doğrulama karar kuralları" bölümündeki kurallar aynen uygulanır: PASS /
+  ZAMANLAMA_YOK / RİSK_AZALTIR / NO_EFFECT / INCOMPLETE_DATA.
+- Asıl soru **RİSK_AZALTIR**: Döngü bir bütün olarak, risk-ayarlı al-tut'tan
+  iyi mi? Ölçüler: Sharpe hem tüm dönemde hem iki yarıda ≥ al-tut, en büyük
+  düşüş al-tut'unkinin en fazla yarısı.
+- Sharpe farkının güven aralığı da raporlanır: 30 günlük bloklarla
+  bootstrap. Bu yalnızca bilgi içindir, kararı değiştirmez.
+
+**Sonucun etkisi:**
+
+- **İki pencerede de geçerse:** Bu dönem ve keşif, hipotezi destekler. Son söz
+  yine 2024-09 → 2026-08 doğrulamasınındır; o pencere atlastan çıkan
+  hipotezlerle birlikte, bir kez açılır.
+- **Burada kalırsa:** "Trend bozulunca çık" kuralının keşifteki başarısı
+  2021–2022'ye özgü sayılır.
+- **Her durumda:** Emir yetkisi yoktur.
