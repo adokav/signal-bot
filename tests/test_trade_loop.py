@@ -309,3 +309,29 @@ def test_the_pre_history_test_refuses_to_run_unregistered(tmp_path):
                  "--trial-registry", str(tmp_path / "none.jsonl")])
     assert not (tmp_path / "o").exists()
     assert tl.prehistory_trial_params()["chosen_after_discovery"] is True
+
+
+def test_unsized_trades_count_as_unknown_in_the_completeness_gate():
+    rows = [{"status": "RESOLVED"}] * 19
+    stats = tl.completeness(rows, None, None, {}, {T0: ["BTCUSDT", "ETHUSDT"]}, {}, unsized=2)
+    assert stats["unknown_trade_share"] == pytest.approx(2 / 19)
+    assert "unknown trades 10.5%" in tl.incomplete({**stats, "unknown_day_share": 0.0})
+
+
+def test_the_dataset_manifest_must_be_the_complete_expected_build(tmp_path):
+    import json
+
+    (tmp_path / "15m").mkdir()
+    for s in ("BTCUSDT", "ETHUSDT"):
+        (tmp_path / "15m" / f"{s}.parquet").write_bytes(b"x")
+    good = {"schema": "liquid-universe/v1", "data_end": 1601510399, "window": ["2017-09", "2020-09"],
+            "candidates": 2, "downloaded": 2, "symbols": {"BTCUSDT": {}, "ETHUSDT": {}}}
+    (tmp_path / "manifest.json").write_text(json.dumps(good))
+    assert tl.verify_universe_manifest(tmp_path, end=1601510400, window=tl.PREHISTORY_DATA)["candidates"] == 2
+    assert tl.data_window(tl.sq.DISCOVERY_END, tl.sq.DISCOVERY_MONTHS) == ("2020-10", "2024-08")
+    assert tl.data_window(tl.sq.CONFIRMATION_END, tl.sq.CONFIRMATION_MONTHS) == ("2024-06", "2026-08")
+    for bad in ({"downloaded": 1}, {"data_end": 1601510000}, {"window": ["2018-01", "2020-09"]},
+                {"schema": "other"}, {"symbols": {"BTCUSDT": {}, "XRPUSDT": {}}}):
+        (tmp_path / "manifest.json").write_text(json.dumps({**good, **bad}))
+        with pytest.raises(SystemExit):
+            tl.verify_universe_manifest(tmp_path, end=1601510400, window=tl.PREHISTORY_DATA)

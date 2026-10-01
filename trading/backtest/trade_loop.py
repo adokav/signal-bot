@@ -580,7 +580,7 @@ def select_candidates(results: Sequence[Mapping[str, Any]], limit: int = 2) -> l
 
 def completeness(rows: Sequence[Mapping[str, Any]], daily: Daily, market: lr.Market,
                  days: Mapping[int, Sequence[tuple[int, int]]], monthly: Mapping[int, Sequence[str]],
-                 skipped: Mapping[str, int] | None = None) -> dict:
+                 skipped: Mapping[str, int] | None = None, unsized: int = 0) -> dict:
     coin_days = [(s, d) for s, items in days.items() for d, _ in items]
     unknown_days = sum(not math.isfinite(daily.close[s, d]) for s, d in coin_days)
     data_skips = sum(n for reason, n in (skipped or {}).items() if reason in DATA_SKIPS)
@@ -588,7 +588,9 @@ def completeness(rows: Sequence[Mapping[str, Any]], daily: Daily, market: lr.Mar
     return {
         "trades": len(rows),
         "skipped_entries": dict(skipped or {}),
-        "unknown_trade_share": ((sum(r["status"] != "RESOLVED" for r in rows) + data_skips) / attempts
+        "unsized_trades": unsized,
+        # trades left out of a volatility-targeted portfolio count as unknown too: never silently dropped
+        "unknown_trade_share": ((sum(r["status"] != "RESOLVED" for r in rows) + data_skips + unsized) / attempts
                                 if attempts else 1.0),
         "unknown_day_share": unknown_days / len(coin_days) if coin_days else 1.0,
         "months_missing_fixed": sum(not set(ms.FIXED) <= set(m) for m in monthly.values()),
@@ -726,8 +728,50 @@ def require_registration(registry: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
+PREHISTORY_DATA = ("2017-09", "2020-09")
+
+
+def data_window(end: int, months: int) -> tuple[str, str]:
+    """First and last month of a dataset built as of ``end`` with ``months`` of lookback."""
+
+    from datetime import datetime, timezone
+
+    last = datetime.fromtimestamp(end - DAY, tz=timezone.utc)
+    year, month = last.year, last.month - (months - 1)
+    while month < 1:
+        year, month = year - 1, month + 12
+    return f"{year:04d}-{month:02d}", f"{last.year:04d}-{last.month:02d}"
+
+
+def verify_universe_manifest(spot_dir: Path, *, end: int, window: tuple[str, str]) -> dict:
+    """The dataset's manifest, if it is the complete build this test expects; otherwise refuse (fail closed)."""
+
+    path = spot_dir / "manifest.json"
+    if not path.exists():
+        raise SystemExit(f"{spot_dir}: no manifest; incomplete or foreign dataset")
+    manifest = json.loads(path.read_text("utf-8"))
+    problems = []
+    if manifest.get("schema") != "liquid-universe/v1":
+        problems.append(f"schema {manifest.get('schema')!r}")
+    if manifest.get("data_end") != end - 1:
+        problems.append(f"data_end {manifest.get('data_end')} != {end - 1}")
+    if list(manifest.get("window") or []) != list(window):
+        problems.append(f"window {manifest.get('window')} != {list(window)}")
+    symbols = manifest.get("symbols") or {}
+    if not symbols or manifest.get("downloaded") != manifest.get("candidates") or len(symbols) != manifest.get("candidates"):
+        problems.append(f"downloaded {manifest.get('downloaded')} of {manifest.get('candidates')} candidates")
+    missing = [s for s in symbols if not (spot_dir / "15m" / f"{s}.parquet").exists()]
+    if missing:
+        problems.append(f"{len(missing)} candidate files missing")
+    if problems:
+        raise SystemExit(f"{spot_dir}: not the expected complete dataset: " + "; ".join(problems))
+    return manifest
+
+
 def run(spot_dir: Path, *, window: tuple[int, int], end: int, alpha: float, half_at: int,
-        loops: Sequence[Loop] = LOOPS) -> dict[str, Any]:
+        loops: Sequence[Loop] = LOOPS, months: int | None = None) -> dict[str, Any]:
+    if months is not None:
+        verify_universe_manifest(spot_dir, end=end, window=data_window(end, months))
     market, excluded, _, perp_of, funding_times = ms.load_inputs(spot_dir, end=end)
     monthly = ms.universes(market, window, perp_of=perp_of, funding_times=funding_times)
     return evaluate_loops(market, excluded, monthly, window=window, alpha=alpha, half_at=half_at, loops=loops)
@@ -736,6 +780,7 @@ def run(spot_dir: Path, *, window: tuple[int, int], end: int, alpha: float, half
 def run_prehistory(spot_dir: Path, *, alpha: float) -> dict[str, Any]:
     """The pre-registered pre-history test: spot-only majors universe (no perpetuals before 2019-09)."""
 
+    verify_universe_manifest(spot_dir, end=PREHISTORY[1], window=PREHISTORY_DATA)
     market, _, excluded = sq.load_likit_market(spot_dir, end=PREHISTORY[1])
     monthly = ms.universes(market, PREHISTORY, perp_of={}, funding_times={}, require_perp=False)
     return evaluate_loops(market, excluded, monthly, window=PREHISTORY, alpha=alpha, half_at=PREHISTORY_HALF_AT,
@@ -753,7 +798,7 @@ def evaluate_loops(market: lr.Market, excluded: Mapping[str, str], monthly: Mapp
         rows, skipped = run_loop(market, daily, ind, loop, days, breaks, halts=halts)
         book = portfolio(market, daily, rows, monthly, window, breaks, half_at=half_at,
                          vol_target=loop.vol_target, alpha=alpha)
-        stats = completeness(rows, daily, market, days, monthly, skipped)
+        stats = completeness(rows, daily, market, days, monthly, skipped, unsized=book["unsized_trades"])
         result = {"loop": loop.name, "family": loop.family, **evaluate(rows, book, alpha=alpha, half_at=half_at),
                   "completeness": stats, "incomplete": incomplete(stats)}
         results.append(result)
@@ -824,7 +869,8 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         return 0
     if args.mode == "discover":
         trial = None
-        report = run(args.spot_dir, window=DISCOVERY, end=sq.DISCOVERY_END, alpha=0.05, half_at=DISCOVERY_HALF_AT)
+        report = run(args.spot_dir, window=DISCOVERY, end=sq.DISCOVERY_END, alpha=0.05, half_at=DISCOVERY_HALF_AT,
+                     months=sq.DISCOVERY_MONTHS)
         report["candidates"] = select_candidates([r for r in report["results"] if not r["incomplete"]])
     elif args.mode == "prehistory":
         trial = require_prehistory_registration(args.trial_registry)
@@ -835,7 +881,7 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         trial = require_registration(args.trial_registry)
         loops = [loop for loop in LOOPS if loop.name in REGISTERED]
         report = run(args.spot_dir, window=CONFIRMATION, end=sq.CONFIRMATION_END, alpha=0.05 / len(loops),
-                     half_at=HALF_AT, loops=loops)
+                     half_at=HALF_AT, loops=loops, months=sq.CONFIRMATION_MONTHS)
         for r in report["results"]:
             r["verdict"] = verdict(r, r["incomplete"])
     rows = report.pop("rows")

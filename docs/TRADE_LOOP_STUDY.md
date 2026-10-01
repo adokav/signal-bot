@@ -410,3 +410,22 @@ denenmedi. Oynaklığı bilinmeyen işlem bu portföye girmez ve sayılır.
     çıkması.
   - Son söz, 2024-09 → 2026-08 doğrulamasının.
 - Emir yetkisi yok.
+
+**İnceleme (Codex) sonrası eklenen iki koruma:**
+
+- **Payı hesaplanamayan işlem:** Oynaklığı bilinmediği için oynaklık ayarlı
+  portföye giremeyen işlem artık "bilinmez" payına sayılıyor.
+- **Veri seti doğrulaması:** Her koşudan önce manifest kontrol ediliyor. Şema,
+  son tarih, ay penceresi, bütün adayların indirilmiş olması ve dosyaların
+  varlığı bakılıyor; eksik ya da yabancı bir veri seti reddediliyor.
+
+Koşu bu korumalardan önce, kayıtlı kodla (`fdb566a67b26e79e`) yapıldı.
+Korumalar sonradan aynı veride denetlendi; sonuç değişmiyor:
+
+- payı hesaplanamayan işlem 0;
+- bilinmeyen işlem payı 0;
+- manifest geçerli;
+- kararlar ve rakamlar aynı.
+
+Kod değiştiği için kayıtlı deneme bu kodla yeniden koşulamaz (`prehistory`
+reddeder). Bu istenen davranış: test bir kez yapıldı.
