@@ -425,8 +425,32 @@ def test_difference_ci_resamples_days_and_needs_both_groups():
     a = [(1.0 + (k % 3) * 0.1, CONF + k * 86_400) for k in range(60)]
     b = [(-1.0 + (k % 3) * 0.1, CONF + k * 86_400) for k in range(60)]
     lo, hi = sq.diff_ci(a, b)
-    assert 1.8 < lo <= 2.0 <= hi < 2.2
+    assert lo == pytest.approx(2.0) and hi == pytest.approx(2.0)   # same day blocks for both groups
     assert sq.diff_ci(a[:1], b) is None
+
+
+def test_block_bootstrap_keeps_multi_day_dependence():
+    rng = np.random.default_rng(1)
+    level, pairs = 0.0, []
+    for day in range(400):                  # slowly moving level: neighbouring days are not independent
+        level = 0.9 * level + rng.normal(0, 1)
+        pairs += [(level + rng.normal(0, 0.1), CONF + day * 86_400 + k) for k in range(3)]
+    lo, hi = sq.group_summary(pairs)["ci"]
+    days = [t // 86_400 for _, t in pairs]
+    d_lo, d_hi = lr.day_cluster_ci([v for v, _ in pairs], days, alpha=sq.FILTER_ALPHA, n_resamples=4000)
+    assert (hi - lo) > 1.5 * (d_hi - d_lo)   # single-day resampling would understate the uncertainty
+
+
+def test_incomplete_runs_give_no_verdict():
+    ok = dict(steps=1000, skipped_steps=20, alerts=500, unknown_filter=25, missing_outcome=25)
+    assert sq.completeness_problems(**ok) == []
+    assert sq.completeness_problems(**dict(ok, skipped_steps=21))
+    assert sq.completeness_problems(**dict(ok, unknown_filter=26))
+    assert sq.completeness_problems(**dict(ok, missing_outcome=26))
+    assert sq.completeness_problems(**dict(ok, evaluated=1000, engine_errors=11))
+    assert sq.completeness_problems(**dict(ok, alerts=0, unknown_filter=0, missing_outcome=0))
+    result = sq.apply_completeness({"test": "F1", "verdict": "PASS"}, ["skipped steps 30/1000"])
+    assert result["verdict"] == "INCOMPLETE_DATA" and result["problems"] == ["skipped steps 30/1000"]
 
 
 def test_verdicts_separate_pass_loss_reduction_and_no_effect():

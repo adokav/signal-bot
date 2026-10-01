@@ -763,6 +763,16 @@ HALF_AT = 1_756_684_800           # 2025-09-01T00:00:00Z: fixed split of the con
 CONFIRM_MIN_N = 100
 FILTER_TESTS = ("F1_LIKIT_CALM_NOT_CHASING", "F2_TACTICAL_PERP_BELOW_SPOT")
 FILTER_ALPHA = 0.05 / len(FILTER_TESTS)
+# Outcomes last up to 72h and the random-hour control overlaps for three days:
+# resample contiguous 7-day blocks, never single days (AGENTS.md §7).
+BLOCK_DAYS = 7
+# Above these shares the run reports INCOMPLETE_DATA instead of a verdict (AGENTS.md §2).
+COMPLETENESS = {
+    "max_skipped_step_share": 0.02,
+    "max_engine_error_share": 0.01,
+    "max_unknown_filter_share": 0.05,
+    "max_missing_outcome_share": 0.05,
+}
 LIKIT_ATR15_MAX = 1.0             # % (15m ATR(14) / price), discovery: below the 2nd quintile edge 1.12
 LIKIT_REL24_MAX = 5.0             # percentage points above the universe median 24h change
 TACTICAL_BASIS_MAX = 0.0          # keep only while the perpetual trades below spot
@@ -864,13 +874,45 @@ def _mean(values: Sequence[float]) -> float | None:
     return statistics.fmean(values) if values else None
 
 
+def block_bootstrap_means(groups: Sequence[Pairs], *, block_days: int = BLOCK_DAYS, n_resamples: int = 4000,
+                          seed: int = 0) -> np.ndarray:
+    """Circular moving-block bootstrap over calendar days; returns (n_resamples, len(groups)) means.
+
+    Every group is resampled with the same blocks of ``block_days`` consecutive
+    UTC days (empty days included), so dependence across days within a block
+    (overlapping 72h outcomes, shared market moves) is kept, not assumed away.
+    """
+
+    first = min(t // 86_400 for pairs in groups for _, t in pairs)
+    last = max(t // 86_400 for pairs in groups for _, t in pairs)
+    days = last - first + 1
+    sums, counts = [], []
+    for pairs in groups:
+        labels = np.array([t // 86_400 - first for _, t in pairs], dtype=np.int64)
+        sums.append(np.bincount(labels, weights=[v for v, _ in pairs], minlength=days))
+        counts.append(np.bincount(labels, minlength=days).astype(float))
+    block = max(1, min(block_days, days))
+    n_blocks = -(-days // block)
+    rng = np.random.default_rng(seed)
+    starts = rng.integers(0, days, size=(n_resamples, n_blocks))
+    idx = ((starts[:, :, None] + np.arange(block)) % days).reshape(n_resamples, -1)[:, :days]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.stack([s[idx].sum(1) / c[idx].sum(1) for s, c in zip(sums, counts)], axis=1)
+
+
+def _interval(draws: np.ndarray, alpha: float) -> tuple[float, float] | None:
+    draws = draws[np.isfinite(draws)]
+    if len(draws) < 100:
+        return None
+    return float(np.quantile(draws, alpha / 2)), float(np.quantile(draws, 1 - alpha / 2))
+
+
 def group_summary(pairs: Pairs, *, alpha: float = FILTER_ALPHA) -> dict[str, Any]:
     values = [v for v, _ in pairs]
     return {
         "n": len(values),
         "mean": _mean(values),
-        "ci": lr.day_cluster_ci(values, [t // 86_400 for _, t in pairs], alpha=alpha, n_resamples=4000)
-        if len(values) >= 2 else None,
+        "ci": _interval(block_bootstrap_means([pairs])[:, 0], alpha) if len(values) >= 2 else None,
         "h1": _mean([v for v, t in pairs if t < HALF_AT]),
         "h2": _mean([v for v, t in pairs if t >= HALF_AT]),
     }
@@ -878,26 +920,12 @@ def group_summary(pairs: Pairs, *, alpha: float = FILTER_ALPHA) -> dict[str, Any
 
 def diff_ci(a: Pairs, b: Pairs, *, alpha: float = FILTER_ALPHA, n_resamples: int = 4000,
             seed: int = 0) -> tuple[float, float] | None:
-    """CI of mean(a) − mean(b), resampling whole UTC days of both groups together."""
+    """CI of mean(a) − mean(b), both groups resampled with the same day blocks."""
 
     if len(a) < 2 or len(b) < 2:
         return None
-    days = sorted({t // 86_400 for _, t in a} | {t // 86_400 for _, t in b})
-    index = {d: k for k, d in enumerate(days)}
-
-    def sums(pairs: Pairs) -> tuple[np.ndarray, np.ndarray]:
-        labels = np.array([index[t // 86_400] for _, t in pairs])
-        return (np.bincount(labels, weights=[v for v, _ in pairs], minlength=len(days)),
-                np.bincount(labels, minlength=len(days)).astype(float))
-
-    (sa, ca), (sb, cb) = sums(a), sums(b)
-    draws = np.random.default_rng(seed).integers(0, len(days), size=(n_resamples, len(days)))
-    with np.errstate(invalid="ignore", divide="ignore"):
-        diffs = sa[draws].sum(1) / ca[draws].sum(1) - sb[draws].sum(1) / cb[draws].sum(1)
-    diffs = diffs[np.isfinite(diffs)]
-    if len(diffs) < n_resamples // 2:
-        return None
-    return float(np.quantile(diffs, alpha / 2)), float(np.quantile(diffs, 1 - alpha / 2))
+    means = block_bootstrap_means([a, b], n_resamples=n_resamples, seed=seed)
+    return _interval(means[:, 0] - means[:, 1], alpha)
 
 
 def difference(a: Pairs, b: Pairs, *, alpha: float = FILTER_ALPHA) -> dict[str, Any]:
@@ -931,6 +959,30 @@ def filter_verdict(net: Mapping[str, Any], excess: Mapping[str, Any], stress: Ma
     if _positive(kept_vs_dropped):
         return "KAYBI_AZALTIR"
     return "NO_EFFECT"
+
+
+def completeness_problems(*, steps: int, skipped_steps: int, alerts: int, unknown_filter: int,
+                          missing_outcome: int, evaluated: int | None = None, engine_errors: int = 0) -> list[str]:
+    """Reasons the run cannot give a verdict; empty when the data is complete enough."""
+
+    problems = []
+    if alerts == 0:
+        problems.append("no alerts in the confirmation window")
+    if steps == 0 or skipped_steps > COMPLETENESS["max_skipped_step_share"] * steps:
+        problems.append(f"skipped steps {skipped_steps}/{steps}")
+    if evaluated is not None and engine_errors > COMPLETENESS["max_engine_error_share"] * max(1, evaluated):
+        problems.append(f"engine errors {engine_errors}/{evaluated}")
+    if unknown_filter > COMPLETENESS["max_unknown_filter_share"] * max(1, alerts):
+        problems.append(f"unknown filter value {unknown_filter}/{alerts}")
+    if missing_outcome > COMPLETENESS["max_missing_outcome_share"] * max(1, alerts):
+        problems.append(f"missing outcome {missing_outcome}/{alerts}")
+    return problems
+
+
+def apply_completeness(result: dict[str, Any], problems: Sequence[str]) -> dict[str, Any]:
+    if problems:
+        result = dict(result, verdict="INCOMPLETE_DATA", problems=list(problems))
+    return result
 
 
 def evaluate_f1(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1014,10 +1066,12 @@ def filter_trial_params() -> dict[str, Any]:
         "window": [DISCOVERY_END, CONFIRMATION_END],
         "half_at": HALF_AT,
         "family_alpha": FILTER_ALPHA,
+        "bootstrap": {"method": "circular_moving_block_calendar_days", "block_days": BLOCK_DAYS, "resamples": 4000},
+        "completeness": COMPLETENESS,
         "min_n": CONFIRM_MIN_N,
         "costs_pct": {"likit": LIKIT_COST_PCT, "likit_stress": LIKIT_STRESS_COST_PCT,
                       "tactical": TACTICAL_COST_PCT, "tactical_stress": TACTICAL_STRESS_COST_PCT},
-        "verdicts": "PASS / KAYBI_AZALTIR / NO_EFFECT",
+        "verdicts": "PASS / KAYBI_AZALTIR / NO_EFFECT; INCOMPLETE_DATA gives no verdict",
     }
 
 
@@ -1186,7 +1240,14 @@ def _confirm(args: Any, started: float) -> int:
         steps = lr.evaluate(market, lr.RadarParams(), workers=args.workers, progress=True)
         rows = likit_rows(market, steps, window=window)
         baseline: list[dict[str, Any]] = []
-        results = [evaluate_f1(rows)]
+        in_window = [k for k in range(market.n_grid)
+                     if window[0] <= int(market.grid_open[k]) + BAR - 1 < window[1]]
+        problems = completeness_problems(
+            steps=len(in_window), skipped_steps=sum(steps[k] is None for k in in_window), alerts=len(rows),
+            unknown_filter=sum(likit_calm_not_chasing(r) is None for r in rows),
+            missing_outcome=sum(likit_net(r) is None for r in rows),
+        )
+        results = [apply_completeness(evaluate_f1(rows), problems)]
     else:
         if args.perp_dir is None:
             raise SystemExit("--perp-dir is required: F2 needs the basis")
@@ -1196,7 +1257,15 @@ def _confirm(args: Any, started: float) -> int:
         records = tr.record_outcomes(phase1.events, data, end_time=tr.decision_times(data)[-1])
         rows = tactical_rows(records, data, perp=perp, funding=funding, window=window)
         baseline = tactical_baseline_rows(data, perp=perp, window=window)
-        results = [evaluate_f2(rows, baseline)]
+        problems = completeness_problems(
+            steps=phase1.evaluated + phase1.skipped_data, skipped_steps=phase1.skipped_data, alerts=len(rows),
+            unknown_filter=sum(tactical_perp_below_spot(r) is None for r in rows),
+            missing_outcome=sum(tactical_r(r, "atr") is None for r in rows),
+            evaluated=phase1.evaluated, engine_errors=phase1.engine_errors,
+        )
+        print(f"phase 1: evaluated={phase1.evaluated} skipped_data={phase1.skipped_data} "
+              f"engine_errors={phase1.engine_errors} warmup={phase1.skipped_warmup}")
+        results = [apply_completeness(evaluate_f2(rows, baseline), problems)]
     write_rows(rows, args.out_dir / f"{args.which}_confirm_rows.csv.gz")
     if baseline:
         write_rows(baseline, args.out_dir / "tactical_confirm_baseline.csv.gz")

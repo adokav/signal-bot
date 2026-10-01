@@ -134,10 +134,29 @@ ve 5 dakikalık çözünürlükte. Yüz binlerce dosya gerektirdiği için bu ad
 ## Doğrulama karar kuralları (ön-kayıtlı, sonuçlardan önce)
 
 Ön-kayıtlı test sayısı `k = 2`'dir (F1, F2). Bonferroni düzeltmesi
-α = 0.05 / 2 = **0.025**. Güven aralıkları gün-kümeli bootstrap ile
-hesaplanır (4000 örnek). Fark güven aralığı, iki grubun günleri birlikte
-yeniden örneklenerek hesaplanır. Doğrulama penceresinin yarıları sabittir:
+α = 0.05 / 2 = **0.025**. Doğrulama penceresinin yarıları sabittir:
 2024-09 → 2025-08 ve 2025-09 → 2026-08.
+
+**Güven aralıkları:**
+
+- **Yöntem:** Takvim günleri üzerinde dairesel hareketli blok bootstrap,
+  **7 günlük bloklarla** (4000 örnek). Fark güven aralığında iki grup aynı
+  bloklarla yeniden örneklenir.
+- **Neden blok:** Sonuçlar 72 saate kadar sürüyor ve rastgele saat
+  kontrolünün pencereleri üç gün boyunca üst üste biniyor. Tek tek günleri
+  yeniden örneklemek belirsizliği olduğundan küçük gösterirdi.
+- **Değişiklik:** Bu yöntem, ilk ön-kayıttan sonra gelen inceleme üzerine,
+  doğrulama verisi görülmeden seçildi.
+
+**Eksik veri, karar yok (`INCOMPLETE_DATA`).** Şu oranlardan biri aşılırsa
+karar verilmez:
+
+| Ölçü | Sınır |
+|---|---:|
+| Atlanan adım | %2 |
+| Motor hatası | %1 |
+| Filtre değeri bilinmeyen uyarı | %5 |
+| Sonucu bilinmeyen uyarı | %5 |
 
 Bir filtre **PASS** olur, ancak ve ancak filtreden geçen uyarılarda:
 
@@ -297,14 +316,23 @@ uyarıları ayırıyor; kalanların para kazandırdığına dair kanıt yok.
 
 - **F1:** Keşifte geçen uyarıların net sonucu −0.10%. PASS olası değil.
   Gerçekçi en iyi sonuç KAYBI_AZALTIR.
-- **F2:** Gücü düşük. Keşifteki fark +0.24R; güven aralığının alt sınırı
-  ancak sıfırın üstündeydi. Doğrulama penceresi yarı uzunlukta olduğu için,
-  etki gerçek olsa bile NO_EFFECT çıkabilir.
+- **F2:** Gücü düşük.
+  - Keşifteki fark +0.24R. 7 günlük blok bootstrap ile keşifte bile anlamlı
+    değil: [−0.05, +0.55].
+  - Doğrulama penceresi yarı uzunlukta. En olası sonuç NO_EFFECT.
+  - Yine de ön-kayda alındı: kullanıcının baz sorusuna örneklem dışı bir
+    cevap veriyor ve F1'in gücünü az etkiliyor. Keşifte F1'in farkı
+    +0.81% [+0.31, +1.31].
 
-**Ön-kayıt:** `signal_quality_filters` ailesi, trial `a2a9af1b364c9ac7`,
-kod parmak izi `140bd27fc1a3cc31` (`research/trials/registry.jsonl`,
-2026-10-01). Kayıt, doğrulama penceresinin verisi indirilmeden ve
-görülmeden yapıldı. Doğrulama workflow'u: `signal_quality_confirm`.
+**Ön-kayıt:** `signal_quality_filters` ailesi, trial `d468cf29491ff701`, kod parmak
+izi `c9722d624d8f4865` (`research/trials/registry.jsonl`, 2026-10-01).
+
+- Kayıt, doğrulama penceresinin verisi indirilmeden ve görülmeden yapıldı.
+- Doğrulama workflow'u: `signal_quality_confirm`.
+- İlk kayıt `a2a9af1b364c9ac7` hiç çalıştırılmadı. Kod incelemesi iki
+  eksik buldu: tek günlük bootstrap ve eksik veri kontrolünün olmaması.
+  Doğrulama verisine bakılmadan bu kayıtla değiştirildi. Kayıt defteri
+  yalnızca eklemeli olduğu için eski satır yerinde duruyor.
 
 **Değişmezlik:**
 
