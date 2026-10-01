@@ -1,0 +1,59 @@
+name: listing_replay
+
+# Manual-trigger research job: builds the survivorship-free dataset of new
+# Binance spot USDT listings (2020-10 onwards, delisted pairs included, ticker
+# migrations and pegged tokens excluded) and runs the pre-registered
+# new-listing study (docs/LISTING_REPLAY_REPORT.md). No inputs: the protocol
+# is fixed.
+#
+# Research only: no order authority, does not touch the production bot.
+#
+# How to run:
+#   GitHub → Actions → listing_replay → Run workflow
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements.txt
+          -r requirements-dev.txt
+          -r requirements-trading.txt
+      - name: Build the new-listing dataset (data.binance.vision)
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.listing_replay build --out research/data/listings
+          du -sh research/data/listings
+      - name: Run listing replay
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.listing_replay run \
+              --data-dir research/data/listings \
+              --out research/data/listing_replay.json \
+              --trial-registry research/trials/registry.jsonl \
+              --record-trial
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: listing-replay
+          path: |
+            research/data/listing_replay.json
+            research/data/listing_replay.md
+            research/data/listings/manifest.json
+            research/trials/registry.jsonl
+          retention-days: 30
