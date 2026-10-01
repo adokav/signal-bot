@@ -319,6 +319,140 @@ def liquid_evidence_line(evidence: LiquidEvidence | None = None) -> str:
     return "Geçmiş test (Binance spot 2020-2026, teknik katman, maliyet sonrası): İlk 3 → " + " · ".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# New-listing replay evidence (a descriptive base rate; changes no gate)
+# ---------------------------------------------------------------------------
+
+
+LISTING_EVIDENCE_FILE = REPO_ROOT / "research" / "evidence" / "listing_replay.json"
+LISTING_SCHEMA = "listing-replay-evidence/v1"
+LISTING_PANEL_GROUP = "24h@30d"    # closest to how the radar is used: a candidate within its first days
+LISTING_VERDICTS = frozenset({"AVOID_CONFIRMED", "NO_CLAIM", "INSUFFICIENT", "POSITIVE_SURPRISE"})
+LISTING_MIN_N = 100
+# Must equal trading.backtest.listing_replay.FINGERPRINT_FILES (a test checks
+# both the list and the digest); duplicated because that module needs numpy.
+LISTING_FINGERPRINT_FILES = (
+    "acce_unified/cex.py",
+    "trading/data/binance_vision.py",
+    "trading/data/binance_universe.py",
+    "trading/data/binance_history_identity.py",
+    "trading/data/binance_listings.py",
+    "trading/backtest/listing_replay.py",
+)
+
+
+@dataclass(frozen=True)
+class ListingGroupEvidence:
+    group: str
+    verdict: str
+    n: int
+    mean_gross_pct: float
+    median_gross_pct: float
+    share_beating_btc: float
+    mean_excess_pct: float
+    gross_ci_family: tuple[float, float]
+    excess_ci_family: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class ListingEvidence:
+    """New-listing replay result; ``status`` is OK, STALE, INVALID or MISSING."""
+
+    status: str
+    detail: str
+    trial_id: str = ""
+    window: str = ""
+    groups: Mapping[str, ListingGroupEvidence] = field(default_factory=dict)
+
+
+def _listing_group(name: str, row: Mapping[str, Any]) -> ListingGroupEvidence:
+    verdict = str(row["verdict"])
+    if verdict not in LISTING_VERDICTS:
+        raise ValueError(f"{name}: unknown verdict {verdict!r}")
+    n = row["n"]
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        raise ValueError(f"{name}: n must be a non-negative integer")
+    share = _finite_number(row["share_beating_btc"], "share_beating_btc")
+    if not 0.0 <= share <= 1.0:
+        raise ValueError(f"{name}: share_beating_btc outside [0, 1]")
+    group = ListingGroupEvidence(
+        group=name, verdict=verdict, n=n,
+        mean_gross_pct=_finite_number(row["mean_gross_pct"], "mean_gross_pct"),
+        median_gross_pct=_finite_number(row["median_gross_pct"], "median_gross_pct"),
+        share_beating_btc=share,
+        mean_excess_pct=_finite_number(row["mean_excess_pct"], "mean_excess_pct"),
+        gross_ci_family=_interval(row["gross_ci_family"], "gross_ci_family"),
+        excess_ci_family=_interval(row["excess_ci_family"], "excess_ci_family"),
+    )
+    (g_low, g_high), (e_low, e_high) = group.gross_ci_family, group.excess_ci_family
+    if verdict == "INSUFFICIENT" and n >= LISTING_MIN_N:
+        raise ValueError(f"{name}: INSUFFICIENT with {n} listings")
+    if verdict != "INSUFFICIENT" and n < LISTING_MIN_N:
+        raise ValueError(f"{name}: {verdict} needs at least {LISTING_MIN_N} listings")
+    if verdict == "AVOID_CONFIRMED" and not (g_high < 0 and e_high < 0):
+        raise ValueError(f"{name}: AVOID_CONFIRMED with an interval reaching zero")
+    if verdict == "POSITIVE_SURPRISE" and not (g_low > 0 and e_low > 0):
+        raise ValueError(f"{name}: POSITIVE_SURPRISE without positive intervals")
+    if verdict == "NO_CLAIM" and g_low > 0 and e_low > 0:
+        raise ValueError(f"{name}: NO_CLAIM although both intervals are above zero")
+    return group
+
+
+def load_listing_evidence(
+    path: Path = LISTING_EVIDENCE_FILE,
+    *,
+    current_fingerprint: str | None = None,
+) -> ListingEvidence:
+    """Read the new-listing replay evidence; never raises, never changes a radar decision."""
+
+    try:
+        payload = json.loads(Path(path).read_text("utf-8"))
+    except FileNotFoundError:
+        return ListingEvidence("MISSING", "yeni listeleme kanıt dosyası yok")
+    except (OSError, ValueError):
+        return ListingEvidence("INVALID", "yeni listeleme kanıt dosyası okunamadı")
+    try:
+        if payload.get("schema") != LISTING_SCHEMA or payload.get("can_authorize_trade") is not False:
+            raise ValueError("unexpected schema")
+        fingerprint = str(payload["engine_fingerprint"])
+        groups = {str(name): _listing_group(str(name), row) for name, row in dict(payload["groups"]).items()}
+        trial_id, window = str(payload["trial_id"]), str(payload["window"])
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return ListingEvidence("INVALID", "yeni listeleme kanıt dosyası tutarsız")
+    if current_fingerprint is None:
+        try:
+            current_fingerprint = code_fingerprint(LISTING_FINGERPRINT_FILES)
+        except OSError:
+            return ListingEvidence("INVALID", "yeni listeleme kod parmak izi hesaplanamadı")
+    if fingerprint != current_fingerprint:
+        return ListingEvidence("STALE", "yeni listeleme kanıtı mevcut kod sürümüne ait değil", trial_id)
+    return ListingEvidence("OK", "yeni listeleme kanıtı mevcut kodla eşleşiyor", trial_id, window, groups)
+
+
+@lru_cache(maxsize=1)
+def default_listing_evidence() -> ListingEvidence:
+    return load_listing_evidence()
+
+
+def listing_evidence_line(evidence: ListingEvidence | None = None) -> str:
+    """Historical base rate for the listing panel; descriptive, never a per-candidate probability."""
+
+    evidence = evidence or default_listing_evidence()
+    group = evidence.groups.get(LISTING_PANEL_GROUP) if evidence.status == "OK" else None
+    if group is None:
+        detail = evidence.detail if evidence.status != "OK" else "panel grubu kanıtta yok"
+        return f"Geçmiş test: YOK ({detail})"
+    low, high = group.gross_ci_family
+    line = (
+        f"Geçmiş test (Binance yeni listelemeler {evidence.window}, n={group.n}): ilk işlemden 24 saat sonra "
+        f"alıp 30 gün tutmak → medyan %{group.median_gross_pct:+.1f}, BTC'yi geçen %{group.share_beating_btc * 100:.0f}, "
+        f"ortalama %{group.mean_gross_pct:+.1f} [%{low:+.1f}, %{high:+.1f}] → {group.verdict}"
+    )
+    if group.mean_gross_pct - group.median_gross_pct > 10:
+        line += "; ortalama ile medyan arasındaki büyük fark sonucun birkaç büyük kazanana bağlı olduğunu gösterir"
+    return line + ". MEXC listelemeleri için test yok."
+
+
 def _replay_checks(setup: Any, evidence: ReplayEvidence) -> dict[str, Check]:
     family = evidence.family(setup)
     if family is None:
@@ -372,14 +506,25 @@ def family_disqualified(setup: Any, evidence: ReplayEvidence | None = None) -> b
 def evidence_status_text(
     evidence: ReplayEvidence | None = None,
     liquid_evidence: LiquidEvidence | None = None,
+    listing_evidence: ListingEvidence | None = None,
 ) -> str:
     evidence = evidence or default_replay_evidence()
     liquid_evidence = liquid_evidence or default_liquid_evidence()
+    listing_evidence = listing_evidence or default_listing_evidence()
     if liquid_evidence.status == "OK":
         verdicts = sorted({liquid_evidence.groups[n].verdict for n in LIQUID_LIST_GROUPS if n in liquid_evidence.groups})
         liquid = f"Likit-100 replay — İlk 3: {', '.join(verdicts) or '?'}"
     else:
         liquid = f"Likit-100 replay uygulanamıyor ({liquid_evidence.detail}) → azami WATCH"
+    if listing_evidence.status == "OK":
+        counts: dict[str, int] = {}
+        for group in listing_evidence.groups.values():
+            counts[group.verdict] = counts.get(group.verdict, 0) + 1
+        listing = "Yeni listeleme replay — " + ", ".join(f"{v} {c}/{len(listing_evidence.groups)}"
+                                                      for v, c in sorted(counts.items()))
+    else:
+        listing = f"Yeni listeleme replay uygulanamıyor ({listing_evidence.detail})"
+    liquid = f"{liquid} · {listing}"
     if evidence.status != "OK":
         return f"Kanıt durumu: taktik replay uygulanamıyor ({evidence.detail}) → azami WATCH · {liquid}"
     groups: dict[str, list[str]] = {}

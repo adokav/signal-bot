@@ -95,7 +95,7 @@ def test_tactical_report_exposes_entry_stop_and_no_trade_authority():
 
 def test_new_listing_report_contains_only_accepted_enriched_rows():
     text = bot.format_new(_snapshot())
-    assert "DOĞRULANMIŞ ADAYLAR" in text
+    assert "getirisi kanıtlanmadı" in text
     assert "NEWUSDT" in text
     assert "OLDUSDT" not in text
     assert "Sosyal kapı PASS" in text

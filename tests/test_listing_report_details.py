@@ -62,7 +62,7 @@ def test_new_listing_report_ranks_only_accepted_rows_with_supply_and_extremes():
     }
     report = format_new(snapshot)
 
-    assert "DOĞRULANMIŞ ADAYLAR" in report
+    assert "getirisi kanıtlanmadı" in report
     assert report.index("BUSDT") < report.index("CUSDT") < report.index("AUSDT")
     assert "Arz: dolaşan 25.00M · toplam 100.00M · max 120.00M" in report
     assert "ATH $2.50 (%-60.0) · ATL $0.05 (%+1900.0)" in report

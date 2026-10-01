@@ -200,6 +200,21 @@ hiçbir kararı değiştirmiyor.
 - **Canlı sisteme etkisi (ön-kayıtlı):** Radarın davranışı değişmez.
   HOT/BUILDING etiketlerinin tarihsel kanıtı yok; bu durum sürüyor.
 
+### Canlı panele etkisi (2026-10-01)
+
+Protokol gereği radarın kararları ve etiketleri değişmedi. Panelde yalnızca
+şunlar değişti:
+
+- **Başlık:** "DOĞRULANMIŞ ADAYLAR" yerine "ADAYLAR (kimliği doğrulandı,
+  getirisi kanıtlanmadı)".
+- **Taban oran satırı:** +24 saat @ 30 gün grubunun sonucu gösteriliyor:
+  medyan, BTC'yi geçenlerin oranı, ortalama ve güven aralığı, karar. Satır,
+  MEXC için test olmadığını da söylüyor.
+- **`/status`:** "Yeni listeleme replay — NO_CLAIM 6/6" satırı eklendi.
+- **Veri yolu:** Diğer kapılarla aynı. `research/evidence/listing_replay.json`
+  parmak izi kontrollü yükleniyor; dosya eksik, tutarsız veya eskiyse
+  panelde "Geçmiş test: YOK" yazıyor.
+
 ### Sonucun anlamı (tanılayıcı, karar değil)
 
 1. **Tipik yeni listeleme kaybettiriyor; ortalamayı nadir büyük kazananlar
