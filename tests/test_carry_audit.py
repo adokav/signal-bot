@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -30,3 +32,16 @@ def test_audit_reports_extreme_funding():
     report = ca.audit(cr.build_market(perp, spot, funding))
     assert report["funding_extremes"]["count"] == 1 and report["funding_extremes"]["negative"] == 1
     assert report["funding_extremes"]["worst"][0]["symbol"] == "S0USDT"
+
+
+def test_cli_writes_json_with_extreme_funding(monkeypatch, tmp_path, capsys):
+    """Regression: counting numpy booleans gave np.int64, which json.dumps rejected after the build."""
+
+    perp, spot, funding = _market(2, funding_rate=lambda k, s: -0.01 if (s == 0 and k == 120) else 0.0001)
+    market = cr.build_market(perp, spot, funding)
+    monkeypatch.setattr(cr, "load_market", lambda data_dir: (market, {}))
+    out = tmp_path / "audit.json"
+    assert ca._cli(["--data-dir", str(tmp_path), "--out", str(out)]) == 0
+    report = json.loads(out.read_text())
+    assert report["funding_extremes"]["negative"] == 1 and report["can_authorize_trade"] is False
+    assert "funding prints" in capsys.readouterr().out

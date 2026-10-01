@@ -94,6 +94,22 @@ def ratio_breaks(market: cr.CarryMarket) -> list[dict]:
     return sorted(out, key=lambda b: -b["breaks"])
 
 
+def _plain(value):
+    """numpy scalars (np.int64 from counting np.bool_, np.float64 from round) as JSON-safe Python types."""
+
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    return value
+
+
 def audit(market: cr.CarryMarket, *, top: int = 25) -> dict:
     rows = position_periods(market)
     as_period = [PositionPeriod(_day(market.grid_open[k]), market.symbols[s], round(b + f, 4), round(b, 4),
@@ -115,7 +131,7 @@ def audit(market: cr.CarryMarket, *, top: int = 25) -> dict:
         }
     worst_total = sum(p.total_pct for p in ordered[:top]) / cr.UNIVERSE_SIZE
     extremes = [p for p in as_period if abs(p.funding_pct) >= FUNDING_EXTREME_PCT]
-    return {
+    return _plain({
         "position_periods": len(as_period),
         "book_total_pct": round(sum(p.total_pct for p in as_period) / cr.UNIVERSE_SIZE, 2),
         "worst_top_share_pct": round(worst_total, 2),
@@ -129,7 +145,7 @@ def audit(market: cr.CarryMarket, *, top: int = 25) -> dict:
             "worst": [asdict(p) for p in sorted(extremes, key=lambda p: p.funding_pct)[:top]],
         },
         "can_authorize_trade": False,
-    }
+    })
 
 
 def print_audit(report: dict) -> None:
@@ -166,9 +182,9 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
     market, _ = cr.load_market(args.data_dir)
     report = audit(market)
+    print_audit(report)  # first, so the log keeps the result even if writing fails
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=1), "utf-8")
-    print_audit(report)
     return 0
 
 
