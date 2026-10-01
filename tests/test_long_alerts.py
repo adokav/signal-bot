@@ -330,6 +330,12 @@ def test_alert_html_escapes_untrusted_text_and_falls_back_to_plain(monkeypatch):
         bot.send(text, html_mode=True)
 
 
+def test_radar_log_stays_under_the_telegram_limit():
+    rows = [dict(_entry(NOW - i * 60, symbol=f"COIN{i:03d}USDT")) for i in range(120)]
+    text = la.format_radar(rows, now=NOW)
+    assert len(text) < 4096 and "+80 eski kayıt daha" in text
+
+
 def test_small_prices_use_four_significant_digits():
     assert la._num(0.98) == "0.9800" and la._num(0.0000123456) == "0.00001235"
     assert la._num(64120.5) == "64,120" and la._num(2345.678) == "2,345.68" and la._num(1.05) == "1.0500"

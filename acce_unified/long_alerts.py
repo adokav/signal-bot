@@ -376,6 +376,9 @@ def summary_line(log: Sequence[Mapping[str, Any]], *, now: int, days: int = 30) 
     )
 
 
+RADAR_ROWS = 40   # two lines each; keeps /radar well under Telegram's 4096 characters
+
+
 def format_radar(log: Sequence[Mapping[str, Any]], *, now: int, hours: int = TRACK_HOURS) -> str:
     """Telegram HTML: one block per signal (time, coin, source, result; then entry and stop)."""
 
@@ -385,7 +388,8 @@ def format_radar(log: Sequence[Mapping[str, Any]], *, now: int, hours: int = TRA
         parts.append("Bu sürede radara giren long sinyali yok.")
     else:
         lines = []
-        for e in sorted(recent, key=lambda e: int(e.get("opened_at") or 0), reverse=True):
+        newest = sorted(recent, key=lambda e: int(e.get("opened_at") or 0), reverse=True)
+        for e in newest[:RADAR_ROWS]:
             source = "T" if e.get("source") == "TAKTIK" else "L"
             coin = str(e.get("symbol") or "?").removesuffix("USDT")[:8]
             plan = e.get("plan") or {}
@@ -393,6 +397,8 @@ def format_radar(log: Sequence[Mapping[str, Any]], *, now: int, hours: int = TRA
             stop = _num(plan["hard_stop"]) if plan else "yok"
             lines.append(f"{_clock(int(e['opened_at']))} {source} {coin:<8} {_status_label(e)}")
             lines.append(f"  giriş {price} · stop {stop}")
+        if len(newest) > RADAR_ROWS:
+            lines.append(f"+{len(newest) - RADAR_ROWS} eski kayıt daha")
         parts.append("<pre>" + esc("\n".join(lines)) + "</pre>")
         parts.append(esc("L: Likit-100, T: taktik (BTC/ETH). 72s: 72 saat doldu; * takip verisi eksikti."))
     parts += [esc(summary_line(log, now=now)),
