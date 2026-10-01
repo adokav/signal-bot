@@ -1,0 +1,16 @@
+{
+ "schema": "liquid-replay-evidence/v1",
+ "trial_id": "69f6387eaf32ed4f",
+ "engine_fingerprint": "d809bd2bc219e681",
+ "source": "GitHub Actions liquid_replay run 36832741363 (commit 6eb66fc), values transcribed from the job log table",
+ "data": "Binance spot USDT pairs incl. delisted (642 candidates, 180 stopped early), 2020-10 to 2026-08, 15m cadence",
+ "costs": "5 bps fee + 5 bps slippage per side; stress fee x1.5, slippage x2",
+ "outcome": "next-open to close after H hours; excess = net return minus equal-weight universe return; percent",
+ "groups": {
+  "TOP3@4h": {"n": 151445, "mean_net_pct": -0.27, "mean_benchmark_pct": -0.04, "mean_excess_pct": -0.234, "excess_ci_family": [-0.26, -0.21], "stressed_mean_net_pct": -0.42, "verdict": "NEGATIVE"},
+  "TOP3@24h": {"n": 77234, "mean_net_pct": -0.50, "mean_benchmark_pct": -0.17, "mean_excess_pct": -0.329, "excess_ci_family": [-0.40, -0.26], "stressed_mean_net_pct": -0.65, "verdict": "NEGATIVE"},
+  "ALL_READY@4h": {"n": 469920, "mean_net_pct": -0.24, "mean_benchmark_pct": -0.03, "mean_excess_pct": -0.214, "excess_ci_family": [-0.22, -0.20], "stressed_mean_net_pct": -0.39, "verdict": "NEGATIVE"},
+  "ALL_READY@24h": {"n": 162156, "mean_net_pct": -0.40, "mean_benchmark_pct": -0.18, "mean_excess_pct": -0.221, "excess_ci_family": [-0.26, -0.18], "stressed_mean_net_pct": -0.55, "verdict": "NEGATIVE"}
+ },
+ "can_authorize_trade": false
+}

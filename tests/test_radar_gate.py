@@ -55,10 +55,13 @@ def test_unreadable_timestamp_is_not_treated_as_fresh():
     assert future.status == "REJECT"
 
 
-def test_liquid_long_missing_spread_and_neutral_regime_stay_unknown():
+def test_liquid_long_missing_spread_and_neutral_regime_stay_unknown(tmp_path):
+    from acce_unified.radar_gate import load_liquid_evidence
+
+    no_evidence = load_liquid_evidence(tmp_path / "missing.json")
     decision = liquid_long_gate(
         {"symbol": "SOLUSDT", "metadata": {}}, market_regime="NEUTRAL",
-        generated_at=NOW - 5, now=NOW, max_age_seconds=360,
+        generated_at=NOW - 5, now=NOW, max_age_seconds=360, evidence=no_evidence,
     )
     assert decision.status == "WATCH"
     statuses = {c.key: c.status.value for c in decision.checks}
@@ -244,3 +247,91 @@ def test_watch_setup_is_still_pushed(monkeypatch, tmp_path):
     sent, _ = _scan(monkeypatch, tmp_path, "RANGE_RECLAIM")
     assert len(sent) == 1 and sent[0].startswith("👀") and "WATCH" in sent[0]
     assert "INSUFFICIENT" in sent[0] and "Sinyal bazında kalibre olasılık: YOK" in sent[0]
+
+
+# ---------------------------------------------------------------------------
+# Liquid-100 replay evidence (docs/LIQUID_REPLAY_REPORT.md)
+# ---------------------------------------------------------------------------
+
+from acce_unified.radar_gate import (
+    LIQUID_EVIDENCE_FILE,
+    LIQUID_FINGERPRINT_FILES,
+    code_fingerprint,
+    default_liquid_evidence,
+    liquid_evidence_line,
+    load_liquid_evidence,
+)
+
+
+def _liquid_file(tmp_path, mutate=None, fingerprint=FP):
+    payload = json.loads(LIQUID_EVIDENCE_FILE.read_text("utf-8"))
+    payload["engine_fingerprint"] = fingerprint
+    if mutate is not None:
+        mutate(payload)
+    path = tmp_path / "liquid.json"
+    path.write_text(json.dumps(payload), "utf-8")
+    return path
+
+
+def _liquid_item():
+    return {"symbol": "SOLUSDT", "metadata": {"spread_bps": 3.0}}
+
+
+def test_committed_liquid_evidence_matches_the_running_code():
+    """Tripwire: changing the radar, the universe builder or the replay makes the evidence stale."""
+
+    from trading.backtest import liquid_replay
+
+    assert LIQUID_FINGERPRINT_FILES == liquid_replay.FINGERPRINT_FILES
+    assert code_fingerprint(LIQUID_FINGERPRINT_FILES) == liquid_replay.engine_fingerprint()
+    evidence = default_liquid_evidence()
+    assert evidence.status == "OK", evidence.detail
+    assert evidence.trial_id == "69f6387eaf32ed4f"
+
+
+def test_negative_top3_list_is_rejected_with_its_evidence(tmp_path):
+    evidence = load_liquid_evidence(_liquid_file(tmp_path), current_fingerprint=FP)
+    decision = liquid_long_gate(_liquid_item(), market_regime="RISK_ON", generated_at=NOW - 5,
+                                now=NOW, max_age_seconds=360, evidence=evidence)
+    assert decision.status == "REJECT" and decision.can_authorize_trade is False
+    by_key = {c.key: c.status.value for c in decision.checks}
+    assert by_key["oos_expectancy_positive"] == "FAIL" and by_key["net_ev_positive"] == "FAIL"
+    line = status_line(decision)
+    assert "geçmiş test NEGATIVE" in line and "24 saat" in line
+    assert "NEGATIVE" in liquid_evidence_line(evidence)
+
+
+def test_mixed_or_insufficient_liquid_evidence_is_not_a_verdict(tmp_path):
+    def mixed(p):
+        p["groups"]["TOP3@4h"].update(verdict="INSUFFICIENT", n=100)
+
+    evidence = load_liquid_evidence(_liquid_file(tmp_path, mixed), current_fingerprint=FP)
+    decision = liquid_long_gate(_liquid_item(), market_regime="RISK_ON", generated_at=NOW - 5,
+                                now=NOW, max_age_seconds=360, evidence=evidence)
+    assert decision.status == "WATCH"
+
+
+def test_liquid_evidence_for_other_code_is_not_applied(tmp_path):
+    evidence = load_liquid_evidence(_liquid_file(tmp_path), current_fingerprint="0" * 16)
+    assert evidence.status == "STALE"
+    decision = liquid_long_gate(_liquid_item(), market_regime="RISK_ON", generated_at=NOW - 5,
+                                now=NOW, max_age_seconds=360, evidence=evidence)
+    assert decision.status == "WATCH"
+    assert liquid_evidence_line(evidence).startswith("Geçmiş test: YOK")
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda p: p["groups"]["TOP3@24h"].update(excess_ci_family=[-0.4, 0.1]),
+    lambda p: p["groups"]["TOP3@24h"].update(verdict="GOOD"),
+    lambda p: p["groups"]["TOP3@24h"].update(mean_excess_pct=float("inf")),
+    lambda p: p["groups"]["TOP3@24h"].update(n=-1),
+    lambda p: p["groups"]["TOP3@4h"].update(verdict="PASS_CANDIDATE"),  # negative numbers
+    lambda p: p.update(can_authorize_trade=True),
+    lambda p: p.pop("groups"),
+])
+def test_corrupt_liquid_evidence_fails_closed(tmp_path, mutate):
+    evidence = load_liquid_evidence(_liquid_file(tmp_path, mutate), current_fingerprint=FP)
+    assert evidence.status == "INVALID"
+    decision = liquid_long_gate(_liquid_item(), market_regime="RISK_ON", generated_at=NOW - 5,
+                                now=NOW, max_age_seconds=360, evidence=evidence)
+    assert decision.status == "WATCH"

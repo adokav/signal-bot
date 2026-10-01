@@ -105,6 +105,75 @@ Bunlardan biri değişirse
 `tests/test_liquid_replay.py::test_liquid_replay_is_pre_registered_for_the_current_code`
 kırılır.
 
-## Sonuç
+## Sonuç — liquid_replay run #1 (2026-10-01): **NEGATIVE**
 
-_Henüz koşulmadı._
+Koşu: GitHub Actions `liquid_replay` #1, commit `6eb66fc`, parmak izi
+`d809bd2bc219e681` (ön-kayıtlı trial ile eşleşti). Pencere 2020-10 → 2026-08.
+
+**Veri ve evren:**
+- 642 aday çift; 180'inin verisi pencere bitmeden duruyor (borsadan kalkan
+  veya işlemi durdurulan çiftler dahil). Survivorship'ten arındırma çalıştı.
+- 207.456 karar adımı; 206.206 değerlendirildi, 1.250 atlandı (%0.6).
+- Evren ortalaması 99.5 çift; 954 bozuk/tekrarlı mum satırı atıldı.
+
+Fazla getiri = net getiri − eşit ağırlıklı ilk 100'ün getirisi (yüzde).
+
+| Grup | Gözlem | Net getiri | Sepet | **Fazla getiri** | %98.75 güven | Stres net | 1. yarı | 2. yarı | Karar |
+|---|---:|---:|---:|---:|---|---:|---:|---:|---|
+| TOP3@4s | 151.445 | −0.27 | −0.04 | **−0.234** | [−0.26, −0.21] | −0.42 | −0.23 | −0.24 | **NEGATIVE** |
+| TOP3@24s | 77.234 | −0.50 | −0.17 | **−0.329** | [−0.40, −0.26] | −0.65 | −0.32 | −0.33 | **NEGATIVE** |
+| ALL_READY@4s | 469.920 | −0.24 | −0.03 | **−0.214** | [−0.22, −0.20] | −0.39 | −0.21 | −0.22 | **NEGATIVE** |
+| ALL_READY@24s | 162.156 | −0.40 | −0.18 | **−0.221** | [−0.26, −0.18] | −0.55 | −0.22 | −0.23 | **NEGATIVE** |
+
+Fazla getirinin pozitif olduğu gözlem oranı %37–40.
+
+**Tanılayıcılar (karar vermez):**
+
+*Decay:* Maliyet öncesi fazla getiri (fazla getiri + %0.20 maliyet), ufuk
+uzadıkça kötüleşiyor:
+
+| Ufuk | 1 saat | 4 saat | 12 saat | 24 saat | 72 saat |
+|---|---:|---:|---:|---:|---:|
+| İlk 3 | −0.00 | −0.03 | −0.07 | −0.13 | −0.37 |
+| Tüm hazırlar | −0.01 | −0.01 | −0.02 | −0.02 | −0.22 |
+
+*Rejim:* RISK_ON, NEUTRAL ve RISK_OFF rejimlerinin hepsinde negatif. En
+kötüsü RISK_OFF'ta İlk 3, 24 saat: −0.53.
+
+*Yıl:* 2022–2026 arasındaki her yıl negatif ve güven aralığı sıfırın altında.
+2020–2021'de (boğa) güven aralığı sıfırı içeriyor ama hiçbir yıl pozitif
+değil.
+
+### Ön-kayıtlı kurallara göre değerlendirme
+
+- Dört karar grubunun **dördü de NEGATIVE**: %98.75 güven aralığının üst
+  sınırı bile sıfırın altında.
+- Sonuç iki yarıda, her rejimde ve her yılda aynı yönde.
+- **Hiçbir grup PASS_CANDIDATE değil.** Protokole göre Likit-100 listesi
+  canlıda REJECT olarak etiketlenir.
+
+### Sonucu nasıl okumalı
+
+- **Seçim becerisi yok.** Maliyet öncesi kısa ufuklarda (1–4 saat) seçilen
+  coinler sepetle aynı getiriyi veriyor. Maliyet bu sıfır farkı negatife
+  çeviriyor.
+- **İlk 3 daha da kötü.** En yüksek teknik puanlı coinler (İlk 3), teknik
+  kapıyı geçen tüm coinlerden daha kötü. Ufuk uzadıkça sepetin gerisinde
+  kalıyorlar. Bu, kısa vadeli güçlü hareketi kovalamanın sonradan geri
+  verildiğine (kesitsel ters dönüş) işaret ediyor.
+- **Test edilmeyen katman bunu kurtarmaz görünüyor.** Canlıdaki min puan
+  eşiği daha yüksek puanlıları tutar; yüksek puanlılar ise burada daha kötü.
+  Arz katmanının sonucu tersine çevirmesi için, negatif bir kümenin içinden
+  sistematik olarak daha iyi coinleri seçmesi gerekir. Buna dair kanıt yok.
+- **Bu bir short stratejisi önerisi değildir.** Ters dönüş bulgusu yeni bir
+  hipotezdir; ancak ayrı ön-kayıtla ve kendi verisinde test edilebilir. Spot
+  hesapta short da yoktur.
+
+### Canlı sisteme etkisi
+
+Sonuç `research/evidence/liquid_replay.json` dosyasına işlendi. Canlı kapı
+bu dosyayı yalnızca kod parmak izi eşleştiğinde uygular:
+
+- `/longs` adayları §38 soru 4 ve 7'de FAIL alır → **REJECT**. Her aday
+  kanıt satırıyla birlikte gösterilmeye devam eder.
+- Liste push edilmiyor; yalnızca komutla görüntüleniyor.

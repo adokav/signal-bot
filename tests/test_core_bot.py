@@ -216,11 +216,12 @@ def test_stale_tactical_plan_is_rejected_not_presented_as_current():
     assert "eski" in text
 
 
-def test_long_candidates_are_watch_or_rejected_by_regime():
+def test_long_candidates_carry_the_negative_replay_and_regime_rejects():
     snapshot = _snapshot()
     snapshot["generated_at"] = int(bot.time.time()) - 5
     text = bot.format_longs(snapshot)
-    assert "Durum: WATCH" in text
+    assert "Durum: REJECT — geçmiş test NEGATIVE" in text
+    assert "İlk 3 → 4 saat sonra sepete göre" in text
     assert "kalibre edilmemiş" in text
     snapshot["liquid_market_context"] = {"regime": "RISK_OFF", "positive_breadth_pct": 20}
-    assert "Durum: REJECT" in bot.format_longs(snapshot)
+    assert "Durum: REJECT — rejim RISK_OFF" in bot.format_longs(snapshot)
