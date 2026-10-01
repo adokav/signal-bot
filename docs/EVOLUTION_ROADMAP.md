@@ -264,6 +264,10 @@ Ancak prim 2025–2026'da negatif, sermayeye göre getiri (≈ +3.9%/yıl) risks
 getirinin altında, maliyet funding'in yarısını yiyor ve 68 pozisyon 1x
 teminatta tasfiye seviyesine ulaştı. Canlı sermaye için yeterli değil.
 
-**Sonraki iş:** karar kullanıcıda — carry için veri denetimi + kâğıt üzerinde
-ileri kayıt, ya da araştırmanın burada durdurulup radarların araştırma
-moduna alınması. Her yeni hipotez deneme kaydına önceden girer.
+**Sonraki iş:** (1) carry veri denetimi (`carry_audit`, tanılayıcı; STATIC'in
+−83% düşüşünün kaynağı); (2) kısa vadeli kesitsel geri dönüş hipotezinin
+hiç dokunulmamış 2017-09 → 2020-09 verisinde ön-kayıtlı testi (trial
+`6a2bc19afcf3dd25`, `docs/REVERSAL_REPLAY_REPORT.md`, workflow
+`reversal_replay`). Sonra: haftalık kesitsel momentum ve maker emirli carry.
+Her yeni hipotez deneme kaydına önceden girer; deneme sayısı arttıkça çıta
+yükselir.
