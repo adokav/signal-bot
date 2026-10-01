@@ -161,13 +161,13 @@ def test_entries_without_a_plan_are_not_tracked_and_trim_keeps_open_ones():
 
 def test_texts_show_levels_status_and_no_authority():
     entry = _entry()
-    text = la.alert_text(entry, headline="⛔ LONG SİNYALİ", evidence="Geçmiş test: NEGATIVE")
-    for needle in ("XUSDT", "Hard stop", "pozisyon payı", "REJECT", "Emir yetkisi yok"):
+    text = la.alert_text(entry, icon="⛔", title="LONG SİNYALİ", evidence="Geçmiş test: NEGATIVE")
+    for needle in ("XUSDT", "Hard stop", "Pozisyon", "REJECT (zararda)", "Emir yetkisi yok", "<pre>"):
         assert needle in text
     stopped = dict(entry, status=la.STOPPED, exit_price=9.5, result_pct=-5.0, closed_at=NOW + H)
     assert "-5.0" in la.stop_alert_text(stopped)
     radar = la.format_radar([entry, stopped], now=NOW + H)
-    assert "RADAR KAYDI" in radar and "açık" in radar and "stop (%-5.0)" in radar
+    assert "RADAR KAYDI" in radar and "açık" in radar and "stop %-5.0" in radar and "stop 9.5000" in radar
     assert "1 kapanmış kayıt" in la.summary_line([stopped], now=NOW + H)
 
 
@@ -188,7 +188,7 @@ class FakeKlines:
 @pytest.fixture
 def wired(monkeypatch):
     sent = []
-    monkeypatch.setattr(bot, "send", lambda text, keyboard=None: sent.append(text))
+    monkeypatch.setattr(bot, "send", lambda text, keyboard=None, html_mode=False: sent.append(text))
     monkeypatch.setattr(bot, "_save_state", lambda: None)
     monkeypatch.setitem(bot.STATE, "radar_log", [])
     monkeypatch.setattr(bot, "LIQUID_LONG_ALERTS", True)
@@ -209,7 +209,7 @@ def test_a_new_top3_coin_raises_one_alert_with_stop_levels(monkeypatch, wired):
     bot._liquid_radar(_snapshot())
     assert len(wired) == 1
     alert = wired[0]
-    assert "LONG SİNYALİ — Likit-100" in alert and "SOLUSDT" in alert and "Hard stop" in alert
+    assert "LONG SİNYALİ · Likit-100 #1" in alert and "SOLUSDT" in alert and "Hard stop" in alert
     assert "REJECT" in alert and "Emir yetkisi yok" in alert
     log = bot.STATE["radar_log"]
     assert len(log) == 1 and log[0]["plan"]["hard_stop"] < 10.0 and log[0]["can_authorize_trade"] is False
@@ -225,7 +225,7 @@ def test_missing_klines_still_log_the_signal_but_say_no_stop(monkeypatch, wired)
     monkeypatch.setattr(bot.time, "time", lambda: NOW)
     monkeypatch.setattr(bot, "KLINES", Broken())
     bot._liquid_radar(_snapshot())
-    assert "Stop: hesaplanamadı" in wired[0] and "secret" not in wired[0]
+    assert "Stop hesaplanamadı" in wired[0] and "secret" not in wired[0]
     assert bot.STATE["radar_log"][0]["plan"] is None
 
 
@@ -236,7 +236,7 @@ def test_a_stop_hit_sends_a_stop_alert(monkeypatch, wired):
     monkeypatch.setattr(bot, "KLINES", FakeKlines([], _m15(start, [9.4], lows=[9.3], opens=[9.6])))
     monkeypatch.setattr(bot.time, "time", lambda: start + 2 * M15)
     bot._liquid_radar({"liquid_long_candidates": []})
-    assert any("hard stop seviyesine indi" in m for m in wired)
+    assert any("STOP · SOLUSDT" in m for m in wired)
     assert bot.STATE["radar_log"][0]["status"] == la.STOPPED
 
 
@@ -295,9 +295,44 @@ def test_longs_panel_and_alert_carry_supply_and_extremes(monkeypatch, wired):
     monkeypatch.setattr(bot.time, "time", lambda: NOW)
     monkeypatch.setattr(bot, "KLINES", FakeKlines(_hours(30, low_at=25, low=9.5)))
     bot._liquid_radar(snapshot)
-    assert "ATL $0.05 (%+1900.0)" in wired[0] and "max açıklanmamış/sınırsız" in wired[0]
+    assert "ATL         $0.05 · %+1900.0" in wired[0] and "Max arz     açıklanmamış" in wired[0]
+    assert "ATH tarihi  14.03.2024" in wired[0]
     stored = bot.STATE["radar_log"][0]["fundamentals"]
     assert stored["ath_price_usd"] == 2.5 and stored["max_supply"] is None
+
+
+def test_alert_html_escapes_untrusted_text_and_falls_back_to_plain(monkeypatch):
+    entry = dict(_entry(), symbol="X<b>&USDT", gate_status="REJECT")
+    text = la.alert_text(entry, icon="⛔", title="LONG", evidence="a < b & c", fact_rows=[("Arz/ATH", "<i>x</i>")])
+    assert "X&lt;b&gt;&amp;USDT" in text and "a &lt; b &amp; c" in text and "&lt;i&gt;x&lt;/i&gt;" in text
+    block = text.split("<pre>")[1].split("</pre>")[0]
+    assert all(len(line) <= 32 for line in bot._plain(block).split("\n"))  # table rows fit a phone
+
+    calls = []
+
+    def api(method, payload):
+        calls.append(payload)
+        if payload.get("parse_mode") == "HTML":
+            raise RuntimeError("telegram_http_400:sendMessage")
+
+    monkeypatch.setattr(bot, "TOKEN", "t")
+    monkeypatch.setattr(bot, "CHAT_ID", "c")
+    monkeypatch.setattr(bot, "_api", api)
+    bot.send(text, html_mode=True)
+    assert calls[0]["parse_mode"] == "HTML" and "parse_mode" not in calls[1]
+    assert "X<b>&USDT" in calls[1]["text"] and "<pre>" not in calls[1]["text"]
+
+    def down(method, payload):
+        raise RuntimeError("telegram_transport_error:ConnectionError")
+
+    monkeypatch.setattr(bot, "_api", down)
+    with pytest.raises(RuntimeError):      # transport errors are not markup errors: no silent retry
+        bot.send(text, html_mode=True)
+
+
+def test_small_prices_use_four_significant_digits():
+    assert la._num(0.98) == "0.9800" and la._num(0.0000123456) == "0.00001235"
+    assert la._num(64120.5) == "64,120" and la._num(2345.678) == "2,345.68" and la._num(1.05) == "1.0500"
 
 
 def test_btc_eth_facts_use_project_titles_and_fail_quietly(monkeypatch):
