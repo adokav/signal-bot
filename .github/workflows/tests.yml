@@ -59,6 +59,7 @@ jobs:
             tests/test_reversal_replay.py \
             tests/test_listing_replay.py \
             tests/test_long_alerts.py \
+            tests/test_signal_quality.py \
             tests/test_observation_archive_cadence.py \
             tests/test_macro_data.py \
             tests/test_macro_treasury.py \

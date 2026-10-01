@@ -1,0 +1,113 @@
+name: signal_quality_confirm
+
+# Manual-trigger research job: step 3 of docs/SIGNAL_QUALITY.md. Runs the two
+# pre-registered tests ONCE on the sealed confirmation window 2024-09 → 2026-08:
+#
+#   F1  Likit-100: keep an alert only if 15m ATR <= 1.0% and its 24h gain is at
+#       most 5 points above the top-100 median.
+#   F2  BTC/ETH tactical: keep an alert only while the perpetual trades below
+#       spot (basis < 0).
+#
+# Every step refuses to run unless the trial for the current code is in
+# research/trials/registry.jsonl (pre-registered before any 2024-09+ data was
+# looked at). No inputs on purpose: a different setting is a different trial.
+#
+# Research only: no order authority, does not touch the production bot.
+#
+# How to run:
+#   GitHub → Actions → signal_quality_confirm → Run workflow
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  likit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements.txt
+          -r requirements-dev.txt
+          -r requirements-trading.txt
+      - name: Build the confirmation universe (as of 2026-09-01)
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.signal_quality build-confirm likit --out research/data/sqc_liquid_universe
+          du -sh research/data/sqc_liquid_universe
+      - name: F1 — Likit-100 calm and not chasing
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.signal_quality confirm likit \
+              --data-dir research/data/sqc_liquid_universe \
+              --out-dir research/data/signal_quality_confirm \
+              --workers "$(nproc)" | tee research/data/signal_quality_confirm_likit.txt
+          {
+            echo "## Sinyal kalitesi doğrulaması — F1 (Likit-100)"
+            echo '```'
+            grep -v "^phase 1" research/data/signal_quality_confirm_likit.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-quality-confirm-likit
+          path: |
+            research/data/signal_quality_confirm/
+            research/data/signal_quality_confirm_likit.txt
+            research/data/sqc_liquid_universe/manifest.json
+          retention-days: 30
+
+  tactical:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements.txt
+          -r requirements-dev.txt
+          -r requirements-trading.txt
+      - name: Download BTC/ETH spot and perpetual data (as of 2026-09-01)
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.signal_quality build-confirm tactical --out research/data/sqc_binance_spot
+          ls -la research/data/sqc_binance_spot research/data/sqc_binance_spot/perp
+      - name: F2 — tactical alerts only while perp < spot
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.signal_quality confirm tactical \
+              --data-dir research/data/sqc_binance_spot \
+              --perp-dir research/data/sqc_binance_spot/perp \
+              --out-dir research/data/signal_quality_confirm \
+              --workers "$(nproc)" | tee research/data/signal_quality_confirm_tactical.txt
+          {
+            echo "## Sinyal kalitesi doğrulaması — F2 (taktik baz)"
+            echo '```'
+            grep -v "^phase 1" research/data/signal_quality_confirm_tactical.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-quality-confirm-tactical
+          path: |
+            research/data/signal_quality_confirm/
+            research/data/signal_quality_confirm_tactical.txt
+          retention-days: 30

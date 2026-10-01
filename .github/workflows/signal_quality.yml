@@ -1,0 +1,99 @@
+name: signal_quality
+
+# Manual-trigger research job: step 1 of docs/SIGNAL_QUALITY.md. Builds the
+# sealed discovery data (2020-10 → 2024-08, downloaded as of 2024-09-01, so no
+# later candle exists in it) and writes the per-signal feature and outcome
+# table for the Likit-100 and BTC/ETH tactical alerts.
+#
+# Discovery only: the confirmation window is run once, by a separate job,
+# after at most three filters are pre-registered.
+#
+# Research only: no order authority, does not touch the production bot.
+#
+# How to run:
+#   GitHub → Actions → signal_quality → Run workflow
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  likit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements.txt
+          -r requirements-dev.txt
+          -r requirements-trading.txt
+      - name: Build sealed discovery universe and funding (data.binance.vision)
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.signal_quality build likit --out research/data/sq_liquid_universe
+          du -sh research/data/sq_liquid_universe
+      - name: Likit-100 feature table
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.signal_quality likit \
+              --data-dir research/data/sq_liquid_universe \
+              --funding-dir research/data/sq_liquid_universe/funding \
+              --out-dir research/data/signal_quality \
+              --workers "$(nproc)" | tee research/data/signal_quality_likit.txt
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-quality-likit
+          path: |
+            research/data/signal_quality/
+            research/data/signal_quality_likit.txt
+            research/data/sq_liquid_universe/manifest.json
+            research/data/sq_liquid_universe/funding/manifest.json
+          retention-days: 30
+
+  tactical:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements.txt
+          -r requirements-dev.txt
+          -r requirements-trading.txt
+      - name: Download sealed BTC/ETH spot data
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.signal_quality build tactical --out research/data/sq_binance_spot
+          ls -la research/data/sq_binance_spot
+      - name: Tactical feature table
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.signal_quality tactical \
+              --data-dir research/data/sq_binance_spot \
+              --perp-dir research/data/sq_binance_spot/perp \
+              --out-dir research/data/signal_quality \
+              --workers "$(nproc)" | tee research/data/signal_quality_tactical.txt
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-quality-tactical
+          path: |
+            research/data/signal_quality/
+            research/data/signal_quality_tactical.txt
+          retention-days: 30
