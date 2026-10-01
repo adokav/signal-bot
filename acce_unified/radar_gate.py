@@ -468,6 +468,13 @@ F2_TEST = "F2_TACTICAL_PERP_BELOW_SPOT"
 F1_ATR15_MAX = 1.0
 F1_REL24_MAX = 5.0
 F1_MIN_UNIVERSE = 50
+F1_MIN_KEPT = 100                  # signal_quality.CONFIRM_MIN_N
+# The research measured the 24h change between two closed 15m candles 96
+# candles apart; the live inputs are computed the same way, never from the
+# ticker (whose last price belongs to a forming candle, AGENTS.md §1).
+F1_INTERVAL = 900
+F1_CHANGE_BARS = 96
+F1_STALE_GRACE = 120               # seconds after a 15m close before a missing candle counts as stale
 # Must equal trading.backtest.signal_quality.FINGERPRINT_FILES / LONG_ALERT_LOGIC /
 # LONG_ALERT_CONSTANTS (a test checks the lists and the digest); duplicated
 # because that module needs numpy, which the production image does not install.
@@ -549,6 +556,11 @@ def _sq_positive(summary: Mapping[str, Any], key: str) -> bool:
     return low > 0 and _finite_number(summary["h1"], key) > 0 and _finite_number(summary["h2"], key) > 0
 
 
+def _sq_stress_positive(row: Mapping[str, Any]) -> bool:
+    key = "kept_stress_net_pct" if "kept_stress_net_pct" in row else "kept_stress_r"
+    return _finite_number(_sq_summary(row, key)["mean"], key) > 0
+
+
 def _signal_quality_test(name: str, row: Mapping[str, Any]) -> SignalQualityTest:
     verdict = str(row["verdict"])
     if verdict not in SIGNAL_QUALITY_VERDICTS:
@@ -563,10 +575,15 @@ def _signal_quality_test(name: str, row: Mapping[str, Any]) -> SignalQualityTest
     gap_key = "kept_minus_dropped_net_pct" if "kept_minus_dropped_net_pct" in row else "kept_minus_dropped_r"
     dropped_key = "dropped_net_pct" if "dropped_net_pct" in row else "dropped_r"
     net, excess, gap = _sq_summary(row, net_key), _sq_summary(row, excess_key), _sq_summary(row, gap_key)
-    passes = _sq_positive(net, net_key) and _sq_positive(excess, excess_key)
+    kept_n = net["n"]
+    if isinstance(kept_n, bool) or not isinstance(kept_n, int) or kept_n < 0:
+        raise ValueError(f"{name}: {net_key}.n must be a non-negative integer")
+    # Every pre-registered PASS condition (signal_quality.filter_verdict), not just the intervals.
+    passes = (kept_n >= F1_MIN_KEPT and _sq_positive(net, net_key) and _sq_positive(excess, excess_key)
+              and _sq_stress_positive(row))
     separates = _sq_positive(gap, gap_key)
     if verdict == "PASS" and not passes:
-        raise ValueError(f"{name}: PASS without positive kept intervals")
+        raise ValueError(f"{name}: PASS without every pre-registered condition")
     if verdict == "KAYBI_AZALTIR" and (passes or not separates):
         raise ValueError(f"{name}: KAYBI_AZALTIR inconsistent with its intervals")
     if verdict == "NO_EFFECT" and (passes or separates):
@@ -583,6 +600,7 @@ def load_signal_quality_evidence(
     path: Path = SIGNAL_QUALITY_EVIDENCE_FILE,
     *,
     current_fingerprint: str | None = None,
+    current_live_fingerprint: str | None = None,
 ) -> SignalQualityEvidence:
     """Read the filter confirmation; never raises. Applied only to the code it was measured on."""
 
@@ -599,6 +617,7 @@ def load_signal_quality_evidence(
         if trial_id != SIGNAL_QUALITY_TRIAL:
             raise ValueError("evidence of another trial")
         fingerprint = str(payload["code_fingerprint"])
+        live_fingerprint = str(payload["live_rule_fingerprint"])
         tests = {str(name): _signal_quality_test(str(name), row) for name, row in dict(payload["tests"]).items()}
     except (AttributeError, KeyError, TypeError, ValueError):
         return SignalQualityEvidence("INVALID", "sinyal kalitesi kanıt dosyası tutarsız")
@@ -609,12 +628,53 @@ def load_signal_quality_evidence(
             return SignalQualityEvidence("INVALID", "sinyal kalitesi kod parmak izi hesaplanamadı")
     if fingerprint != current_fingerprint:
         return SignalQualityEvidence("STALE", "sinyal kalitesi kanıtı mevcut kod sürümüne ait değil", trial_id)
+    if live_fingerprint != (current_live_fingerprint or f1_live_fingerprint()):
+        return SignalQualityEvidence("STALE", "canlı F1 kuralı incelenen sürümden farklı", trial_id)
     return SignalQualityEvidence("OK", "sinyal kalitesi kanıtı mevcut kodla eşleşiyor", trial_id, window, tests)
 
 
 @lru_cache(maxsize=1)
 def default_signal_quality_evidence() -> SignalQualityEvidence:
     return load_signal_quality_evidence()
+
+
+def closed_change_24h(rows: Any, *, now: int) -> float | None:
+    """% change from the 15m candle closed 96 candles (24h) earlier to the last closed one.
+
+    Same quantity as the research feature (``close[i] / close[i-96] - 1``):
+    the forming candle is dropped, both candles must exist, and a last closed
+    candle older than one interval (plus a short grace) is stale. None when it
+    cannot be computed; never a neutral value.
+    """
+
+    from acce_unified.long_alerts import closed_candles
+
+    candles = closed_candles(rows, interval_seconds=F1_INTERVAL, now=now)
+    if not candles:
+        return None
+    last = candles[-1]
+    if now - (last[0] + F1_INTERVAL) > F1_INTERVAL + F1_STALE_GRACE:
+        return None
+    first = next((c for c in candles if c[0] == last[0] - F1_CHANGE_BARS * F1_INTERVAL), None)
+    if first is None:
+        return None
+    return (last[4] / first[4] - 1.0) * 100.0
+
+
+def universe_median_change(changes: Mapping[str, float | None]) -> float | None:
+    """Median closed-candle 24h change of the top-100; None below ``F1_MIN_UNIVERSE`` known values."""
+
+    import statistics
+
+    values = [v for v in changes.values() if v is not None and math.isfinite(v)]
+    return statistics.median(values) if len(values) >= F1_MIN_UNIVERSE else None
+
+
+def atr15_from_metadata(metadata: Mapping[str, Any]) -> float | None:
+    """15m ATR % from the live metrics, which are computed on completed candles only."""
+
+    metrics = metadata.get("long_metrics") or {}
+    return _optional_number(metrics.get("atr_pct")) if metrics.get("status") == "READY" else None
 
 
 @dataclass(frozen=True)
@@ -638,9 +698,17 @@ def _optional_number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def likit_quality_label(metadata: Mapping[str, Any], evidence: SignalQualityEvidence | None = None) -> QualityLabel:
+def likit_quality_label(
+    *,
+    atr15_pct: float | None,
+    change_24h: float | None,
+    universe_median: float | None,
+    evidence: SignalQualityEvidence | None = None,
+) -> QualityLabel:
     """The pre-registered F1 rule on a live candidate, labelled by its confirmed verdict.
 
+    Inputs must be the research quantities: ``atr15_from_metadata`` and
+    ``closed_change_24h`` / ``universe_median_change`` on closed 15m candles.
     KAYBI_AZALTIR (the confirmed result) marks only the dropped alerts: they
     are labelled AVOID; kept alerts are never called good. Missing inputs are
     UNKNOWN, not a pass (AGENTS.md §2).
@@ -653,15 +721,11 @@ def likit_quality_label(metadata: Mapping[str, Any], evidence: SignalQualityEvid
         return QualityLabel("NOT_APPLIED", "uygulanmıyor", f"kalite filtresi uygulanmıyor ({detail})")
     if test.verdict not in {"KAYBI_AZALTIR", "PASS"}:
         return QualityLabel("NOT_APPLIED", "etiket yok", f"F1 doğrulamada {test.verdict}: etiket uygulanmıyor")
-    metrics = metadata.get("long_metrics") or {}
-    context = metadata.get("market_context") or {}
-    atr = _optional_number(metrics.get("atr_pct")) if metrics.get("status") == "READY" else None
-    change = _optional_number(metadata.get("change_pct"))
-    median = _optional_number(context.get("median_change_pct"))
-    size = _optional_number(context.get("universe_size"))
-    if atr is None or change is None or median is None or size is None or size < F1_MIN_UNIVERSE:
+    atr, change, median = (_optional_number(v) for v in (atr15_pct, change_24h, universe_median))
+    if atr is None or change is None or median is None:
         return QualityLabel("UNKNOWN", "bilinmiyor",
-                            "kalite filtresi hesaplanamadı (15 dk ATR, 24s değişim ya da evren medyanı eksik)")
+                            "kalite filtresi hesaplanamadı (15 dk ATR, kapanmış mumlarla 24s değişim ya da "
+                            "evren medyanı eksik)")
     rel = change - median
     if atr <= F1_ATR15_MAX and rel <= F1_REL24_MAX:
         if test.verdict == "PASS":
@@ -683,6 +747,27 @@ def likit_quality_label(metadata: Mapping[str, Any], evidence: SignalQualityEvid
         f"{' ve '.join(reasons)}. Doğrulamada (2024-26, stop + 72 saat, maliyet sonrası) böyle uyarılar ortalama "
         f"%{test.dropped_mean:+.1f}; geçenlerden {test.gap_mean:.1f} puan [{low:.1f}, {high:.1f}] daha kötü", atr, rel,
     )
+
+
+F1_LIVE_LOGIC = ("closed_change_24h", "universe_median_change", "atr15_from_metadata", "likit_quality_label",
+                 "_optional_number")
+F1_LIVE_CONSTANTS = ("F1_ATR15_MAX", "F1_REL24_MAX", "F1_MIN_UNIVERSE", "F1_INTERVAL", "F1_CHANGE_BARS",
+                     "F1_STALE_GRACE")
+
+
+def f1_live_fingerprint() -> str:
+    """Digest of the live F1 mapping; the evidence pins the reviewed version, any change makes it STALE."""
+
+    import inspect
+    import sys
+
+    module = sys.modules[__name__]
+    digest = hashlib.sha256()
+    for name in F1_LIVE_LOGIC:
+        digest.update(inspect.getsource(getattr(module, name)).encode())
+    for name in F1_LIVE_CONSTANTS:
+        digest.update(f"{name}={getattr(module, name)!r}".encode())
+    return digest.hexdigest()[:16]
 
 
 def signal_quality_status(evidence: SignalQualityEvidence | None = None) -> str:

@@ -407,9 +407,29 @@ her zaman spotun altındaydı (%94).
 
 ### Canlıya etkisi (ön-kayıtlı kurala göre)
 
-`research/evidence/signal_quality.json`, yalnızca parmak izi eşleştiğinde
-uygulanır (`radar_gate.load_signal_quality_evidence`). Eşleşmezse etiket yok;
-"uygulanmıyor" yazar.
+`research/evidence/signal_quality.json` yalnızca iki parmak izi de
+eşleştiğinde uygulanır (`radar_gate.load_signal_quality_evidence`):
+
+- **Araştırma kodu:** `c9722d624d8f4865`.
+- **Canlı F1 kuralı (`live_rule_fingerprint`):** Canlı etiketleme kodu
+  değişirse kanıt STALE olur.
+
+Eşleşmezse etiket yok; "uygulanmıyor" yazar. Kanıt dosyası iddia ettiği
+kararı da doğrular. Örneğin PASS için ön-kayıtlı bütün koşullar sağlanmalı
+(≥ 100 uyarı, aralıklar, stres maliyeti, yarılar).
+
+**Canlı girdiler araştırmadaki özelliğin aynısıdır** (inceleme üzerine
+düzeltildi):
+
+- **15 dk ATR:** Tamamlanmış mumlardan hesaplanır.
+- **24 saatlik değişim:** Aradaki 96 mum olan iki **kapanmış** 15 dk mum
+  arasında hesaplanır. Bu, adayın kendisi ve o anki ilk 100'ün medyanı için
+  yapılır; ilk 100 aynı seçim fonksiyonuyla belirlenir.
+- **Ticker'ın 24 saatlik değişimi kullanılmaz,** çünkü son fiyatı oluşmakta
+  olan muma aittir.
+- **Maliyet:** Bu hesap 15 dakikalık mum başına en fazla bir kez yapılır
+  (≈ 100 kline çağrısı) ve önbelleğe alınır.
+- **Eksik ya da bayat veri:** Etiket "bilinmiyor" olur.
 
 - **F1 KAYBI_AZALTIR:** Her Likit-100 uyarısında "Kalite (F1)" satırı var.
   - **KAÇIN:** 15 dk ATR > %1 ya da 24 saatlik değişim evren medyanından

@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -23,13 +24,17 @@ from acce_unified.radar_gate import (
     evidence_status_text,
     family_disqualified,
     liquid_evidence_line,
+    atr15_from_metadata,
+    closed_change_24h,
     likit_quality_label,
     liquid_long_gate,
     listing_evidence_line,
     live_vs_replay_text,
     status_line,
     tactical_gate,
+    universe_median_change,
 )
+from acce_unified.liquid_long import select_liquid_universe
 from acce_unified.tactical_long_data import (
     TACTICAL_SYMBOLS,
     MexcTacticalMarketData,
@@ -374,7 +379,7 @@ def format_longs(snapshot: dict[str, Any] | None) -> str:
             now=now,
             max_age_seconds=MAIN_MAX_AGE_SECONDS,
         )
-        quality = likit_quality_label(meta)
+        quality = _f1_label(str(item.get("symbol") or ""), meta, now)
         lines.extend([
             f"{index}. {item.get('symbol', '?')} — radar puanı {int(item.get('score') or 0)}/100 · {item.get('stage') or '-'}",
             f"   {status_line(decision)}",
@@ -567,6 +572,59 @@ def _merge_radar(fresh: list[dict[str, Any]], updated: list[dict[str, Any]]) -> 
     return opened
 
 
+F1_LOCK = threading.Lock()
+F1_CACHE: dict[str, Any] = {}
+
+
+def _f1_closed_changes(now: int) -> dict[str, Any]:
+    """Closed-candle 24h changes of the current MEXC top-100 and their median, once per 15m bar.
+
+    The research feature used closed candles only; the ticker's 24h change
+    includes the forming candle, so it is never used for the F1 label.
+    Failures leave changes missing, which makes the label UNKNOWN.
+    """
+
+    bar = now - now % 900
+    with F1_LOCK:
+        if F1_CACHE.get("bar") == bar:
+            return dict(F1_CACHE)
+        changes: dict[str, float | None] = {}
+        try:
+            universe = select_liquid_universe(
+                ENGINE.cex_provider.fetch_tickers(), size=CONFIG.liquid_universe_size,
+                min_quote_volume=CONFIG.liquid_min_quote_volume, required_venue="MEXC",
+            )
+        except Exception as exc:
+            log.warning("F1 için evren alınamadı: %s", _safe_error(exc))
+            universe = []
+
+        def one(symbol: str) -> tuple[str, float | None]:
+            try:
+                rows = KLINES.fetch_klines(symbol, 900, 98)
+            except Exception:
+                return symbol, None
+            return symbol, closed_change_24h(rows, now=now)
+
+        if universe:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                changes = dict(pool.map(one, [item.symbol for item in universe]))
+        F1_CACHE.clear()
+        F1_CACHE.update(bar=bar, changes=changes, median=universe_median_change(changes))
+        return dict(F1_CACHE)
+
+
+def _f1_label(symbol: str, meta: dict[str, Any], now: int) -> Any:
+    closed = _f1_closed_changes(now)
+    change = closed["changes"].get(symbol)
+    if change is None and symbol not in closed["changes"]:
+        try:
+            change = closed_change_24h(KLINES.fetch_klines(symbol, 900, 98), now=now)
+        except Exception:
+            change = None
+    return likit_quality_label(atr15_pct=atr15_from_metadata(meta), change_24h=change,
+                               universe_median=closed["median"])
+
+
 def _liquid_radar(snapshot: dict[str, Any]) -> None:
     now = int(time.time())
     with LOCK:
@@ -585,7 +643,7 @@ def _liquid_radar(snapshot: dict[str, Any]) -> None:
                                        detail=status_line(decision), plan=_stop_plan_for(symbol, price, now),
                                        entry_price=price or None)
         fundamentals = dict(meta.get("fundamentals") or {})
-        quality = likit_quality_label(meta)
+        quality = _f1_label(symbol, meta, now)
         entry.update(rank=index, radar_score=int(item.get("score") or 0),
                      fundamentals={key: fundamentals.get(key) for key in FUNDAMENTAL_KEYS},
                      quality=quality.status, quality_text=quality.text, quality_detail=quality.detail,
