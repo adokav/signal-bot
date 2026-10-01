@@ -16,7 +16,15 @@ from flask import Flask, jsonify
 from acce_unified import UnifiedConfig, UnifiedRadarEngine, build_trade_universe
 from acce_unified.listing_fundamentals import ListingFundamentalMetricsProvider
 from acce_unified.forward_ledger import ForwardLedger, status_text, update_records
-from acce_unified.radar_gate import liquid_long_gate, status_line, tactical_gate
+from acce_unified.radar_gate import (
+    evidence_line,
+    evidence_status_text,
+    family_disqualified,
+    liquid_long_gate,
+    live_vs_replay_text,
+    status_line,
+    tactical_gate,
+)
 from acce_unified.tactical_long_data import (
     TACTICAL_SYMBOLS,
     MexcTacticalMarketData,
@@ -38,14 +46,18 @@ POLL_SECONDS = max(2, int(os.getenv("TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS", "5
 STARTUP_MESSAGE = os.getenv("CORE_SEND_STARTUP_MESSAGE", "1") == "1"
 TACTICAL_SCAN_SECONDS = max(60, int(os.getenv("TACTICAL_SCAN_INTERVAL_SECONDS", "300")))
 TACTICAL_ALERTS = os.getenv("TACTICAL_LONG_ALERTS_ENABLED", "1") == "1"
+# Setups whose family failed the historical replay are REJECT (spec §3, §38,
+# §40). They are still recorded in the forward ledger, shown in /tactical and
+# counted, but not pushed as alerts unless explicitly re-enabled.
+TACTICAL_REJECTED_ALERTS = os.getenv("TACTICAL_REJECTED_ALERTS_ENABLED", "0") == "1"
 
 CONFIG = UnifiedConfig.from_env()
 # A snapshot older than three scan cycles is stale evidence, not a current view.
 MAIN_MAX_AGE_SECONDS = 3 * max(60, int(CONFIG.scan_interval_seconds))
 TACTICAL_MAX_AGE_SECONDS = 3 * TACTICAL_SCAN_SECONDS
 EVIDENCE_FOOTER = (
-    "WATCH = setup tespit edildi, tarihsel doğrulama yok. Puan ve R/R olasılık değildir. "
-    "Otomatik emir veya pozisyon yetkisi yoktur."
+    "REJECT = geçmiş test negatif ya da kurulum kapısı başarısız; WATCH = setup tespit edildi, "
+    "doğrulama eksik. Puan ve R/R olasılık değildir. Otomatik emir veya pozisyon yetkisi yoktur."
 )
 FUNDAMENTAL_PROVIDER = ListingFundamentalMetricsProvider(
     demo_api_key=os.getenv("COINGECKO_DEMO_API_KEY", ""),
@@ -72,6 +84,7 @@ STATE: dict[str, Any] = {
     "last_error": None,
     "tactical_last_error": None,
     "forward_ledger_status": None,
+    "forward_vs_replay": None,
     "forward_ledger_error": None,
 }
 
@@ -293,7 +306,8 @@ def format_tactical(report: dict[str, Any] | None) -> str:
                 f"Hard stop: {_price(plan.get('hard_stop'))}",
                 f"Hedef 1: {_price(plan.get('target_1'))} · net R/R {float(plan.get('net_rr_1') or 0):.2f}",
                 f"Hedef 2: {_price(plan.get('target_2'))} · net R/R {float(plan.get('net_rr_2') or 0):.2f}",
-                "Kalibre başarı olasılığı: YOK · Beklenen değer: YOK (tarihsel sonuç yok)",
+                evidence_line(item.get("setup")),
+                "Sinyal bazında kalibre olasılık: YOK (yukarıdaki oran aile ortalamasıdır)",
             ])
         reasons = item.get("reasons") or []
         risks = item.get("risk_flags") or []
@@ -365,8 +379,9 @@ def format_status(snapshot: dict[str, Any] | None) -> str:
         f"Doğrulanmış yeni aday: {len((snapshot or {}).get('listing_candidates') or [])}",
         f"Ana hata: {error_text}",
         f"Taktik hata: {STATE.get('tactical_last_error') or 'yok'}",
-        "Kanıt durumu: radar setup'ları backtest edilmedi, olasılık kalibrasyonu yok → azami statü WATCH",
+        evidence_status_text(),
         str(STATE.get("forward_ledger_status") or "İleriye dönük kayıt: henüz yok"),
+        str(STATE.get("forward_vs_replay") or ""),
         f"Kayıt hatası: {STATE.get('forward_ledger_error')}" if STATE.get("forward_ledger_error") else "",
         "Emir yetkisi: YOK",
     ] if line)
@@ -385,6 +400,7 @@ def _update_forward_ledger(snapshot: Any, new_items: list[dict[str, Any]]) -> No
         if updated != records:
             FORWARD_LEDGER.save(updated)
         STATE["forward_ledger_status"] = status_text(updated)
+        STATE["forward_vs_replay"] = live_vs_replay_text(updated)
         STATE["forward_ledger_error"] = None
     except Exception as exc:
         error = _safe_error(exc)
@@ -421,6 +437,7 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
             _save_state()
         return None
     alerts: list[str] = []
+    now = int(time.time())
     with LOCK:
         previous = dict(STATE.get("tactical_last_states") or {})
         current: dict[str, str] = {}
@@ -432,12 +449,18 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
             current[symbol] = f"{state}:{setup}"
             old = previous.get(symbol)
             if old != current[symbol] and state in {"READY", "TRIGGERED"}:
-                new_setups.append(item)
+                new_setups.append(item)  # the ledger records REJECT setups too: live check of the replay
+                decision = tactical_gate(item, now=now, max_age_seconds=TACTICAL_MAX_AGE_SECONDS)
+                if decision.status == "REJECT" and not TACTICAL_REJECTED_ALERTS:
+                    continue
+                icon = "⛔" if decision.status == "REJECT" else "👀"
                 alerts.append(
-                    f"👀 {symbol} setup {state} — kanıtlanmamış (WATCH)\nSetup: {setup}\n"
+                    f"{icon} {symbol} setup {state} — {decision.status}\nSetup: {setup}\n"
                     + format_tactical({"assessments": [item]})
                 )
             elif old and old.split(":", 1)[0] in {"READY", "TRIGGERED"} and state == "NO_LONG":
+                if family_disqualified(old.split(":", 1)[1]) and not TACTICAL_REJECTED_ALERTS:
+                    continue  # its opening alert was never sent
                 alerts.append(f"⚠️ {symbol} Long formasyonu bozuldu.\nNeden: {', '.join(item.get('reasons') or ['NO_VALID_SETUP'])}")
         _update_forward_ledger(market, new_setups)
         STATE["tactical_snapshot"] = report

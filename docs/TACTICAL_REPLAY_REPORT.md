@@ -137,3 +137,18 @@ ETHUSDT −0.211R (3492); yıllar 2020 −0.23, 2021 −0.20, 2022 −0.27, 2023
 - Sonuç gördükten sonra motor ayarlanıp aynı veride yeniden denenirse bu yeni
   bir denemedir (parmak izi değişir, test kırılır) ve bu denemeyle birlikte
   sayılır.
+
+### Canlı sisteme etkisi
+
+- Sonuç `research/evidence/tactical_replay.json` dosyasına işlendi. Canlı
+  kapı (`acce_unified/radar_gate.py`) bu dosyayı **yalnızca motor parmak izi
+  eşleştiğinde** uygular; motor, ledger veya replay kodu değişirse kanıt
+  "başka bir motora ait" sayılır ve setup'lar UNKNOWN → en fazla WATCH olur
+  (yeni ön-kayıtlı koşu gerekir).
+- NEGATIVE aileler (BREAKOUT_RETEST, LIQUIDITY_SWEEP_RECLAIM, TREND_PULLBACK)
+  §38 soru 4 ve 7'de FAIL → **REJECT**. RANGE_RECLAIM (INSUFFICIENT) WATCH kalır.
+- REJECT setup'lar Telegram'a push edilmez (`TACTICAL_REJECTED_ALERTS_ENABLED=1`
+  ile açılabilir); `/tactical` panelinde kanıtıyla görünür ve ileri kayıt
+  onları da kaydeder. `/status`, canlı (MEXC) ileri kayıt sonuçlarını replay
+  beklentisiyle yan yana gösterir; fark yalnızca araştırma sebebidir, otomatik
+  ayar yapılmaz.

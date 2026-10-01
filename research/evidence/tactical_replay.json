@@ -1,0 +1,16 @@
+{
+ "schema": "tactical-replay-evidence/v1",
+ "trial_id": "cff97d5d6f5b5c5d",
+ "engine_fingerprint": "c27c0a510eb76779",
+ "source": "GitHub Actions tactical_replay run 36822988371 (commit e372778), values transcribed from the job log table",
+ "data": "Binance spot BTCUSDT/ETHUSDT (+ETHBTC context), 2020-10 to 2026-08, M5 cadence",
+ "costs": "5 bps fee + 2 bps slippage per side; stress fee x1.5, slippage x2",
+ "outcome": "T1 before hard stop within 48h after limit fill (forward-ledger rules); R net of costs",
+ "families": {
+  "BREAKOUT_RETEST": {"resolved": 3818, "hit_rate": 0.18, "hit_rate_ci": [0.17, 0.20], "breakeven_hit_rate": 0.35, "mean_r": -0.278, "mean_r_ci_family": [-0.33, -0.23], "stressed_mean_r": -0.370, "verdict": "NEGATIVE"},
+  "LIQUIDITY_SWEEP_RECLAIM": {"resolved": 3354, "hit_rate": 0.31, "hit_rate_ci": [0.30, 0.33], "breakeven_hit_rate": 0.47, "mean_r": -0.255, "mean_r_ci_family": [-0.30, -0.21], "stressed_mean_r": -0.346, "verdict": "NEGATIVE"},
+  "TREND_PULLBACK": {"resolved": 588, "hit_rate": 0.22, "hit_rate_ci": [0.19, 0.26], "breakeven_hit_rate": 0.37, "mean_r": -0.334, "mean_r_ci_family": [-0.46, -0.20], "stressed_mean_r": -0.431, "verdict": "NEGATIVE"},
+  "RANGE_RECLAIM": {"resolved": 26, "hit_rate": 0.42, "hit_rate_ci": [0.26, 0.61], "breakeven_hit_rate": 0.51, "mean_r": -0.127, "mean_r_ci_family": [-0.87, 0.61], "stressed_mean_r": -0.230, "verdict": "INSUFFICIENT"}
+ },
+ "can_authorize_trade": false
+}

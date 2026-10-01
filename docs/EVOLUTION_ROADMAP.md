@@ -144,55 +144,58 @@ işlem yetkisi değildir.
 | #114 | Canlı radar dürüst etiketler (azami WATCH), bayat plan → REJECT; güvenli ve yanlış-sağlıklı olmayan health |
 | #115 | Taktik setup'lar için ileriye dönük gölge kayıt (paper kanıt) |
 
-### Spec uyum matrisi
+### Spec uyum matrisi — yeniden denetim (2026-10-01, koddan doğrulandı)
 
-Durum: **✅** yapıldı · **◐** kısmi · **✗** bilinçli olarak yapılmadı.
+Durum: **✅** yapıldı · **◐** kısmi · **✗** yapılmadı (gerekçesiyle).
+İlk matristen farklar **kalın** yazıldı: araç var diye ✅ verilen ama hiçbir
+canlı sinyalde kullanılmayan maddeler ◐'ye indirildi; replay kanıtıyla
+güncellenenler belirtildi.
 
-| § | Konu | Durum | Nerede / neden |
+| § | Konu | Durum | Kodda ne var / eksik ne |
 |---|---|---|---|
-| 1 | Rol ve öncelik sırası | ✅ | Kapı sırası: veri → kanıt → portföy → execution; AGENTS.md |
-| 2 | Güven ≠ olasılık | ✅ | `calibration.py`; EV kalibre olmayan olasılığı reddeder; radar "YOK" yazar |
-| 3 | Üç temel soru | ✅ | `trade_gate.py` edge_observable / edge_validated / reward_sufficient |
-| 4 | Veri katmanı | ◐ | OHLCV + funding (Binance vision), MEXC spot + book ticker, OI yalnız canlı adaptörde. Tick, likidasyon, order book derinliği, CVD, dominance, TOTAL3, on-chain yok. Zaman damgası uyuşmazsa birleştirme reddedilir (`features.require_aligned`). |
-| 5 | Sayısal hesap deterministik kodda | ✅ | Tüm göstergeler Python; LLM yok |
-| 6 | Göreli ölçüler | ◐ | `features.py` z-score/persentil; radar kuralları hâlâ mutlak eşikli (bu yüzden WATCH) |
-| 7 | Önce rejim | ◐ | Betimleyici trend×vol ve rejim bazlı performans raporu; 11 rejimin çoğu eksik veri gerektiriyor |
-| 8 | Evren filtresi | ◐ | Likit-100 (hacim, spread); derinlik ve manipülasyon skoru yok |
-| 9 | Huni | ◐ | Aşama 1-2 ve 5 (risk evaluator) var; aşama 3 (AI) ve 4 (meta-model) yok |
-| 10 | Hızlı AI (Jev) rolü | ✗ | LLM entegrasyonu yok. Ön koşulları hazır: kayıt ve kalibrasyon |
-| 11 | Kalibrasyon | ✅ | Araç hazır; kalibre edilecek veri henüz yok |
-| 12 | Meta-model / EV | ◐ | EV fonksiyonu hazır; meta-model için veri yok |
-| 13 | Sürekli skor | ◐ | Radar puanları sürekli ama ağırlıklar öğrenilmedi → "kalibre edilmemiş sıralama" etiketi |
-| 14 | Önce hipotez | ✅ | `report.py` + `tsmom_dossier.py` |
-| 15 | Parametre hassasiyeti | ✅ | Pertürbasyon; FRAGILE ve izole tepe tespiti |
-| 16 | Backtest tasarımı | ◐ | Purge + embargo walk-forward; ayrı final holdout resmileştirilmedi; tek sembol (survivorship riski düşük ama genellenemez) |
-| 17 | Overfitting kontrolü | ✅ | Deneme kaydı, DSR, bootstrap, MC, maliyet ve giriş gecikmesi stresi (1 saat çözünürlük; saniye düzeyi yok) |
-| 18 | Metrikler | ✅ | `metrics.py` |
-| 19 | Decay | ✅ | ≥1 saat ufuklar; dakika ufukları mevcut veriyle ölçülemez |
-| 20 | Relative strength | ✅ | `features.relative_strength`; radarda ETHBTC zayıflık bayrağı |
-| 21 | Breakout tipleri | ✗ | OI, funding ve order flow verisi gerekiyor |
-| 22 | Spot vs perp | ✗ | MEXC spot ile Binance perp verisi birleştirilmedi |
-| 23 | Boyutlandırma | ✅ | `sizing.py` (evaluator) |
-| 24 | Korelasyon riski | ✅ | `portfolio.py`; bilinmeyen korelasyon korele sayılır. Korelasyon matrisi kaynağı henüz yok |
-| 25 | Portföy limitleri | ✅ | `portfolio.py` |
-| 26 | Drawdown'da risk azaltma | ✅ | `drawdown.py`; martingale reddedilir |
-| 27 | Execution engine | ✗ | Bilinçli olarak yok: edge kanıtlanmadan emir yolu yalnızca risk ekler; AGENTS.md §10 ayrı ve incelenmiş bir yol ister |
-| 28 | Bot ↔ borsa durumu | ✗ | Execution yok; kill switch girdisi hazır |
-| 29 | Stop/exit mantığı | ◐ | Taktik planlar giriş/geçersizlik/stop/hedef/bitiş içeriyor; ileri kayıtta 48 saat time-exit |
-| 30 | Kill switch | ✅ | `kill_switch.py` (evaluator + mandal); bağlanacak execution yok |
-| 31 | API güvenliği | ✅ | Secret'lar env'de; hata metni maskeleniyor; public endpoint allowlist; emir/çekim anahtarı yok |
-| 32 | Paper trading | ◐ | İleriye dönük gölge kayıt başladı (#115) |
-| 33 | Kademeli live | ✗ | Terfi listesinde paper/live/kill-switch-drill hep NOT_RUN |
-| 34 | Drift analizi | ◐ | Temel ileri kayıtta; kayan pencere karşılaştırması için veri yok |
-| 35 | Gelişmiş AI rolü | ✅ | Araştırmacı/denetçi; production kuralları yalnızca PR + CI ile değişir |
-| 36 | Günlük rapor | ✗ | İşlem yok; `/status` kısmi |
-| 37 | Trade log | ◐ | İleri kayıt: hash'li, değiştirilemez karar state'i |
-| 38 | Nihai kapı | ✅ | `trade_gate.py` |
-| 39 | Aday çıktısı | ◐ | `CandidateReport` kontratı; bot bazı alanları gösteriyor, kalanlar "YOK" |
-| 40 | Statü | ✅ | REJECT / WATCH / QUALIFIED / EXECUTION_READY |
-| 41 | Canlı öncesi testler | ✅ | `promotion.py`; backtest tek başına terfi ettiremez |
-| 42 | Kırılganlık soruları | ✅ | Her backtest raporunda |
-| 43 | WHAT COULD BLOW UP THIS ACCOUNT? | ✅ | Her backtest raporunun son bölümü |
+| 1 | Rol ve öncelik | ✅ | Emir yolu yok; denenen iki strateji ailesi (TSMOM, taktik setup'lar) kanıtla elendi, hiçbiri canlıya taşınmadı |
+| 2 | Güven ≠ olasılık | ✅ | Radar puanı "kalibre edilmemiş sıralama"; **panel artık aile düzeyi geçmiş isabeti (replay) ile sinyal bazında kalibre olasılığı (YOK) ayrı gösteriyor** |
+| 3 | Üç temel soru | ✅ | `trade_gate.py`; **taktik kapı replay kanıtıyla besleniyor: negatif aileler REJECT** (`radar_gate.py`, `research/evidence/tactical_replay.json`) |
+| 4 | Veri katmanı | ◐ | OHLCV (MEXC canlı, Binance vision perp + spot), funding; OI yalnız araştırma adaptöründe (`binance_perp.py`). Tick, likidasyon, derinlik, CVD, dominance, TOTAL3, on-chain, sosyal zaman damgalı veri yok. Zaman damgası uyuşmazlığı reddedilir (`features.require_aligned`) |
+| 5 | Hesaplar deterministik | ✅ | Tüm göstergeler Python; kod tabanında LLM çağrısı yok |
+| 6 | Göreli ölçüler | ◐ | `features.py` z-score/persentil var; Likit-100 ve taktik motor hâlâ mutlak eşikli (RSI 45–72, ATR > %6, ATR çarpanları) |
+| 7 | Önce rejim | ◐ | Betimleyici trend×vol (`regime.py`); taktik replay rejim bazında değil yıl/sembol bazında kırıldı; 11 rejimin çoğu eksik veri ister |
+| 8 | Evren filtresi | ◐ | Likit-100: hacim, spread, stable/kaldıraçlı token dışlama; derinlik ve manipülasyon skoru yok |
+| 9 | Huni | ◐ | Aşama 1–2 ve 5 var; aşama 3 (AI) ve 4 (meta-model) yok |
+| 10 | Hızlı AI rolü | ✗ | LLM entegrasyonu yok; edge kanıtlanmadan eklenmesi gürültü ve maliyet ekler |
+| 11 | Kalibrasyon | **◐** | Araçlar hazır (`calibration.py`: Brier, reliability, isotonic, Platt); **hiçbir canlı sinyal kalibre olasılık üretmiyor** |
+| 12 | Meta-model / EV | ◐ | EV fonksiyonu var; **taktik aileler için maliyet sonrası aile EV'si ölçüldü (negatif)**; meta-model yok |
+| 13 | Sürekli skor | ◐ | Likit-100 puanı sürekli ama **ağırlıklar elle seçilmiş ve hiç test edilmedi** — canlıda gösterilen en büyük kanıtsız parça |
+| 14 | Önce hipotez | ✅ | `report.py`, `tsmom_dossier.py`, `tactical_dossier.py`; ön-kayıt `research/trials/registry.jsonl` |
+| 15 | Parametre hassasiyeti | ◐ | TSMOM'da pertürbasyon var; **taktik motorun sabitleri satır içi, pertürbasyon yapılmadı** |
+| 16 | Backtest tasarımı | ◐ | Purge + embargo walk-forward (TSMOM); taktik replay'de parametre fit edilmediği için tüm pencere örneklem dışı; resmi final holdout yok; yalnız BTC/ETH (genellenemez) |
+| 17 | Overfitting kontrolü | ✅ | Deneme kaydı, DSR, bootstrap, Monte Carlo, maliyet stresi, parmak izi (değişen kod = yeni deneme); saniye düzeyi gecikme stresi yok |
+| 18 | Metrikler | ✅ | `metrics.py`; replay: isabet + Wilson CI, başabaş isabet, ort. R, PF, ardışık kayıp, DD |
+| 19 | Decay | **◐** | TSMOM için ≥1 saat ufuklar; **taktik setup'lar için decay ölçülmedi** |
+| 20 | Relative strength | ✅ | `features.relative_strength`; ETHBTC zayıflık bayrağı |
+| 21 | Breakout tipleri | ✗ | OI, funding, order flow eşzamanlı verisi gerekli; BREAKOUT_RETEST tek tip ve negatif |
+| 22 | Spot vs perp | ✗ | Spot ve perp verisi birleştirilmedi |
+| 23 | Boyutlandırma | ◐ | `sizing.py` değerlendirici var; **bağlı hesap/işlem yok** |
+| 24 | Korelasyon riski | ◐ | `portfolio.py` (bilinmeyen korelasyon = korele); korelasyon matrisi kaynağı yok |
+| 25 | Portföy limitleri | ◐ | `portfolio.py` değerlendirici; bağlı değil |
+| 26 | Drawdown'da risk azaltma | ◐ | `drawdown.py` merdiveni, martingale reddi; bağlı değil |
+| 27 | Execution engine | ✗ | Bilinçli olarak yok: kanıtlanmış edge yok (AGENTS.md §10) |
+| 28 | Bot ↔ borsa durumu | ✗ | Execution yok |
+| 29 | Stop/exit | ◐ | Taktik planlarda giriş/geçersizlik/stop/hedef/süre var; ileri kayıtta 48 saat zaman çıkışı |
+| 30 | Kill switch | ◐ | `kill_switch.py` değerlendirici + mandal; bağlanacak emir yolu yok |
+| 31 | API güvenliği | ✅ | Secret'lar env'de, hata metni maskeleniyor, public endpoint allowlist, emir/çekim anahtarı yok |
+| 32 | Paper trading | ◐ | Gölge ileri kayıt (MEXC) çalışıyor; **REJECT setup'lar da kaydediliyor ve /status "canlı vs replay" karşılaştırması gösteriyor** |
+| 33 | Kademeli live | ✗ | Hiçbir strateji Stage 0'ı geçecek kanıta sahip değil |
+| 34 | Drift analizi | ◐ | **Canlı vs replay karşılaştırması (betimleyici, otomatik ayar yok)**; 20/50/100/250 kayan pencere yok |
+| 35 | Gelişmiş AI rolü | ✅ | Araştırmacı/denetçi; üretim kuralları yalnızca PR + CI ile değişir |
+| 36 | Günlük rapor | ✗ | İşlem olmadığı için yok; `/status` kısmi |
+| 37 | Trade log | ◐ | İleri kayıtta hash'li, değiştirilemez karar state'i; işlem logu yok |
+| 38 | Nihai kapı | ✅ | 12 soru; **soru 4 ve 7 taktik setup'lar için artık kanıtla cevaplanıyor** |
+| 39 | Aday çıktısı | ◐ | `CandidateReport` kontratı; panel bir kısmını gösteriyor |
+| 40 | Statü | ✅ | REJECT / WATCH / QUALIFIED / EXECUTION_READY; **REJECT setup'lar Telegram'a push edilmez (`TACTICAL_REJECTED_ALERTS_ENABLED=1` ile açılabilir)** |
+| 41 | Canlı öncesi testler | ✅ | `promotion.py`; backtest tek başına terfi ettiremez; hiçbir strateji ilk aşamayı geçmedi |
+| 42 | Kırılganlık soruları | ✅ | Her backtest ve replay raporunda |
+| 43 | WHAT COULD BLOW UP THIS ACCOUNT? | ✅ | Her raporun son bölümü |
 
 ### Sonraki adımlar (öncelik sırasıyla)
 
@@ -211,8 +214,10 @@ Durum: **✅** yapıldı · **◐** kısmi · **✗** bilinçli olarak yapılmad
    `docs/TACTICAL_REPLAY_REPORT.md`.
 4. **Order-flow proxy** — vision kline'larındaki taker-buy hacmi ile CVD
    yaklaşığı ve OI metrics dump'ları (§4, §21, §22).
-5. **Kapı entegrasyonu** — ileri kayıt veya replay ≥100 çözümlenmiş
-   örneğe ulaştığında `oos_expectancy_positive` ve EV bu kanıttan beslensin.
+5. ✅ **Kapı entegrasyonu** — taktik kapı `research/evidence/tactical_replay.json`
+   kanıtını okuyor; yalnızca motor parmak izi eşleşirse uygular, aksi halde
+   UNKNOWN. Negatif aileler REJECT; REJECT uyarıları varsayılan olarak
+   push edilmez, ileri kayıt ve panelde görünmeye devam eder.
 
 ## Kesin çizgiler
 
@@ -238,7 +243,10 @@ Taktik radarın dört setup ailesi de tarihsel replay'de geçemedi: üçü NEGAT
 (maliyet sonrası işlem başına ≈ −0.25…−0.33R), biri INSUFFICIENT. Radar
 uyarıları kanıta göre takip edilmemesi gereken sinyallerdir.
 
-**Sonraki iş:** karar kullanıcıda — radar etiketlerinin bu negatif kanıtı
-göstermesi (kapı entegrasyonu, madde 5), taktik uyarıların kapatılması, ya da
-farklı bir edge sınıfı (çapraz-kesit, funding/basis, order-flow). Her yeni
-hipotez deneme kaydına önceden girer.
+Radar bu kanıtı artık gösteriyor: negatif aileler REJECT ve push edilmiyor,
+ileri kayıt canlı sonuçları replay ile karşılaştırıyor.
+
+**Sonraki iş:** karar kullanıcıda — canlıda hâlâ hiç test edilmemiş olan
+Likit-100 radarının (elle ağırlıklı puan) tarihsel testi ya da farklı bir edge
+sınıfı (funding/basis, order-flow). Her yeni hipotez deneme kaydına önceden
+girer.
