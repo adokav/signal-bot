@@ -206,12 +206,13 @@ def test_live_vs_replay_is_descriptive(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _scan(monkeypatch, tmp_path, setup, *, rejected_alerts=False):
+def _scan(monkeypatch, tmp_path, setup, *, rejected_alerts=False, plan=None, state="READY", keep_states=False):
     from acce_unified.forward_ledger import ForwardLedger
     from acce_unified.tactical_long_data import TacticalTimeframe
 
-    item = {**_setup_item(setup, decided_at=int(time.time()) - 5),
-            "plan": {**_plan(), "estimated_round_trip_cost_pct": 0.1, "expires_at": int(time.time()) + 3600}}
+    item = {**_setup_item(setup, decided_at=int(time.time()) - 5), "state": state,
+            "plan": {**_plan(**(plan or {})), "estimated_round_trip_cost_pct": 0.1,
+                     "expires_at": int(time.time()) + 3600}}
     report = {"generated_at": item["decision_at"], "assessments": [item], "errors": [], "can_authorize_trade": False}
     frames = {tf: () for tf in TacticalTimeframe}
     market = SimpleNamespace(candles={"BTCUSDT": dict(frames), "ETHUSDT": dict(frames)})
@@ -226,7 +227,9 @@ def _scan(monkeypatch, tmp_path, setup, *, rejected_alerts=False):
     for key in ("tactical_snapshot", "tactical_last_error", "forward_ledger_status",
                 "forward_vs_replay", "forward_ledger_error"):
         monkeypatch.setitem(bot.STATE, key, bot.STATE.get(key))
-    monkeypatch.setitem(bot.STATE, "tactical_last_states", {})
+    if not keep_states:
+        monkeypatch.setitem(bot.STATE, "tactical_last_states", {})
+        monkeypatch.setitem(bot.STATE, "tactical_muted", {})
     bot.tactical_scan_once()
     return sent, bot.FORWARD_LEDGER.load()
 
@@ -241,6 +244,25 @@ def test_rejected_alerts_can_be_re_enabled_and_say_reject(monkeypatch, tmp_path)
     sent, _ = _scan(monkeypatch, tmp_path, "BREAKOUT_RETEST", rejected_alerts=True)
     assert len(sent) == 1 and sent[0].startswith("⛔") and "REJECT" in sent[0]
     assert "Kapı nedeni" in sent[0] and "geçmiş test NEGATIVE" in sent[0]
+
+
+def test_a_muted_reject_gets_no_teardown_alert_whatever_made_it_reject(monkeypatch, tmp_path):
+    """RANGE_RECLAIM is not a disqualified family; a broken stop geometry makes this one REJECT."""
+
+    monkeypatch.setitem(bot.STATE, "radar_log", [])
+    bad_geometry = {"hard_stop": 99.0, "technical_invalidation": 98.0}       # stop above the invalidation
+    sent, _ = _scan(monkeypatch, tmp_path, "RANGE_RECLAIM", plan=bad_geometry)
+    assert sent == [] and bot.STATE["tactical_muted"] == {"BTCUSDT": "READY:RANGE_RECLAIM"}
+    sent, _ = _scan(monkeypatch, tmp_path, "RANGE_RECLAIM", state="NO_LONG", keep_states=True)
+    assert sent == [] and bot.STATE["tactical_muted"] == {}                  # "formasyon bozuldu" not sent either
+
+
+def test_a_pushed_setup_still_gets_its_teardown_alert(monkeypatch, tmp_path):
+    monkeypatch.setitem(bot.STATE, "radar_log", [])
+    sent, _ = _scan(monkeypatch, tmp_path, "RANGE_RECLAIM")
+    assert len(sent) == 1 and "WATCH" in sent[0]
+    sent, _ = _scan(monkeypatch, tmp_path, "RANGE_RECLAIM", state="NO_LONG", keep_states=True)
+    assert len(sent) == 1 and "formasyonu bozuldu" in sent[0]
 
 
 def test_watch_setup_is_still_pushed(monkeypatch, tmp_path):
