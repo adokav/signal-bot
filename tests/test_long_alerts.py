@@ -265,3 +265,59 @@ def test_radar_command_and_default_alert_policy():
     assert bot._command("/radar") == "RADAR"
     assert any(row["command"] == "radar" for row in bot.COMMANDS)
     assert bot.TACTICAL_REJECTED_ALERTS is True and bot.LIQUID_LONG_ALERTS is True
+
+
+# ---------------------------------------------------------------------------
+# Supply and ATH / ATL facts on the radar
+# ---------------------------------------------------------------------------
+
+READY_FACTS = {
+    "status": "READY", "circulating_supply": 25_000_000, "total_supply": 100_000_000, "max_supply": None,
+    "circulation_pct": 25.0, "ath_price_usd": 2.5, "ath_change_pct": -60.0, "ath_date": "2024-03-14T10:00:00.000Z",
+    "atl_price_usd": 0.05, "atl_change_pct": 1900.0, "atl_date": "2023-01-01T00:00:00.000Z",
+}
+
+
+def test_fundamental_lines_show_supply_and_extremes_or_name_what_is_missing():
+    lines = bot._fundamental_lines(READY_FACTS, indent="")
+    assert lines[0] == "Arz: dolaşan 25.00M · toplam 100.00M · max açıklanmamış/sınırsız · dolaşımda %25.0"
+    assert lines[1] == "ATH $2.50 (%-60.0) · ATL $0.05 (%+1900.0)"
+    assert lines[2] == "Tarih: ATH 2024-03-14 · ATL 2023-01-01"
+    assert bot._fundamental_lines({"status": "PROVIDER_COOLDOWN"}) == ["   Arz ve ATH/ATL: PROVIDER_COOLDOWN"]
+    assert bot._fundamental_lines(None) == ["   Arz ve ATH/ATL: DATA_PENDING"]
+
+
+def test_longs_panel_and_alert_carry_supply_and_extremes(monkeypatch, wired):
+    snapshot = _snapshot()
+    snapshot["liquid_long_candidates"][0]["metadata"]["fundamentals"] = dict(READY_FACTS)
+    panel = bot.format_longs(snapshot)
+    assert "Arz: dolaşan 25.00M" in panel and "ATH $2.50" in panel and "Tarih: ATH 2024-03-14" in panel
+    monkeypatch.setattr(bot.time, "time", lambda: NOW)
+    monkeypatch.setattr(bot, "KLINES", FakeKlines(_hours(30, low_at=25, low=9.5)))
+    bot._liquid_radar(snapshot)
+    assert "ATL $0.05 (%+1900.0)" in wired[0] and "max açıklanmamış/sınırsız" in wired[0]
+    stored = bot.STATE["radar_log"][0]["fundamentals"]
+    assert stored["ath_price_usd"] == 2.5 and stored["max_supply"] is None
+
+
+def test_btc_eth_facts_use_project_titles_and_fail_quietly(monkeypatch):
+    seen = {}
+
+    class Provider:
+        def fetch_many(self, rows):
+            seen.update({row.pair: row.title for row in rows})
+            return {"BTCUSDT": dict(READY_FACTS)}
+
+    monkeypatch.setattr(bot, "FUNDAMENTAL_PROVIDER", Provider())
+    facts = bot._tactical_fundamentals(["BTCUSDT", "ETHUSDT", "BTCUSDT"])
+    assert seen == {"BTCUSDT": "Bitcoin (BTC)", "ETHUSDT": "Ethereum (ETH)"}
+    panel = bot.format_tactical({"assessments": [{"symbol": "BTCUSDT", "state": "NO_LONG"},
+                                                 {"symbol": "ETHUSDT", "state": "NO_LONG"}]}, fundamentals=facts)
+    assert "ATH $2.50" in panel and "Arz ve ATH/ATL: DATA_PENDING" in panel     # ETH missing is named
+
+    class Broken:
+        def fetch_many(self, rows):
+            raise RuntimeError("https://api.coingecko.com/?x_cg_demo_api_key=SECRET 500")
+
+    monkeypatch.setattr(bot, "FUNDAMENTAL_PROVIDER", Broken())
+    assert bot._tactical_fundamentals(["BTCUSDT"]) == {}

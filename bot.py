@@ -35,6 +35,7 @@ from acce_unified.tactical_long_data import (
 )
 from acce_unified.tactical_long_engine import TacticalLongEngine
 from acce_unified.providers import MexcPublicProvider
+from acce_unified.models import MexcListing
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -258,6 +259,55 @@ def _pct(value: Any, *, missing: str = "?") -> str:
         return missing
 
 
+FUNDAMENTAL_KEYS = (
+    "status", "circulating_supply", "total_supply", "max_supply", "circulation_pct",
+    "ath_price_usd", "ath_change_pct", "ath_date", "atl_price_usd", "atl_change_pct", "atl_date",
+)
+# Title tells CoinGecko's resolver which project the symbol means (fake tokens reuse BTC/ETH).
+TACTICAL_TITLES = {"BTCUSDT": "Bitcoin (BTC)", "ETHUSDT": "Ethereum (ETH)"}
+
+
+def _fundamental_lines(fundamental: dict[str, Any] | None, *, indent: str = "   ") -> list[str]:
+    """Supply and ATH/ATL facts from CoinGecko; missing data is named, never shown as zero."""
+
+    f = fundamental or {}
+    if f.get("status") != "READY":
+        return [f"{indent}Arz ve ATH/ATL: {f.get('status') or 'DATA_PENDING'}"]
+    supply = (
+        f"{indent}Arz: dolaşan {_quantity(f.get('circulating_supply'))} · toplam {_quantity(f.get('total_supply'))} · "
+        f"max {_quantity(f.get('max_supply'), missing='açıklanmamış/sınırsız')}"
+    )
+    if f.get("circulation_pct") is not None:
+        supply += f" · dolaşımda %{float(f['circulation_pct']):.1f}"
+    lines = [
+        supply,
+        f"{indent}ATH {_price(f.get('ath_price_usd'))} ({_pct(f.get('ath_change_pct'))}) · "
+        f"ATL {_price(f.get('atl_price_usd'))} ({_pct(f.get('atl_change_pct'))})",
+    ]
+    dates = [f"{label} {str(f[key])[:10]}" for label, key in (("ATH", "ath_date"), ("ATL", "atl_date")) if f.get(key)]
+    if dates:
+        lines.append(f"{indent}Tarih: " + " · ".join(dates))
+    return lines
+
+
+def _tactical_fundamentals(symbols: Any) -> dict[str, dict[str, Any]]:
+    """CoinGecko facts for BTC/ETH (cached by the provider); empty on any failure."""
+
+    rows = [
+        MexcListing(symbol=s[:-4], pair=s, title=TACTICAL_TITLES.get(s, f"{s[:-4]} ({s[:-4]})"), rank=1,
+                    spot_status="OPEN", last_price=0.0, change_pct=0.0, quote_volume=0.0,
+                    volume_acceleration=0.0, discovery_source="TACTICAL")
+        for s in sorted({str(x).upper() for x in symbols}) if s.endswith("USDT")
+    ]
+    if not rows:
+        return {}
+    try:
+        return dict(FUNDAMENTAL_PROVIDER.fetch_many(rows))
+    except Exception as exc:
+        log.warning("Taktik temel veri alınamadı: %s", _safe_error(exc))
+        return {}
+
+
 def format_longs(snapshot: dict[str, Any] | None) -> str:
     if not snapshot:
         return "💧 MEXC LİKİT 100 — LONG İLK 3\n\nİlk tarama bekleniyor."
@@ -287,7 +337,8 @@ def format_longs(snapshot: dict[str, Any] | None) -> str:
             f"   {status_line(decision)}",
             f"   1s %{float(metrics.get('change_1h_pct') or 0):+.1f} · 4s %{float(metrics.get('change_4h_pct') or 0):+.1f} · RSI {float(metrics.get('rsi14') or 0):.0f}",
             f"   Hacim ivmesi {float(metrics.get('volume_ratio') or 0):.1f}x · Spread {float(meta.get('spread_bps') or 0):.1f} bp",
-            f"   MEXC 24s {_money(meta.get('quote_volume'))} · Dolaşım %{float(fundamentals.get('circulation_pct') or 0):.1f}",
+            f"   MEXC 24s {_money(meta.get('quote_volume'))}",
+            *_fundamental_lines(fundamentals),
             "",
         ])
     lines.append(liquid_evidence_line())
@@ -296,7 +347,7 @@ def format_longs(snapshot: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def format_tactical(report: dict[str, Any] | None) -> str:
+def format_tactical(report: dict[str, Any] | None, *, fundamentals: dict[str, dict[str, Any]] | None = None) -> str:
     lines = ["₿ BTC / Ξ ETH — TAKTİK LONG RADARI", "MEXC Spot · SHADOW", ""]
     if not report:
         lines.extend(["Henüz geçerli radar taraması yok.", str(STATE.get("tactical_last_error") or "")])
@@ -311,6 +362,8 @@ def format_tactical(report: dict[str, Any] | None) -> str:
         lines.append(f"{symbol} — setup durumu {state}")
         lines.append(status_line(decision))
         lines.append(f"Yapı: {structure} · Setup: {setup}")
+        if fundamentals is not None:
+            lines.extend(_fundamental_lines(fundamentals.get(symbol), indent=""))
         plan = item.get("plan") or {}
         if plan:
             lines.extend([
@@ -359,13 +412,7 @@ def format_new(snapshot: dict[str, Any] | None) -> str:
             f"{index}. {item.get('symbol', '?')} — {int(item.get('score') or 0)}/100 · {item.get('stage') or '-'}",
             f"   24s %{float(meta.get('change_pct') or 0):+.1f} · MEXC hacim {_money(meta.get('quote_volume'))} · İvme {float(meta.get('volume_acceleration') or 0):.1f}x",
         ])
-        if fundamental.get("status") == "READY":
-            lines.extend([
-                f"   Arz: dolaşan {_quantity(fundamental.get('circulating_supply'))} · toplam {_quantity(fundamental.get('total_supply'))} · max {_quantity(fundamental.get('max_supply'), missing='açıklanmamış/sınırsız')}",
-                f"   ATH {_price(fundamental.get('ath_price_usd'))} ({_pct(fundamental.get('ath_change_pct'))}) · ATL {_price(fundamental.get('atl_price_usd'))} ({_pct(fundamental.get('atl_change_pct'))})",
-            ])
-        else:
-            lines.append(f"   Arz ve ATH/ATL: {fundamental.get('status') or 'DATA_PENDING'}")
+        lines.extend(_fundamental_lines(fundamental))
         lines.extend([
             f"   Sosyal kapı {social.get('community_gate') or social.get('status') or '?'}",
             f"   Risk: {', '.join(item.get('risk_flags') or []) or 'belirgin sert risk yok'}",
@@ -486,13 +533,16 @@ def _liquid_radar(snapshot: dict[str, Any]) -> None:
         symbol = str(item.get("symbol") or "").upper()
         if not symbol or not long_alerts.can_open(rows + fresh, "LIKIT100", symbol, now=now):
             continue
-        price = float((item.get("metadata") or {}).get("last_price") or 0)
+        meta = item.get("metadata") or {}
+        price = float(meta.get("last_price") or 0)
         decision = liquid_long_gate(item, market_regime=context.get("regime"), generated_at=snapshot.get("generated_at"),
                                     now=now, max_age_seconds=MAIN_MAX_AGE_SECONDS)
         entry = long_alerts.open_entry(source="LIKIT100", symbol=symbol, now=now, gate_status=decision.status,
                                        detail=status_line(decision), plan=_stop_plan_for(symbol, price, now),
                                        entry_price=price or None)
-        entry.update(rank=index, radar_score=int(item.get("score") or 0))
+        fundamentals = dict(meta.get("fundamentals") or {})
+        entry.update(rank=index, radar_score=int(item.get("score") or 0),
+                     fundamentals={key: fundamentals.get(key) for key in FUNDAMENTAL_KEYS})
         fresh.append(entry)
     updated, stopped = _track_radar(rows, now)
     opened = _merge_radar(fresh, updated)
@@ -503,6 +553,7 @@ def _liquid_radar(snapshot: dict[str, Any]) -> None:
             messages.append(long_alerts.alert_text(
                 entry, headline=f"{icon} LONG SİNYALİ — Likit-100 İlk 3 (#{entry['rank']}, radar puanı "
                                 f"{entry['radar_score']}/100)", evidence=liquid_evidence_line(),
+                extra_lines=_fundamental_lines(entry.get("fundamentals"), indent=""),
             ))
     for entry in stopped:
         if (LIQUID_LONG_ALERTS if entry["source"] == "LIKIT100" else TACTICAL_ALERTS):
@@ -576,7 +627,7 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
             STATE["tactical_last_error"] = error
             _save_state()
         return None
-    alerts: list[str] = []
+    alerts: list[tuple[str | None, str]] = []
     now = int(time.time())
     with LOCK:
         previous = dict(STATE.get("tactical_last_states") or {})
@@ -600,21 +651,24 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
                     f"pozisyon payı: sermayenin %{plan.position_pct:.0f} kadarı (hard stop'a göre)"
                     if plan else "\nPozisyon payı hesaplanamadı (fiyat stop'un altında ya da veri yok)"
                 )
-                alerts.append(
+                alerts.append((symbol,
                     f"{icon} {symbol} setup {state} — {decision.status}\nSetup: {setup}\n"
                     + format_tactical({"assessments": [item]}) + sizing
-                )
+                ))
             elif old and old.split(":", 1)[0] in {"READY", "TRIGGERED"} and state == "NO_LONG":
                 if family_disqualified(old.split(":", 1)[1]) and not TACTICAL_REJECTED_ALERTS:
                     continue  # its opening alert was never sent
-                alerts.append(f"⚠️ {symbol} Long formasyonu bozuldu.\nNeden: {', '.join(item.get('reasons') or ['NO_VALID_SETUP'])}")
+                alerts.append((None, f"⚠️ {symbol} Long formasyonu bozuldu.\nNeden: {', '.join(item.get('reasons') or ['NO_VALID_SETUP'])}"))
         _update_forward_ledger(market, new_setups)
         STATE["tactical_snapshot"] = report
         STATE["tactical_last_states"] = current
         STATE["tactical_last_error"] = None
         _save_state()
-    if emit_alerts and TACTICAL_ALERTS:
-        for alert in alerts:
+    if emit_alerts and TACTICAL_ALERTS and alerts:
+        facts = _tactical_fundamentals(symbol for symbol, _ in alerts if symbol)
+        for symbol, alert in alerts:
+            if symbol:
+                alert += "\n" + "\n".join(_fundamental_lines(facts.get(symbol), indent=""))
             try:
                 send(alert, keyboard=panel_keyboard())
             except Exception:
@@ -647,7 +701,9 @@ def handle(action: str) -> None:
     snapshot = _snapshot()
     if action == "TACTICAL":
         refreshed = tactical_scan_once(emit_alerts=False)
-        send(format_tactical(refreshed or _tactical_snapshot()), keyboard=panel_keyboard())
+        report = refreshed or _tactical_snapshot()
+        facts = _tactical_fundamentals(str(a.get("symbol") or "") for a in (report or {}).get("assessments") or [])
+        send(format_tactical(report, fundamentals=facts), keyboard=panel_keyboard())
     elif action == "LONGS":
         send(format_longs(snapshot), keyboard=panel_keyboard())
     elif action == "NEW":

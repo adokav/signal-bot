@@ -46,6 +46,27 @@ Kural sabittir. Uyarıdan sonra hiçbir seviye kaydırılmaz.
     tetiklenirse kayıp sermayenin %1'i kadardır.
   - Stop mesafesi %12'yi geçerse uyarı "çok geniş" der.
 
+## Arz ve ATH/ATL verileri
+
+Radara giren coinlerde şu satırlar gösterilir:
+- **Arz:** dolaşan, toplam ve azami arz. Azami arz açıklanmamışsa
+  "açıklanmamış/sınırsız" yazar. Dolaşım oranı, dolaşan arzın toplam veya
+  azami arzın büyük olanına oranıdır.
+- **ATH ve ATL:** fiyatları, bugünkü fiyatın bunlara uzaklığı ve tarihleri.
+
+Nerelerde görünür:
+- **Likit-100:** Uyarıda ve `/longs` panelinde. Veri, aday seçilirken zaten
+  çekilen CoinGecko kaydından gelir. Uyarı anındaki kopya radar kaydına da
+  yazılır.
+- **BTC/ETH taktik:** Uyarıda ve `/tactical` panelinde. Aynı sağlayıcıdan
+  önbellekli olarak çekilir. Kimlik eşleşmesi "Bitcoin (BTC)" ve "Ethereum
+  (ETH)" başlıklarıyla yapılır, böylece aynı sembolü kullanan sahte
+  tokenlarla karışmaz.
+- **Veri yoksa:** Durum adıyla yazılır (örneğin "Arz ve ATH/ATL:
+  PROVIDER_COOLDOWN"). Hiçbir eksik değer sıfır olarak gösterilmez.
+
+Bu veriler bilgi amaçlıdır; sinyalin kapı kararını değiştirmez.
+
 ## Radar kaydı (`/radar`)
 
 Her sinyal, stop seviyeleriyle birlikte kayda girer. Kayıt durum dosyasında
