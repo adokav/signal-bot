@@ -583,10 +583,37 @@ def print_description(title: str, report: Mapping[str, Any], outcomes: Sequence[
 # ---------------------------------------------------------------------------
 
 
-def load_likit_market(data_dir: Path, *, end: int) -> tuple[lr.Market, dict]:
-    market, manifest = lr.load_market(data_dir)
+def load_likit_market(data_dir: Path, *, end: int) -> tuple[lr.Market, dict, dict[str, str]]:
+    """``liquid_replay.load_market`` minus pairs that are not ordinary coins in Binance history.
+
+    The live identity rules miss some historical pairs (PAX, UST, AUD, BULL/BEAR,
+    wrapped coins); the history identity layer removes them before anything is
+    ranked, so they can be neither a signal nor part of the benchmark.
+    """
+
+    import pandas as pd
+
+    from trading.data.binance_history_identity import exclusion_reason
+    from trading.data.binance_universe import coverage_end
+
+    manifest = json.loads((data_dir / "manifest.json").read_text("utf-8"))
+    quote = "USDT"
+    bases = {symbol[: -len(quote)] for symbol in manifest["symbols"]}
+    excluded: dict[str, str] = {}
+    columns: dict[str, dict[str, np.ndarray]] = {}
+    coverage: dict[str, int] = {}
+    for symbol, info in manifest["symbols"].items():
+        reason = exclusion_reason(symbol[: -len(quote)], bases)
+        if reason is not None:
+            excluded[symbol] = reason
+            continue
+        frame = pd.read_parquet(data_dir / "15m" / f"{symbol}.parquet", columns=list(lr.COLUMNS))
+        columns[symbol] = {name: frame[name].to_numpy() for name in lr.COLUMNS}
+        year, month = (int(x) for x in info["months"][-1].split("-"))
+        coverage[symbol] = coverage_end((year, month)) - (BAR - 1)
+    market = lr.build_market(columns, coverage_end_time=coverage)
     check_sealed(int(market.grid_open[-1]) + BAR - 1, end=end)
-    return market, manifest
+    return market, manifest, excluded
 
 
 def load_tactical_data(data_dir: Path, *, end: int) -> dict:
@@ -674,7 +701,8 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     if args.radar == "likit":
         from trading.data.universe_funding import load_funding
 
-        market, _ = load_likit_market(args.data_dir, end=DISCOVERY_END)
+        market, _, excluded = load_likit_market(args.data_dir, end=DISCOVERY_END)
+        print(f"excluded (history identity): {json.dumps(excluded, sort_keys=True)}")
         funding = load_funding(args.funding_dir) if args.funding_dir else None
         steps = lr.evaluate(market, lr.RadarParams(), workers=args.workers, progress=True)
         rows = likit_rows(market, steps, funding=funding, window=window)

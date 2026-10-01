@@ -85,6 +85,24 @@ def test_tactical_loader_refuses_data_from_the_confirmation_window(tmp_path):
         sq.load_tactical_data(tmp_path, end=sq.DISCOVERY_END)
 
 
+def _write_universe(directory, rows_by_symbol):
+    (directory / "15m").mkdir(parents=True)
+    for symbol, rows in rows_by_symbol.items():
+        pd.DataFrame.from_records([dict(zip(lr.COLUMNS, r)) for r in rows]).to_parquet(
+            directory / "15m" / f"{symbol}.parquet", index=False)
+    (directory / "manifest.json").write_text(json.dumps({"symbols": {s: {"months": ["2024-01"]} for s in rows_by_symbol}}))
+
+
+def test_likit_loader_drops_historical_non_coins_and_refuses_unsealed_data(tmp_path):
+    rows = _rows(_wave(10.0))
+    _write_universe(tmp_path / "a", {"BTCUSDT": rows, "PAXUSDT": rows, "BULLUSDT": rows, "WBTCUSDT": rows})
+    market, _, excluded = sq.load_likit_market(tmp_path / "a", end=START + BARS * 900)
+    assert market.symbols == ["BTCUSDT"]
+    assert excluded == {"PAXUSDT": "STABLE", "BULLUSDT": "LEVERAGED", "WBTCUSDT": "PEGGED"}
+    with pytest.raises(sq.SealError):
+        sq.load_likit_market(tmp_path / "a", end=START + BARS * 900 - 1)
+
+
 # ---------------------------------------------------------------------------
 # Point-in-time features
 # ---------------------------------------------------------------------------

@@ -149,6 +149,25 @@ Diğer durumlar **NO_EFFECT**.
   Hiçbir uyarı "iyi" olarak işaretlenmez.
 - **NO_EFFECT:** Değişiklik yok.
 
+## Likit-100 için önceden beklenen yönler
+
+Likit-100 keşif tablosu görülmeden, taktik tablosu görüldükten sonra
+yazıldı (2026-10-01):
+
+1. **Aşırı uzama:** 24 saatlik getirisi, evrene göre göreli getirisi ve
+   RSI'ı en yüksek olan uyarılar en kötü fazla getiriyi verir. Gerekçe:
+   Likit-100 replay'inde İlk 3, tüm hazırlardan daha kötüydü; bu, kesitsel
+   kısa vadeli ters dönüşe işaret ediyor.
+2. **Kalabalık:** Funding'i en yüksek olan uyarılar daha kötüdür. Gerekçe:
+   yüksek funding, kaldıraçlı long kalabalığı demektir.
+3. **Oynaklık:** ATR'si en yüksek olan uyarılar daha kötüdür. Gerekçe:
+   piyango benzeri coinler fazla ödenir (MAX etkisi).
+4. **Rejim:** Rejim, net getiriyi etkiler. Fazla getiriyi daha az etkiler,
+   çünkü fazla getiri piyasa hareketini zaten çıkarır.
+
+Bu yönlerin tersini gösteren bir filtre ancak keşifte iki yarıda da güçlü
+ve tutarlıysa seçilir.
+
 ## Keşif sonuçları
 
 Henüz yok.
