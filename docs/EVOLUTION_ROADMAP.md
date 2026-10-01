@@ -221,6 +221,9 @@ güncellenenler belirtildi.
 6. ✅ **Likit-100 replay'i** — liquid_replay run #1, 642 aday çift (180'i
    erken biten), 2020-10 → 2026-08: TOP3 ve ALL_READY, 4 ve 24 saatte
    **NEGATIVE** (trial `69f6387eaf32ed4f`). Kanıt canlı kapıya bağlandı.
+7. ✅ **Funding carry replay'i** — carry_replay run #1, 469 perp (62'si erken
+   biten): SIGNED_CARRY **PASS_CANDIDATE** (son 20 ay negatif, sermayeye göre
+   risksiz getirinin altında), STATIC_CARRY NO_EDGE. `docs/CARRY_REPLAY_REPORT.md`.
 
 ## Kesin çizgiler
 
@@ -254,8 +257,13 @@ Likit-100 listesi de geçemedi: survivorship'ten arındırılmış 6 yıllık re
 grubu da NEGATIVE, her yıl ve rejimde aynı yön). Canlı kapı artık REJECT
 gösteriyor. Canlıda gösterilen radarların hiçbirinin kanıtlanmış bir kenarı yok.
 
-**Sonraki iş:** funding carry (spot long + perp short) replay'i — kaldıraçlı long
-talebinin ödediği funding primini survivorship'ten arındırılmış Binance
-perp/spot evreninde maliyet sonrası ölçmek; ön-kayıtlı karar kuralları
-(trial `e8d38a2af0f661de`, `docs/CARRY_REPLAY_REPORT.md`, workflow
-`carry_replay`). Her yeni hipotez deneme kaydına önceden girer.
+Funding carry replay'i (trial `e8d38a2af0f661de`) ön-kayıtlı kuralları geçen
+ilk deneme oldu: **SIGNED_CARRY PASS_CANDIDATE** (nominale göre +7.8%/yıl,
+güven [+3.6, +12.4], Sharpe 3.4, en büyük düşüş −8.8%). STATIC_CARRY NO_EDGE.
+Ancak prim 2025–2026'da negatif, sermayeye göre getiri (≈ +3.9%/yıl) risksiz
+getirinin altında, maliyet funding'in yarısını yiyor ve 68 pozisyon 1x
+teminatta tasfiye seviyesine ulaştı. Canlı sermaye için yeterli değil.
+
+**Sonraki iş:** karar kullanıcıda — carry için veri denetimi + kâğıt üzerinde
+ileri kayıt, ya da araştırmanın burada durdurulup radarların araştırma
+moduna alınması. Her yeni hipotez deneme kaydına önceden girer.
