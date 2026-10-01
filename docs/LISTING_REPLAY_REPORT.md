@@ -157,6 +157,74 @@ Bunlardan biri değişirse
 `tests/test_listing_replay.py::test_listing_replay_is_pre_registered_for_the_current_code`
 kırılır.
 
-## Sonuç
+## Sonuç — listing_replay run #1 (2026-10-01): **NO_CLAIM (6/6)**
 
-_Henüz koşulmadı._
+Koşu: GitHub Actions `listing_replay` #1, commit `aacde29`, parmak izi
+`a7ca652e76ee1c02` (ön-kayıtlı trial ile eşleşti).
+
+**Veri:**
+- 400 yeni listeleme. Dışlananlar ön incelemeyle aynı: 60'ı daha önce
+  başka bir kotasyonla listelenmiş, 31 ticker değişikliği, 16 kaldıraçlı,
+  14 stabil, 4 başka varlığa bağlı, 1 emtia.
+- Bozuk satır yok, çözümsüz gözlem yok.
+- 1 coin 7 gün dolmadan bitti.
+- Hiçbir coin tutma süresi içinde borsadan kalkmadı.
+- Çıkışı veri sonundan sonraya düşen gözlemler alınmadı: 30 günde 12–21,
+  90 günde 70–71 gözlem.
+
+Getiriler yüzde, brüt (maliyetsiz). "Fazla" = coin getirisi − aynı
+saatlerde BTC getirisi. Güven aralıkları %99.2 (aile), listeleme ayına
+göre küme bootstrap.
+
+| Test | n | Ortalama | Medyan | Pozitif | BTC | **Fazla** | BTC'yi geçen | Brüt güven | Fazla güven | 1./2. yarı (brüt) | 1./2. yarı (fazla) | Karar |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|---|
+| +1s @30g | 388 | −9.0 | −26.7 | %27 | +3.7 | −12.7 | %24 | [−23.4, +8.9] | [−25.2, +4.1] | −2.0 / −16.0 | −7.0 / −18.4 | NO_CLAIM |
+| +1s @90g | 329 | −10.0 | −48.1 | %22 | +12.7 | −22.7 | %15 | [−34.4, +23.0] | [−36.8, −3.7] | +16.7 / −36.5 | −4.0 / −41.3 | NO_CLAIM |
+| +24s @30g | 388 | −5.0 | −20.3 | %30 | +3.9 | −8.9 | %24 | [−19.3, +14.0] | [−21.4, +9.3] | +2.8 / −12.9 | −2.5 / −15.3 | NO_CLAIM |
+| +24s @90g | 329 | −4.7 | −44.9 | %25 | +12.9 | −17.6 | %19 | [−31.1, +29.2] | [−33.2, +2.7] | +24.8 / −33.9 | +3.9 / −39.0 | NO_CLAIM |
+| +7g @30g | 378 | +0.4 | −16.2 | %36 | +4.0 | −3.6 | %28 | [−12.4, +15.0] | [−12.8, +7.0] | +8.5 / −7.8 | +3.0 / −10.3 | NO_CLAIM |
+| +7g @90g | 329 | +0.7 | −33.4 | %28 | +11.9 | −11.2 | %22 | [−27.3, +39.5] | [−26.7, +10.4] | +30.1 / −28.6 | +10.3 / −32.6 | NO_CLAIM |
+
+Net değerler (taraf başına 7.5 + 25 bp) brütten yaklaşık 0.65 puan düşük;
+hiçbir kararı değiştirmiyor.
+
+### Ön-kayıtlı kurallara göre değerlendirme
+
+- **Altı testin hiçbiri AVOID_CONFIRMED değil.** Kural 2'yi (brüt
+  ortalamanın güven aralığı sıfırın altında) hiçbir test geçemedi; hepsi
+  sıfırı içeriyor.
+  - +1s @90g'de BTC'ye göre fazla getirinin aralığı tamamen sıfırın
+    altında: [−36.8, −3.7]. Ama brüt aralık sıfırı içeriyor ve ilk yarı
+    pozitif, bu yüzden kural sağlanmıyor.
+- **POSITIVE_SURPRISE da yok.** Yeni listelemeleri almak bir edge değil.
+- **Canlı sisteme etkisi (ön-kayıtlı):** Radarın davranışı değişmez.
+  HOT/BUILDING etiketlerinin tarihsel kanıtı yok; bu durum sürüyor.
+
+### Sonucun anlamı (tanılayıcı, karar değil)
+
+1. **Tipik yeni listeleme kaybettiriyor; ortalamayı nadir büyük kazananlar
+   kurtarıyor.**
+   - Medyan getiri bütün testlerde negatif: −16 ile −48 arası.
+   - Listelemelerin yalnızca %22–36'sı kârda, %15–28'i BTC'yi geçiyor.
+   - Ortalamanın sıfıra yakın kalması birkaç çok büyük kazanana bağlı.
+     2020'nin son çeyreğindeki 22 listelemenin 90 günlük ortalaması
+     +%182 ile +%255 arası.
+   - Pratik anlamı: Az sayıda yeni listeleme seçen biri için olası sonuç
+     kayıptır. Ortalamayı yakalamak için hepsini alıp nadir kazananı
+     yakalamak gerekir.
+2. **Son dönemde açıkça negatif.**
+   - İkinci yarılar, yani yaklaşık 2024 başından sonrası, altı testin
+     hepsinde negatif: brüt −7.8 ile −36.5, fazla −10.3 ile −41.3.
+   - 2025 listelemeleri ayrı ayrı anlamlı biçimde negatif. Örnek:
+     +1s @90g'de −45.0 [−65.4, −20.0], BTC'ye göre −43.3.
+   - Bu bulgu sonuçtan sonra yapılan bir bölmedir, karar değildir. Test
+     edilecekse ileriye dönük, ön-kayıtlı bir kayıtla yapılmalı.
+3. **Canlı radarın fiyat tabanlı tuzak kuralı geçmişte bir şey ayırmıyor.**
+   - +24s girişinde ilk pompası %80'in üstünde olanlar (radarda
+     "CROWDED", n=155) ortalamada daha kötü değil: +2.2 / +6.2.
+     Medyanları da benzer: −27.9 / −45.9. Karşılaştırma grubu (n=227):
+     −8.5 / −13.9, medyan −16.0 / −41.8.
+   - %−35 altı ağır satış grubunda yalnızca 6 gözlem var; sonuç çıkmaz.
+4. **Borsa farkı:** Bunlar Binance listelemeleri. MEXC daha erken ve daha
+   riskli coin'leri listeler; orada tablo büyük olasılıkla daha kötüdür.
+   Ama bu test edilmedi.

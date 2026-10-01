@@ -261,6 +261,7 @@ Her aday için şu sorular soruldu:
 
 | # | Aday | Neden | Beklenti |
 |---|---|---|---|
+| 0b | Yeni listeleme kohortu (B2) | Tamamlandı: 6/6 NO_CLAIM. Kaçınma iddiası doğrulanmadı; medyan −16 ile −48, ortalama nadir büyük kazananlarla sıfıra yakın; 2024 sonrası negatif (sonuç sonrası bölme) | — |
 | 0 | Geri dönüş testi + carry denetimi | Tamamlandı: geri dönüş NEGATIVE; STATIC düşüşünün yarısı veri artefaktı, yarısı gerçek sıkışma riski | — |
 | 1 | **Yeni listeleme kohortu** (B2) | Kanıt güçlü, canlı radarı doğrudan etkiler, ucuz | Kayıptan kaçınma kuralı |
 | 2 | **Zorunlu satış sonrası toparlanma** (D1) | Yapısal mekanizma, long-only uyumlu, veri hazır | Belirsiz; INSUFFICIENT olabilir |
