@@ -453,6 +453,335 @@ def listing_evidence_line(evidence: ListingEvidence | None = None) -> str:
     return line + ". MEXC listelemeleri için test yok."
 
 
+# ---------------------------------------------------------------------------
+# Signal-quality filter evidence (docs/SIGNAL_QUALITY.md): a label, never a gate pass
+# ---------------------------------------------------------------------------
+
+
+SIGNAL_QUALITY_EVIDENCE_FILE = REPO_ROOT / "research" / "evidence" / "signal_quality.json"
+SIGNAL_QUALITY_SCHEMA = "signal-quality-evidence/v1"
+SIGNAL_QUALITY_TRIAL = "d468cf29491ff701"
+SIGNAL_QUALITY_VERDICTS = frozenset({"PASS", "KAYBI_AZALTIR", "NO_EFFECT", "INCOMPLETE_DATA"})
+F1_TEST = "F1_LIKIT_CALM_NOT_CHASING"
+F2_TEST = "F2_TACTICAL_PERP_BELOW_SPOT"
+# The pre-registered F1 rule (trading.backtest.signal_quality, pinned by a test).
+F1_ATR15_MAX = 1.0
+F1_REL24_MAX = 5.0
+F1_MIN_UNIVERSE = 50
+F1_MIN_KEPT = 100                  # signal_quality.CONFIRM_MIN_N
+# The research measured the 24h change between two closed 15m candles 96
+# candles apart; the live inputs are computed the same way, never from the
+# ticker (whose last price belongs to a forming candle, AGENTS.md §1).
+F1_INTERVAL = 900
+F1_CHANGE_BARS = 96
+F1_STALE_GRACE = 120               # seconds after a 15m close before a missing candle counts as stale
+# Must equal trading.backtest.signal_quality.FINGERPRINT_FILES / LONG_ALERT_LOGIC /
+# LONG_ALERT_CONSTANTS (a test checks the lists and the digest); duplicated
+# because that module needs numpy, which the production image does not install.
+SIGNAL_QUALITY_FINGERPRINT_FILES = (
+    "trading/backtest/signal_quality.py",
+    "trading/backtest/liquid_replay.py",
+    "trading/backtest/tactical_replay.py",
+    "trading/data/universe_funding.py",
+    "trading/data/binance_universe.py",
+    "trading/data/binance_vision.py",
+    "trading/data/binance_carry_universe.py",
+    "trading/data/binance_history_identity.py",
+    "acce_unified/liquid_long.py",
+    "acce_unified/cex.py",
+    "acce_unified/models.py",
+    "acce_unified/tactical_long.py",
+    "acce_unified/tactical_long_data.py",
+    "acce_unified/tactical_long_engine.py",
+    "acce_unified/forward_ledger.py",
+)
+SIGNAL_QUALITY_ALERT_LOGIC = ("closed_candles", "StopPlan", "compute_stop_plan", "plan_from_levels", "can_open",
+                              "open_entry", "track_entry")
+SIGNAL_QUALITY_ALERT_CONSTANTS = ("STOP_INTERVAL_SECONDS", "STOP_LOOKBACK", "ATR_PERIOD", "BUFFER_ATR", "MIN_STOP_ATR",
+                                  "RISK_PER_TRADE_PCT", "TRACK_INTERVAL_SECONDS", "TRACK_HOURS", "COOLDOWN_HOURS",
+                                  "STALE_GRACE_HOURS")
+
+
+def signal_quality_fingerprint(repo_root: Path = REPO_ROOT) -> str:
+    """Same digest as ``signal_quality.logic_fingerprint``: files, stop/track rules and their constants."""
+
+    import inspect
+
+    from acce_unified import long_alerts
+
+    digest = hashlib.sha256()
+    for name in SIGNAL_QUALITY_FINGERPRINT_FILES:
+        digest.update(name.encode())
+        digest.update((repo_root / name).read_bytes())
+    for name in SIGNAL_QUALITY_ALERT_LOGIC:
+        digest.update(inspect.getsource(getattr(long_alerts, name)).encode())
+    for name in SIGNAL_QUALITY_ALERT_CONSTANTS:
+        digest.update(f"{name}={getattr(long_alerts, name)!r}".encode())
+    return digest.hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class SignalQualityTest:
+    name: str
+    verdict: str
+    alerts: int
+    kept: int
+    dropped: int
+    kept_mean: float
+    dropped_mean: float
+    gap_mean: float
+    gap_ci: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class SignalQualityEvidence:
+    """Confirmation result of the pre-registered filters; ``status`` is OK, STALE, INVALID or MISSING."""
+
+    status: str
+    detail: str
+    trial_id: str = ""
+    window: str = ""
+    tests: Mapping[str, SignalQualityTest] = field(default_factory=dict)
+
+
+def _sq_summary(row: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    summary = row[key]
+    if not isinstance(summary, Mapping):
+        raise ValueError(f"{key} must be an object")
+    return summary
+
+
+def _sq_positive(summary: Mapping[str, Any], key: str) -> bool:
+    low, _ = _interval(summary["ci"], key)
+    return low > 0 and _finite_number(summary["h1"], key) > 0 and _finite_number(summary["h2"], key) > 0
+
+
+def _sq_stress_positive(row: Mapping[str, Any]) -> bool:
+    key = "kept_stress_net_pct" if "kept_stress_net_pct" in row else "kept_stress_r"
+    return _finite_number(_sq_summary(row, key)["mean"], key) > 0
+
+
+def _signal_quality_test(name: str, row: Mapping[str, Any]) -> SignalQualityTest:
+    verdict = str(row["verdict"])
+    if verdict not in SIGNAL_QUALITY_VERDICTS:
+        raise ValueError(f"{name}: unknown verdict {verdict!r}")
+    counts = {k: row[k] for k in ("alerts", "kept", "dropped", "unknown")}
+    if any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in counts.values()):
+        raise ValueError(f"{name}: counts must be non-negative integers")
+    if counts["kept"] + counts["dropped"] + counts["unknown"] != counts["alerts"]:
+        raise ValueError(f"{name}: kept + dropped + unknown != alerts")
+    net_key = "kept_net_pct" if "kept_net_pct" in row else "kept_r"
+    excess_key = "kept_excess_pct" if "kept_excess_pct" in row else "kept_minus_random_hours_r"
+    gap_key = "kept_minus_dropped_net_pct" if "kept_minus_dropped_net_pct" in row else "kept_minus_dropped_r"
+    dropped_key = "dropped_net_pct" if "dropped_net_pct" in row else "dropped_r"
+    net, excess, gap = _sq_summary(row, net_key), _sq_summary(row, excess_key), _sq_summary(row, gap_key)
+    kept_n = net["n"]
+    if isinstance(kept_n, bool) or not isinstance(kept_n, int) or kept_n < 0:
+        raise ValueError(f"{name}: {net_key}.n must be a non-negative integer")
+    # Every pre-registered PASS condition (signal_quality.filter_verdict), not just the intervals.
+    passes = (kept_n >= F1_MIN_KEPT and _sq_positive(net, net_key) and _sq_positive(excess, excess_key)
+              and _sq_stress_positive(row))
+    separates = _sq_positive(gap, gap_key)
+    if verdict == "PASS" and not passes:
+        raise ValueError(f"{name}: PASS without every pre-registered condition")
+    if verdict == "KAYBI_AZALTIR" and (passes or not separates):
+        raise ValueError(f"{name}: KAYBI_AZALTIR inconsistent with its intervals")
+    if verdict == "NO_EFFECT" and (passes or separates):
+        raise ValueError(f"{name}: NO_EFFECT although an interval qualifies")
+    return SignalQualityTest(
+        name=name, verdict=verdict, alerts=counts["alerts"], kept=counts["kept"], dropped=counts["dropped"],
+        kept_mean=_finite_number(net["mean"], net_key),
+        dropped_mean=_finite_number(_sq_summary(row, dropped_key)["mean"], dropped_key),
+        gap_mean=_finite_number(gap["mean"], gap_key), gap_ci=_interval(gap["ci"], gap_key),
+    )
+
+
+def load_signal_quality_evidence(
+    path: Path = SIGNAL_QUALITY_EVIDENCE_FILE,
+    *,
+    current_fingerprint: str | None = None,
+    current_live_fingerprint: str | None = None,
+) -> SignalQualityEvidence:
+    """Read the filter confirmation; never raises. Applied only to the code it was measured on."""
+
+    try:
+        payload = json.loads(Path(path).read_text("utf-8"))
+    except FileNotFoundError:
+        return SignalQualityEvidence("MISSING", "sinyal kalitesi kanıt dosyası yok")
+    except (OSError, ValueError):
+        return SignalQualityEvidence("INVALID", "sinyal kalitesi kanıt dosyası okunamadı")
+    try:
+        if payload.get("schema") != SIGNAL_QUALITY_SCHEMA or payload.get("can_authorize_trade") is not False:
+            raise ValueError("unexpected schema")
+        trial_id, window = str(payload["trial_id"]), str(payload["window"])
+        if trial_id != SIGNAL_QUALITY_TRIAL:
+            raise ValueError("evidence of another trial")
+        fingerprint = str(payload["code_fingerprint"])
+        live_fingerprint = str(payload["live_rule_fingerprint"])
+        tests = {str(name): _signal_quality_test(str(name), row) for name, row in dict(payload["tests"]).items()}
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return SignalQualityEvidence("INVALID", "sinyal kalitesi kanıt dosyası tutarsız")
+    if current_fingerprint is None:
+        try:
+            current_fingerprint = signal_quality_fingerprint()
+        except (OSError, TypeError, AttributeError):
+            return SignalQualityEvidence("INVALID", "sinyal kalitesi kod parmak izi hesaplanamadı")
+    if fingerprint != current_fingerprint:
+        return SignalQualityEvidence("STALE", "sinyal kalitesi kanıtı mevcut kod sürümüne ait değil", trial_id)
+    if live_fingerprint != (current_live_fingerprint or f1_live_fingerprint()):
+        return SignalQualityEvidence("STALE", "canlı F1 kuralı incelenen sürümden farklı", trial_id)
+    return SignalQualityEvidence("OK", "sinyal kalitesi kanıtı mevcut kodla eşleşiyor", trial_id, window, tests)
+
+
+@lru_cache(maxsize=1)
+def default_signal_quality_evidence() -> SignalQualityEvidence:
+    return load_signal_quality_evidence()
+
+
+def closed_change_24h(rows: Any, *, now: int) -> float | None:
+    """% change from the 15m candle closed 96 candles (24h) earlier to the last closed one.
+
+    Same quantity as the research feature (``close[i] / close[i-96] - 1``):
+    the forming candle is dropped, both candles must exist, and a last closed
+    candle older than one interval (plus a short grace) is stale. None when it
+    cannot be computed; never a neutral value.
+    """
+
+    from acce_unified.long_alerts import closed_candles
+
+    candles = closed_candles(rows, interval_seconds=F1_INTERVAL, now=now)
+    if not candles:
+        return None
+    last = candles[-1]
+    if now - (last[0] + F1_INTERVAL) > F1_INTERVAL + F1_STALE_GRACE:
+        return None
+    first = next((c for c in candles if c[0] == last[0] - F1_CHANGE_BARS * F1_INTERVAL), None)
+    if first is None:
+        return None
+    return (last[4] / first[4] - 1.0) * 100.0
+
+
+def universe_median_change(changes: Mapping[str, float | None]) -> float | None:
+    """Median closed-candle 24h change of the top-100; None below ``F1_MIN_UNIVERSE`` known values."""
+
+    import statistics
+
+    values = [v for v in changes.values() if v is not None and math.isfinite(v)]
+    return statistics.median(values) if len(values) >= F1_MIN_UNIVERSE else None
+
+
+def atr15_from_metadata(metadata: Mapping[str, Any]) -> float | None:
+    """15m ATR % from the live metrics, which are computed on completed candles only."""
+
+    metrics = metadata.get("long_metrics") or {}
+    return _optional_number(metrics.get("atr_pct")) if metrics.get("status") == "READY" else None
+
+
+@dataclass(frozen=True)
+class QualityLabel:
+    """F1 label of one Likit-100 alert: AVOID, PASSED, UNKNOWN or NOT_APPLIED. Never trade authority."""
+
+    status: str
+    text: str
+    detail: str
+    atr15_pct: float | None = None
+    rel_24h: float | None = None
+
+
+def _optional_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def likit_quality_label(
+    *,
+    atr15_pct: float | None,
+    change_24h: float | None,
+    universe_median: float | None,
+    evidence: SignalQualityEvidence | None = None,
+) -> QualityLabel:
+    """The pre-registered F1 rule on a live candidate, labelled by its confirmed verdict.
+
+    Inputs must be the research quantities: ``atr15_from_metadata`` and
+    ``closed_change_24h`` / ``universe_median_change`` on closed 15m candles.
+    KAYBI_AZALTIR (the confirmed result) marks only the dropped alerts: they
+    are labelled AVOID; kept alerts are never called good. Missing inputs are
+    UNKNOWN, not a pass (AGENTS.md §2).
+    """
+
+    evidence = evidence or default_signal_quality_evidence()
+    test = evidence.tests.get(F1_TEST) if evidence.status == "OK" else None
+    if test is None:
+        detail = evidence.detail if evidence.status != "OK" else "F1 kanıtta yok"
+        return QualityLabel("NOT_APPLIED", "uygulanmıyor", f"kalite filtresi uygulanmıyor ({detail})")
+    if test.verdict not in {"KAYBI_AZALTIR", "PASS"}:
+        return QualityLabel("NOT_APPLIED", "etiket yok", f"F1 doğrulamada {test.verdict}: etiket uygulanmıyor")
+    atr, change, median = (_optional_number(v) for v in (atr15_pct, change_24h, universe_median))
+    if atr is None or change is None or median is None:
+        return QualityLabel("UNKNOWN", "bilinmiyor",
+                            "kalite filtresi hesaplanamadı (15 dk ATR, kapanmış mumlarla 24s değişim ya da "
+                            "evren medyanı eksik)")
+    rel = change - median
+    if atr <= F1_ATR15_MAX and rel <= F1_REL24_MAX:
+        if test.verdict == "PASS":
+            return QualityLabel("PASSED", "geçti", "sakin ve kovalamıyor; doğrulamada geçen uyarılar kâr etti",
+                                atr, rel)
+        return QualityLabel(
+            "PASSED", "geçti",
+            f"sakin ve kovalamıyor (15dk ATR %{atr:.2f}, 24s evrene göre {rel:+.1f} puan). Doğrulamada geçenler "
+            f"ortalama %{test.kept_mean:+.1f}: zararı daha az, kâr ettiği gösterilmedi", atr, rel,
+        )
+    reasons = []
+    if atr > F1_ATR15_MAX:
+        reasons.append(f"oynak (15dk ATR %{atr:.2f} > %{F1_ATR15_MAX:g})")
+    if rel > F1_REL24_MAX:
+        reasons.append(f"kovalıyor (24s evrene göre {rel:+.1f} puan > {F1_REL24_MAX:g})")
+    low, high = test.gap_ci
+    return QualityLabel(
+        "AVOID", "KAÇIN",
+        f"{' ve '.join(reasons)}. Doğrulamada (2024-26, stop + 72 saat, maliyet sonrası) böyle uyarılar ortalama "
+        f"%{test.dropped_mean:+.1f}; geçenlerden {test.gap_mean:.1f} puan [{low:.1f}, {high:.1f}] daha kötü", atr, rel,
+    )
+
+
+F1_LIVE_LOGIC = ("closed_change_24h", "universe_median_change", "atr15_from_metadata", "likit_quality_label",
+                 "_optional_number")
+F1_LIVE_CONSTANTS = ("F1_ATR15_MAX", "F1_REL24_MAX", "F1_MIN_UNIVERSE", "F1_INTERVAL", "F1_CHANGE_BARS",
+                     "F1_STALE_GRACE")
+
+
+def f1_live_fingerprint() -> str:
+    """Digest of the live F1 mapping; the evidence pins the reviewed version, any change makes it STALE."""
+
+    import inspect
+    import sys
+
+    module = sys.modules[__name__]
+    digest = hashlib.sha256()
+    for name in F1_LIVE_LOGIC:
+        digest.update(inspect.getsource(getattr(module, name)).encode())
+    for name in F1_LIVE_CONSTANTS:
+        digest.update(f"{name}={getattr(module, name)!r}".encode())
+    return digest.hexdigest()[:16]
+
+
+def signal_quality_status(evidence: SignalQualityEvidence | None = None) -> str:
+    evidence = evidence or default_signal_quality_evidence()
+    if evidence.status != "OK":
+        return f"Sinyal kalitesi filtresi uygulanmıyor ({evidence.detail})"
+    parts = []
+    for name, label in ((F1_TEST, "F1 sakin/kovalamayan"), (F2_TEST, "F2 baz")):
+        test = evidence.tests.get(name)
+        if test is not None:
+            parts.append(f"{label}: {test.verdict}")
+    return "Sinyal kalitesi — " + " · ".join(parts)
+
+
 def _replay_checks(setup: Any, evidence: ReplayEvidence) -> dict[str, Check]:
     family = evidence.family(setup)
     if family is None:
@@ -507,6 +836,7 @@ def evidence_status_text(
     evidence: ReplayEvidence | None = None,
     liquid_evidence: LiquidEvidence | None = None,
     listing_evidence: ListingEvidence | None = None,
+    signal_quality_evidence: SignalQualityEvidence | None = None,
 ) -> str:
     evidence = evidence or default_replay_evidence()
     liquid_evidence = liquid_evidence or default_liquid_evidence()
@@ -524,7 +854,7 @@ def evidence_status_text(
                                                       for v, c in sorted(counts.items()))
     else:
         listing = f"Yeni listeleme replay uygulanamıyor ({listing_evidence.detail})"
-    liquid = f"{liquid} · {listing}"
+    liquid = f"{liquid} · {listing} · {signal_quality_status(signal_quality_evidence)}"
     if evidence.status != "OK":
         return f"Kanıt durumu: taktik replay uygulanamıyor ({evidence.detail}) → azami WATCH · {liquid}"
     groups: dict[str, list[str]] = {}

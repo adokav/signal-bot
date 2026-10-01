@@ -1,0 +1,133 @@
+{
+ "schema": "signal-quality-evidence/v1",
+ "trial_id": "d468cf29491ff701",
+ "code_fingerprint": "c9722d624d8f4865",
+ "live_rule_fingerprint": "859136807bd524b1",
+ "live_rule": "F1 live mapping reviewed against the research feature: 15m ATR from completed candles (long_metrics.atr_pct) and 24h change between two closed 15m candles 96 apart for the candidate and the median of the current top-100 (>= 50 known); ticker change is never used",
+ "source": "GitHub Actions signal_quality_confirm run 36896168151 (commit 23b194f), values transcribed from the job logs",
+ "window": "2024-09 → 2026-08",
+ "family_alpha": 0.025,
+ "bootstrap": "circular moving-block over calendar days, 7-day blocks, 4000 resamples",
+ "tests": {
+  "F1_LIKIT_CALM_NOT_CHASING": {
+   "rule": {
+    "atr15_pct_max": 1.0,
+    "rel_24h_max": 5.0
+   },
+   "alerts": 18429,
+   "kept": 6550,
+   "dropped": 11879,
+   "unknown": 0,
+   "kept_net_pct": {
+    "n": 6530,
+    "mean": -0.119,
+    "ci": [
+     -0.737,
+     0.575
+    ],
+    "h1": 0.147,
+    "h2": -0.338
+   },
+   "kept_excess_pct": {
+    "n": 6530,
+    "mean": 0.232,
+    "ci": [
+     0.017,
+     0.453
+    ],
+    "h1": 0.248,
+    "h2": 0.218
+   },
+   "kept_stress_net_pct": {
+    "n": 6530,
+    "mean": -0.269,
+    "ci": [
+     -0.887,
+     0.425
+    ],
+    "h1": -0.003,
+    "h2": -0.488
+   },
+   "dropped_net_pct": {
+    "n": 11846,
+    "mean": -1.365,
+    "ci": [
+     -2.021,
+     -0.658
+    ],
+    "h1": -0.847,
+    "h2": -1.888
+   },
+   "kept_minus_dropped_net_pct": {
+    "mean": 1.247,
+    "ci": [
+     0.729,
+     1.781
+    ],
+    "h1": 0.994,
+    "h2": 1.55
+   },
+   "verdict": "KAYBI_AZALTIR"
+  },
+  "F2_TACTICAL_PERP_BELOW_SPOT": {
+   "rule": {
+    "basis_pct_below": 0.0
+   },
+   "alerts": 2691,
+   "kept": 2534,
+   "dropped": 157,
+   "unknown": 0,
+   "baseline_kept": 33058,
+   "kept_r": {
+    "n": 2530,
+    "mean": 0.065,
+    "ci": [
+     -0.172,
+     0.323
+    ],
+    "h1": 0.003,
+    "h2": 0.117
+   },
+   "kept_minus_random_hours_r": {
+    "mean": 0.042,
+    "ci": [
+     -0.089,
+     0.162
+    ],
+    "h1": -0.033,
+    "h2": 0.106
+   },
+   "kept_stress_r": {
+    "n": 2530,
+    "mean": -0.001,
+    "ci": [
+     -0.222,
+     0.24
+    ],
+    "h1": -0.056,
+    "h2": 0.045
+   },
+   "dropped_r": {
+    "n": 157,
+    "mean": 0.164,
+    "ci": [
+     -0.473,
+     0.925
+    ],
+    "h1": 0.172,
+    "h2": -0.4
+   },
+   "kept_minus_dropped_r": {
+    "mean": -0.099,
+    "ci": [
+     -0.877,
+     0.625
+    ],
+    "h1": -0.168,
+    "h2": 0.516
+   },
+   "verdict": "NO_EFFECT"
+  }
+ },
+ "can_authorize_trade": false
+}
