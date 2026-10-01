@@ -162,3 +162,35 @@ def test_extract_single_csv_rejects_empty_archive():
         pass
     with pytest.raises(DataQualityError):
         _extract_single_csv(buf.getvalue())
+
+
+def test_spot_kline_url_layout():
+    from trading.data.binance_vision import monthly_kline_url
+
+    url = monthly_kline_url("ETHBTC", Timeframe.M5, 2025, 2, market="spot")
+    assert url.endswith("/data/spot/monthly/klines/ETHBTC/5m/ETHBTC-5m-2025-02.zip")
+    with pytest.raises(ValueError):
+        monthly_kline_url("BTCUSDT", Timeframe.M5, 2025, 2, market="options")
+
+
+def test_parse_kline_csv_accepts_spot_microsecond_timestamps():
+    # Spot dumps switched to microseconds on 2025-01-01. Parsed as ms they
+    # would land ~30,000 years in the future and be dropped silently.
+    open_us = 1_735_689_600_000_000  # 2025-01-01T00:00:00Z
+    close_us = open_us + 299_999_999
+    row = f"{open_us},100,101,99,100.5,10,{close_us},1005,5,4,402,0"
+    candles = parse_kline_csv(row, decision_at=1_800_000_000)
+    assert len(candles) == 1
+    assert candles[0].open_time == 1_735_689_600
+    assert candles[0].close_time == 1_735_689_899
+
+
+def test_unrecognised_timestamp_width_is_rejected_not_guessed():
+    from trading.data.binance_vision import epoch_seconds
+
+    assert epoch_seconds("1735689600000") == 1_735_689_600
+    assert epoch_seconds("1735689600000000") == 1_735_689_600
+    with pytest.raises(Exception):
+        epoch_seconds("1735689600")
+    row = "1735689600,100,101,99,100.5,10,1735689899,1005,5,4,402,0"
+    assert parse_kline_csv(row, decision_at=1_800_000_000) == []
