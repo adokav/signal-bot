@@ -20,6 +20,7 @@ from acce_unified.radar_gate import (
     evidence_line,
     evidence_status_text,
     family_disqualified,
+    liquid_evidence_line,
     liquid_long_gate,
     live_vs_replay_text,
     status_line,
@@ -278,6 +279,7 @@ def format_longs(snapshot: dict[str, Any] | None) -> str:
             f"   MEXC 24s {_money(meta.get('quote_volume'))} · Dolaşım %{float(fundamentals.get('circulation_pct') or 0):.1f}",
             "",
         ])
+    lines.append(liquid_evidence_line())
     lines.append("Radar puanı kalibre edilmemiş bir sıralamadır; işlem emri değildir.")
     lines.append(EVIDENCE_FOOTER)
     return "\n".join(lines)

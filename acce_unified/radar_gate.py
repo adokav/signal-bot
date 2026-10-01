@@ -7,8 +7,11 @@ health FAILS.
 
 Out-of-sample evidence:
 
-- Liquid-100 setups have never been backtested → expectancy and EV are
-  UNKNOWN, best honest status WATCH.
+- The Liquid-100 list was replayed over six years of a survivorship-free
+  Binance spot universe (``docs/LIQUID_REPLAY_REPORT.md``); the result is
+  read from ``research/evidence/liquid_replay.json`` under the same
+  fingerprint rule. A top-3 list without positive excess return at any
+  tested horizon fails the out-of-sample and net-EV questions → REJECT.
 - Tactical setups were replayed over six years of Binance spot history
   (``docs/TACTICAL_REPLAY_REPORT.md``). The per-family result is read from
   ``research/evidence/tactical_replay.json`` and applied **only** when its
@@ -23,6 +26,7 @@ plan must not be presented as current (AGENTS.md §8).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass, field
@@ -168,6 +172,153 @@ def default_replay_evidence() -> ReplayEvidence:
     return load_replay_evidence()
 
 
+# ---------------------------------------------------------------------------
+# Liquid-100 replay evidence
+# ---------------------------------------------------------------------------
+
+
+LIQUID_EVIDENCE_FILE = REPO_ROOT / "research" / "evidence" / "liquid_replay.json"
+LIQUID_SCHEMA = "liquid-replay-evidence/v1"
+LIQUID_LIST_GROUPS = ("TOP3@4h", "TOP3@24h")
+# Must equal trading.backtest.liquid_replay.FINGERPRINT_FILES (a test checks
+# both the list and the digest). Duplicated because that module needs numpy,
+# which the production image does not install.
+LIQUID_FINGERPRINT_FILES = (
+    "acce_unified/liquid_long.py",
+    "acce_unified/cex.py",
+    "acce_unified/models.py",
+    "trading/data/binance_universe.py",
+    "trading/backtest/liquid_replay.py",
+)
+
+
+def code_fingerprint(files: Sequence[str], repo_root: Path = REPO_ROOT) -> str:
+    digest = hashlib.sha256()
+    for name in files:
+        digest.update(name.encode())
+        digest.update((repo_root / name).read_bytes())
+    return digest.hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class ListEvidence:
+    group: str
+    verdict: str
+    n: int
+    mean_net_pct: float
+    mean_excess_pct: float
+    excess_ci_family: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class LiquidEvidence:
+    """Per-group Liquid-100 replay result; ``status`` is OK, STALE, INVALID or MISSING."""
+
+    status: str
+    detail: str
+    trial_id: str = ""
+    groups: Mapping[str, ListEvidence] = field(default_factory=dict)
+
+
+def _list_group(name: str, row: Mapping[str, Any]) -> ListEvidence:
+    verdict = str(row["verdict"])
+    if verdict not in REPLAY_VERDICTS:
+        raise ValueError(f"{name}: unknown verdict {verdict!r}")
+    n = row["n"]
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        raise ValueError(f"{name}: n must be a non-negative integer")
+    group = ListEvidence(
+        group=name, verdict=verdict, n=n,
+        mean_net_pct=_finite_number(row["mean_net_pct"], "mean_net_pct"),
+        mean_excess_pct=_finite_number(row["mean_excess_pct"], "mean_excess_pct"),
+        excess_ci_family=_interval(row["excess_ci_family"], "excess_ci_family"),
+    )
+    low, high = group.excess_ci_family
+    if verdict == "NEGATIVE" and not high < 0:
+        raise ValueError(f"{name}: NEGATIVE verdict with an interval reaching zero")
+    if verdict == "PASS_CANDIDATE" and not (low > 0 and n >= 300 and group.mean_net_pct > 0):
+        raise ValueError(f"{name}: PASS_CANDIDATE without a positive interval, net return and 300 picks")
+    if verdict == "NO_EDGE" and n < 300:
+        raise ValueError(f"{name}: NO_EDGE needs at least 300 picks")
+    return group
+
+
+def load_liquid_evidence(
+    path: Path = LIQUID_EVIDENCE_FILE,
+    *,
+    current_fingerprint: str | None = None,
+) -> LiquidEvidence:
+    """Read the Liquid-100 replay evidence; never raises, never applies it to other code."""
+
+    try:
+        payload = json.loads(Path(path).read_text("utf-8"))
+    except FileNotFoundError:
+        return LiquidEvidence("MISSING", "Likit-100 kanıt dosyası yok")
+    except (OSError, ValueError):
+        return LiquidEvidence("INVALID", "Likit-100 kanıt dosyası okunamadı")
+    try:
+        if payload.get("schema") != LIQUID_SCHEMA or payload.get("can_authorize_trade") is not False:
+            raise ValueError("unexpected schema")
+        fingerprint = str(payload["engine_fingerprint"])
+        groups = {str(name): _list_group(str(name), row) for name, row in dict(payload["groups"]).items()}
+        trial_id = str(payload["trial_id"])
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return LiquidEvidence("INVALID", "Likit-100 kanıt dosyası tutarsız")
+    if current_fingerprint is None:
+        try:
+            current_fingerprint = code_fingerprint(LIQUID_FINGERPRINT_FILES)
+        except OSError:
+            return LiquidEvidence("INVALID", "Likit-100 kod parmak izi hesaplanamadı")
+    if fingerprint != current_fingerprint:
+        return LiquidEvidence("STALE", "Likit-100 kanıtı mevcut kod sürümüne ait değil; yeniden koşulmalı", trial_id)
+    return LiquidEvidence("OK", "Likit-100 kanıtı mevcut kodla eşleşiyor", trial_id, groups)
+
+
+@lru_cache(maxsize=1)
+def default_liquid_evidence() -> LiquidEvidence:
+    return load_liquid_evidence()
+
+
+def _horizon(group: str) -> str:
+    return group.split("@")[-1].replace("h", " saat")
+
+
+def _liquid_checks(evidence: LiquidEvidence) -> dict[str, Check]:
+    if evidence.status != "OK":
+        return {"oos_expectancy_positive": unknown("oos_expectancy_positive", f"{NO_BACKTEST} ({evidence.detail})")}
+    groups = [evidence.groups[name] for name in LIQUID_LIST_GROUPS if name in evidence.groups]
+    if len(groups) != len(LIQUID_LIST_GROUPS):
+        return {"oos_expectancy_positive": unknown("oos_expectancy_positive", "İlk 3 için replay sonucu eksik")}
+    worst = min(groups, key=lambda g: g.excess_ci_family[1])
+    if all(g.verdict in NO_EDGE_VERDICTS for g in groups):
+        summary = (
+            f"geçmiş test {worst.verdict}: İlk 3, {_horizon(worst.group)} sonra eşit ağırlıklı sepete göre "
+            f"%{worst.mean_excess_pct:+.2f} (n={worst.n}, güven [%{worst.excess_ci_family[0]:+.2f}, "
+            f"%{worst.excess_ci_family[1]:+.2f}])"
+        )
+        return {
+            "oos_expectancy_positive": failed("oos_expectancy_positive", summary),
+            "net_ev_positive": failed("net_ev_positive", f"maliyet sonrası ort. net getiri %{worst.mean_net_pct:+.2f}"),
+            "ev_margin_sufficient": failed("ev_margin_sufficient", "pozitif EV yok, marj olamaz"),
+        }
+    if any(g.verdict == "PASS_CANDIDATE" for g in groups) and not any(g.verdict == "NEGATIVE" for g in groups):
+        return {"oos_expectancy_positive": passed(
+            "oos_expectancy_positive", "geçmiş test adayı (teknik katman); canlı doğrulama bekleniyor"
+        )}
+    return {"oos_expectancy_positive": unknown("oos_expectancy_positive", "replay sonucu kararsız")}
+
+
+def liquid_evidence_line(evidence: LiquidEvidence | None = None) -> str:
+    evidence = evidence or default_liquid_evidence()
+    if evidence.status != "OK":
+        return f"Geçmiş test: YOK ({evidence.detail})"
+    parts = [
+        f"{_horizon(g.group)} sonra sepete göre %{g.mean_excess_pct:+.2f} (n={g.n}) {g.verdict}"
+        for name in LIQUID_LIST_GROUPS if (g := evidence.groups.get(name))
+    ]
+    return "Geçmiş test (Binance spot 2020-2026, teknik katman, maliyet sonrası): İlk 3 → " + " · ".join(parts)
+
+
 def _replay_checks(setup: Any, evidence: ReplayEvidence) -> dict[str, Check]:
     family = evidence.family(setup)
     if family is None:
@@ -218,9 +369,17 @@ def family_disqualified(setup: Any, evidence: ReplayEvidence | None = None) -> b
     return family is not None and family.verdict in NO_EDGE_VERDICTS
 
 
-def evidence_status_text(evidence: ReplayEvidence | None = None) -> str:
+def evidence_status_text(
+    evidence: ReplayEvidence | None = None,
+    liquid_evidence: LiquidEvidence | None = None,
+) -> str:
     evidence = evidence or default_replay_evidence()
-    liquid = "Likit-100 backtest edilmedi → azami WATCH"
+    liquid_evidence = liquid_evidence or default_liquid_evidence()
+    if liquid_evidence.status == "OK":
+        verdicts = sorted({liquid_evidence.groups[n].verdict for n in LIQUID_LIST_GROUPS if n in liquid_evidence.groups})
+        liquid = f"Likit-100 replay — İlk 3: {', '.join(verdicts) or '?'}"
+    else:
+        liquid = f"Likit-100 replay uygulanamıyor ({liquid_evidence.detail}) → azami WATCH"
     if evidence.status != "OK":
         return f"Kanıt durumu: taktik replay uygulanamıyor ({evidence.detail}) → azami WATCH · {liquid}"
     groups: dict[str, list[str]] = {}
@@ -344,9 +503,14 @@ def liquid_long_gate(
     generated_at: Any,
     now: int,
     max_age_seconds: int,
+    evidence: LiquidEvidence | None = None,
 ) -> GateDecision:
     symbol = str(item.get("symbol") or "?")
     answers = _shared_unknowns()
+    answers.update(_liquid_checks(evidence or default_liquid_evidence()))
+    answers["parameters_in_tested_zone"] = unknown(
+        "parameters_in_tested_zone", "yalnızca mevcut ağırlıklar test edildi; pertürbasyon yok"
+    )
     answers["data_fresh"] = _freshness(generated_at, now, max_age_seconds)
     spread = _finite((item.get("metadata") or {}).get("spread_bps"))
     answers["liquid_enough"] = (

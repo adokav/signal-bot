@@ -155,7 +155,7 @@ güncellenenler belirtildi.
 |---|---|---|---|
 | 1 | Rol ve öncelik | ✅ | Emir yolu yok; denenen iki strateji ailesi (TSMOM, taktik setup'lar) kanıtla elendi, hiçbiri canlıya taşınmadı |
 | 2 | Güven ≠ olasılık | ✅ | Radar puanı "kalibre edilmemiş sıralama"; **panel artık aile düzeyi geçmiş isabeti (replay) ile sinyal bazında kalibre olasılığı (YOK) ayrı gösteriyor** |
-| 3 | Üç temel soru | ✅ | `trade_gate.py`; **taktik kapı replay kanıtıyla besleniyor: negatif aileler REJECT** (`radar_gate.py`, `research/evidence/tactical_replay.json`) |
+| 3 | Üç temel soru | ✅ | `trade_gate.py`; **taktik ve Likit-100 kapıları replay kanıtıyla besleniyor: negatif olanlar REJECT** (`radar_gate.py`, `research/evidence/`) |
 | 4 | Veri katmanı | ◐ | OHLCV (MEXC canlı, Binance vision perp + spot), funding; OI yalnız araştırma adaptöründe (`binance_perp.py`). Tick, likidasyon, derinlik, CVD, dominance, TOTAL3, on-chain, sosyal zaman damgalı veri yok. Zaman damgası uyuşmazlığı reddedilir (`features.require_aligned`) |
 | 5 | Hesaplar deterministik | ✅ | Tüm göstergeler Python; kod tabanında LLM çağrısı yok |
 | 6 | Göreli ölçüler | ◐ | `features.py` z-score/persentil var; Likit-100 ve taktik motor hâlâ mutlak eşikli (RSI 45–72, ATR > %6, ATR çarpanları) |
@@ -165,7 +165,7 @@ güncellenenler belirtildi.
 | 10 | Hızlı AI rolü | ✗ | LLM entegrasyonu yok; edge kanıtlanmadan eklenmesi gürültü ve maliyet ekler |
 | 11 | Kalibrasyon | **◐** | Araçlar hazır (`calibration.py`: Brier, reliability, isotonic, Platt); **hiçbir canlı sinyal kalibre olasılık üretmiyor** |
 | 12 | Meta-model / EV | ◐ | EV fonksiyonu var; **taktik aileler için maliyet sonrası aile EV'si ölçüldü (negatif)**; meta-model yok |
-| 13 | Sürekli skor | ◐ | Likit-100 puanı sürekli ama **ağırlıklar elle seçilmiş ve hiç test edilmedi** — canlıda gösterilen en büyük kanıtsız parça |
+| 13 | Sürekli skor | ◐ | Likit-100 puanı sürekli, ağırlıklar elle seçilmiş; **6 yıllık replay'de İlk 3 NEGATIVE** (sepete göre −0.23…−0.33%, `docs/LIQUID_REPLAY_REPORT.md`) |
 | 14 | Önce hipotez | ✅ | `report.py`, `tsmom_dossier.py`, `tactical_dossier.py`; ön-kayıt `research/trials/registry.jsonl` |
 | 15 | Parametre hassasiyeti | ◐ | TSMOM'da pertürbasyon var; **taktik motorun sabitleri satır içi, pertürbasyon yapılmadı** |
 | 16 | Backtest tasarımı | ◐ | Purge + embargo walk-forward (TSMOM); taktik replay'de parametre fit edilmediği için tüm pencere örneklem dışı; resmi final holdout yok; yalnız BTC/ETH (genellenemez) |
@@ -218,6 +218,9 @@ güncellenenler belirtildi.
    kanıtını okuyor; yalnızca motor parmak izi eşleşirse uygular, aksi halde
    UNKNOWN. Negatif aileler REJECT; REJECT uyarıları varsayılan olarak
    push edilmez, ileri kayıt ve panelde görünmeye devam eder.
+6. ✅ **Likit-100 replay'i** — liquid_replay run #1, 642 aday çift (180'i
+   erken biten), 2020-10 → 2026-08: TOP3 ve ALL_READY, 4 ve 24 saatte
+   **NEGATIVE** (trial `69f6387eaf32ed4f`). Kanıt canlı kapıya bağlandı.
 
 ## Kesin çizgiler
 
@@ -246,8 +249,11 @@ uyarıları kanıta göre takip edilmemesi gereken sinyallerdir.
 Radar bu kanıtı artık gösteriyor: negatif aileler REJECT ve push edilmiyor,
 ileri kayıt canlı sonuçları replay ile karşılaştırıyor.
 
-**Sonraki iş:** Likit-100 radarının (elle ağırlıklı puan) tarihsel replay'i —
-survivorship'ten arındırılmış Binance spot evreni, canlı fonksiyonlar,
-ön-kayıtlı karar kuralları (trial `69f6387eaf32ed4f`,
-`docs/LIQUID_REPLAY_REPORT.md`, workflow `liquid_replay`). Her yeni hipotez
-deneme kaydına önceden girer.
+Likit-100 listesi de geçemedi: survivorship'ten arındırılmış 6 yıllık replay'de
+İlk 3, eşit ağırlıklı sepete göre maliyet sonrası −0.23…−0.33% (dört karar
+grubu da NEGATIVE, her yıl ve rejimde aynı yön). Canlı kapı artık REJECT
+gösteriyor. Canlıda gösterilen radarların hiçbirinin kanıtlanmış bir kenarı yok.
+
+**Sonraki iş:** karar kullanıcıda — farklı bir edge sınıfı (funding/basis,
+order-flow) ya da radarların tamamen araştırma moduna çekilmesi. Her yeni
+hipotez deneme kaydına önceden girer.
