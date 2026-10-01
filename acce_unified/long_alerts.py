@@ -389,6 +389,25 @@ def summary_line(log: Sequence[Mapping[str, Any]], *, now: int, days: int = 30) 
     )
 
 
+QUALITY_MARKS = {"AVOID": "kaçın", "PASSED": "geçti", "UNKNOWN": "?"}
+
+
+def quality_summary_line(log: Sequence[Mapping[str, Any]], *, now: int, days: int = 30) -> str:
+    """Live check of the F1 label: closed Likit-100 entries by label (raw, before costs)."""
+
+    groups: dict[str, list[float]] = {}
+    for e in log:
+        if (e.get("source") == "LIKIT100" and e.get("quality") in {"AVOID", "PASSED"}
+                and e.get("status") in {STOPPED, EXPIRED} and e.get("result_pct") is not None
+                and now - int(e.get("opened_at") or 0) <= days * 86_400):
+            groups.setdefault(str(e["quality"]), []).append(float(e["result_pct"]))
+    if not groups:
+        return ""
+    parts = [f"{QUALITY_MARKS[k]} {len(v)} kayıt ort. %{statistics.mean(v):+.1f}"
+             for k, v in sorted(groups.items(), key=lambda kv: kv[0] != "PASSED")]
+    return f"Son {days} gün F1 etiketine göre: " + " · ".join(parts) + " (maliyet hariç; az kayıtla anlamlı değildir)"
+
+
 RADAR_ROWS = 30   # three lines each; keeps /radar well under Telegram's 4096 characters
 
 
@@ -410,12 +429,14 @@ def format_radar(log: Sequence[Mapping[str, Any]], *, now: int, hours: int = TRA
             stop = _num(plan["hard_stop"]) if plan else "yok"
             lines.append(f"{_clock(int(e['opened_at']))} {source} {coin:<8} {e.get('gate_status') or '?'}")
             lines.append(f"  giriş {price} · stop {stop}")
-            lines.append(f"  {_status_label(e)}")
+            quality = QUALITY_MARKS.get(str(e.get("quality") or ""), "")
+            lines.append(f"  {_status_label(e)}" + (f" · F1 {quality}" if quality else ""))
         if len(newest) > RADAR_ROWS:
             lines.append(f"+{len(newest) - RADAR_ROWS} eski kayıt daha")
         parts.append("<pre>" + esc("\n".join(lines)) + "</pre>")
         parts.append(esc("L: Likit-100, T: taktik (BTC/ETH). Sağdaki: uyarı anındaki kapı durumu. "
-                         "72s: 72 saat doldu; * takip verisi eksikti."))
+                         "72s: 72 saat doldu; * takip verisi eksikti. F1: kalite filtresi etiketi."))
     parts += [esc(summary_line(log, now=now)),
+              *([esc(line)] if (line := quality_summary_line(log, now=now)) else []),
               esc("Stop kontrolü kapanmış 15 dk mumlarının dibiyle yapılır. Emir yetkisi yok.")]
     return "\n".join(parts)

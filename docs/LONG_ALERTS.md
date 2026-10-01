@@ -46,6 +46,19 @@ kapı durumunu da gösterir. Sağlayıcıdan gelen bütün metinler HTML olarak 
 Telegram biçimlendirmeyi reddederse aynı mesaj düz metin olarak yeniden
 gönderilir. Bağlantı hatası ise biçim hatası sayılmaz.
 
+### Kalite etiketi (F1, 2026-10-01)
+
+Likit-100 uyarılarında "Kalite (F1)" satırı var. Ön-kayıtlı ve örneklem
+dışında doğrulanmış filtreden gelir (`docs/SIGNAL_QUALITY.md`, KAYBI_AZALTIR):
+
+- **KAÇIN:** Oynak (15 dk ATR > %1) ya da kovalanan (24 saatte evren
+  medyanından 5 puandan fazla yükselmiş). 2024-26'da bu uyarılar, geçenlerden
+  ortalama 1.25 puan daha kötüydü.
+- **geçti:** Zararı daha az. Kâr ettiği gösterilmedi.
+- **bilinmiyor:** Girdi eksik.
+
+Kanıt dosyası mevcut kodla eşleşmezse etiket uygulanmaz.
+
 Kapatmak için Render ortam değişkenleri:
 - `LIQUID_LONG_ALERTS_ENABLED=0`
 - `TACTICAL_REJECTED_ALERTS_ENABLED=0`

@@ -225,6 +225,16 @@ güncellenenler belirtildi.
    biten): SIGNED_CARRY **PASS_CANDIDATE** (son 20 ay negatif, sermayeye göre
    risksiz getirinin altında), STATIC_CARRY NO_EDGE. `docs/CARRY_REPLAY_REPORT.md`.
 
+8. ✅ **Sinyal kalitesi (keşif → ön-kayıt → doğrulama)** — `docs/SIGNAL_QUALITY.md`.
+   - Mühürlü keşifte (2020-10 → 2024-08) taktik uyarılar rastgele saatlerden
+     iyi değil.
+   - Likit-100'de oynak/kovalanan uyarılar en kötüsü.
+   - İki filtre ön-kayda alındı (trial `d468cf29491ff701`) ve 2024-09 →
+     2026-08'de bir kez test edildi:
+     - **F1 KAYBI_AZALTIR:** Elenenler geçenlerden 1.25 puan daha kötü.
+       Geçenler sepeti yendi ama mutlak kâr yok. Canlıda "KAÇIN" etiketi.
+     - **F2 (baz) NO_EFFECT.**
+
 ## Kesin çizgiler
 
 - OOS validation atlanmaz. Faz A ↔ Faz C arasında bir "kanıt eşiği" vardır.

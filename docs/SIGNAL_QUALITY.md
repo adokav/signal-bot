@@ -1,9 +1,13 @@
 # Sinyal kalitesi — özellik tablosu ve filtre protokolü
 
-**Durum:** Adım 2 tamam: keşif bitti, iki test ön-kayda alındı. Doğrulama
-(adım 3) bekliyor. Protokol ve karar kuralları keşif sonuçlarından **önce**
-yazıldı (2026-10-01). Keşiften sonra yapılan değişiklikler ayrıca
-işaretlendi.
+**Durum:** Üç adım tamamlandı.
+
+- **Doğrulama:** `signal_quality_confirm` run #1.
+- **F1:** **KAYBI_AZALTIR**. Canlı uyarılarda "Kalite (F1)" etiketi var.
+- **F2:** **NO_EFFECT**. Etiket yok.
+
+Protokol ve karar kuralları keşif sonuçlarından **önce** yazıldı
+(2026-10-01). Keşiften sonra yapılan değişiklikler ayrıca işaretlendi.
 **Kod:** `trading/backtest/signal_quality.py`, `trading/data/universe_funding.py`,
 workflow'lar `signal_quality` (keşif) ve `signal_quality_confirm` (doğrulama).
 
@@ -342,3 +346,80 @@ izi `c9722d624d8f4865` (`research/trials/registry.jsonl`, 2026-10-01).
   Telegram metni değişirse deneme bozulmaz.
 - Doğrulama komutu, kayıt defterinde bu kodun denemesi yoksa çalışmayı
   reddeder.
+
+## Doğrulama sonucu: signal_quality_confirm run #1 (2026-10-01)
+
+**Koşu:**
+
+- GitHub Actions `signal_quality_confirm` #1, commit `23b194f`.
+- Trial `d468cf29491ff701` (kayıtlı), parmak izi `c9722d624d8f4865`.
+- Pencere 2024-09 → 2026-08. Veri 2026-09-01 itibarıyla kuruldu.
+- α = 0.025 (Bonferroni). 7 günlük blok bootstrap.
+
+**Veri kalitesi:**
+
+- Likit-100 evreni: 587 aday çift, 128'inin verisi pencere bitmeden duruyor.
+- Tarihsel kimlik katmanı 7 sembolü çıkardı: BNSOL, KGST, PAXG, U, WBETH,
+  WBTC, XAUT.
+- Taktik: 225.217 adım değerlendirildi, 0 atlandı, 0 motor hatası.
+- İki testte de bilinmeyen filtre değeri yok. Eksik veri kapısı tetiklenmedi.
+
+### F1: Likit-100 sakin ve kovalamayan → **KAYBI_AZALTIR**
+
+18.429 uyarı: 6.550 geçti, 11.879 elendi. Sonuç: canlı stop + 72 saat kuralı,
+maliyet sonrası %.
+
+| Ölçü | Ortalama | %97.5 güven | 1. yarı | 2. yarı |
+|---|---:|---|---:|---:|
+| Geçenler, net | −0.12 | [−0.74, +0.58] | +0.15 | −0.34 |
+| Geçenler, sepete göre | **+0.23** | **[+0.02, +0.45]** | +0.25 | +0.22 |
+| Geçenler, stres maliyetiyle net | −0.27 | [−0.89, +0.43] | −0.00 | −0.49 |
+| Elenenler, net | −1.37 | [−2.02, −0.66] | −0.85 | −1.89 |
+| **Geçen − elenen** | **+1.25** | **[+0.73, +1.78]** | +0.99 | +1.55 |
+
+**Okuma:**
+
+- **Filtre örneklem dışında da çalıştı.** Oynak ya da kovalanan uyarılar,
+  geçenlerden ortalama 1.25 puan daha kötü. Fark iki yarıda da aynı yönde,
+  keşifteki farktan (+0.81) bile büyük.
+- **Geçenler sepeti yendi** (+0.23, alt sınır sıfırın üstünde, iki yarıda
+  da).
+- **Ama mutlak olarak para kazandırmadı** (−0.12; güven aralığı sıfırı
+  içeriyor). PASS'ın 2. ve 4. koşulları sağlanmadı.
+
+### F2: Taktik, perp < spot → **NO_EFFECT**
+
+2.691 uyarı: 2.534 geçti, yalnızca 157'si elendi. 2024-26'da perp neredeyse
+her zaman spotun altındaydı (%94).
+
+| Ölçü | Ortalama R | %97.5 güven |
+|---|---:|---|
+| Geçenler | +0.07 | [−0.17, +0.32] |
+| Geçenler − rastgele saatler | +0.04 | [−0.09, +0.16] |
+| Elenenler | +0.16 | [−0.47, +0.93] |
+| Geçen − elenen | −0.10 | [−0.88, +0.63] |
+
+**Okuma:**
+
+- Keşifteki "perp ≥ spot iken uyarılar daha kötü" gözlemi tekrarlanmadı.
+- Kullanıcının "perp yüksekse talep canlı" hipotezi için de kanıt yok.
+- Taktik uyarılar, rastgele saatlerden anlamlı biçimde iyi değil.
+
+### Canlıya etkisi (ön-kayıtlı kurala göre)
+
+`research/evidence/signal_quality.json`, yalnızca parmak izi eşleştiğinde
+uygulanır (`radar_gate.load_signal_quality_evidence`). Eşleşmezse etiket yok;
+"uygulanmıyor" yazar.
+
+- **F1 KAYBI_AZALTIR:** Her Likit-100 uyarısında "Kalite (F1)" satırı var.
+  - **KAÇIN:** 15 dk ATR > %1 ya da 24 saatlik değişim evren medyanından
+    5 puandan fazla yüksek. Nedeni ve doğrulama sonucu uyarının altında yazar.
+  - **geçti:** Hiçbir uyarı "iyi" olarak işaretlenmez. Açıklamada "kâr
+    ettiği gösterilmedi" yazar.
+  - **bilinmiyor:** Girdi eksikse. Geçti sayılmaz.
+- Aynı etiket `/longs` panelinde ve `/radar` kaydında görünür. `/radar`, son
+  30 günde kapanan kayıtların sonucunu etikete göre ayrı ayrı gösterir: canlı
+  ileri kontrol.
+- **F2 NO_EFFECT:** Taktik uyarılarda değişiklik yok.
+- Emir yetkisi yok. Uyarılar etiketli olarak gönderilmeye devam eder
+  (kullanıcı politikası "hepsi, etiketli").

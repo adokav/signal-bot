@@ -23,6 +23,7 @@ from acce_unified.radar_gate import (
     evidence_status_text,
     family_disqualified,
     liquid_evidence_line,
+    likit_quality_label,
     liquid_long_gate,
     listing_evidence_line,
     live_vs_replay_text,
@@ -373,9 +374,11 @@ def format_longs(snapshot: dict[str, Any] | None) -> str:
             now=now,
             max_age_seconds=MAIN_MAX_AGE_SECONDS,
         )
+        quality = likit_quality_label(meta)
         lines.extend([
             f"{index}. {item.get('symbol', '?')} — radar puanı {int(item.get('score') or 0)}/100 · {item.get('stage') or '-'}",
             f"   {status_line(decision)}",
+            f"   Kalite filtresi (F1): {quality.text} — {quality.detail}",
             f"   1s %{float(metrics.get('change_1h_pct') or 0):+.1f} · 4s %{float(metrics.get('change_4h_pct') or 0):+.1f} · RSI {float(metrics.get('rsi14') or 0):.0f}",
             f"   Hacim ivmesi {float(metrics.get('volume_ratio') or 0):.1f}x · Spread {float(meta.get('spread_bps') or 0):.1f} bp",
             f"   MEXC 24s {_money(meta.get('quote_volume'))}",
@@ -582,8 +585,11 @@ def _liquid_radar(snapshot: dict[str, Any]) -> None:
                                        detail=status_line(decision), plan=_stop_plan_for(symbol, price, now),
                                        entry_price=price or None)
         fundamentals = dict(meta.get("fundamentals") or {})
+        quality = likit_quality_label(meta)
         entry.update(rank=index, radar_score=int(item.get("score") or 0),
-                     fundamentals={key: fundamentals.get(key) for key in FUNDAMENTAL_KEYS})
+                     fundamentals={key: fundamentals.get(key) for key in FUNDAMENTAL_KEYS},
+                     quality=quality.status, quality_text=quality.text, quality_detail=quality.detail,
+                     quality_inputs={"atr15_pct": quality.atr15_pct, "rel_24h": quality.rel_24h})
         fresh.append(entry)
     updated, stopped = _track_radar(rows, now)
     opened = _merge_radar(fresh, updated)
@@ -593,8 +599,9 @@ def _liquid_radar(snapshot: dict[str, Any]) -> None:
             icon = "⛔" if entry["gate_status"] == "REJECT" else "👀"
             messages.append(long_alerts.alert_text(
                 entry, icon=icon, title=f"LONG SİNYALİ · Likit-100 #{entry['rank']}", evidence=liquid_evidence_line(),
-                head_rows=[("Radar puanı", f"{entry['radar_score']}/100")],
+                head_rows=[("Radar puanı", f"{entry['radar_score']}/100"), ("Kalite (F1)", entry["quality_text"])],
                 fact_rows=_fundamental_rows(entry.get("fundamentals")),
+                notes=[f"Kalite filtresi: {entry['quality_detail']}"],
             ))
     for entry in stopped:
         if (LIQUID_LONG_ALERTS if entry["source"] == "LIKIT100" else TACTICAL_ALERTS):
