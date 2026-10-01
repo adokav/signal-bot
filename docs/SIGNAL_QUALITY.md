@@ -441,5 +441,12 @@ düzeltildi):
   30 günde kapanan kayıtların sonucunu etikete göre ayrı ayrı gösterir: canlı
   ileri kontrol.
 - **F2 NO_EFFECT:** Taktik uyarılarda değişiklik yok.
-- Emir yetkisi yok. Uyarılar etiketli olarak gönderilmeye devam eder
-  (kullanıcı politikası "hepsi, etiketli").
+- Emir yetkisi yok.
+- **KAÇIN etiketli Likit-100 uyarıları Telegram'a gönderilmiyor** (kullanıcı
+  kararı, PR #142; `LIQUID_AVOID_ALERTS_ENABLED`, varsayılan `"0"`). Kayda
+  girmeye ve `/radar`'da "sessiz" olarak görünmeye devam ediyorlar, böylece
+  canlı ileri kontrol sürüyor. "bilinmiyor" susturulmaz.
+- **Veri sürekliliği denetimi (2026-10-01):** Token değişimi yapan coinler
+  (COCOS, SUN, LUNA 2.0 …) aynı sembolle 1000 kat farklı fiyattan yeniden
+  işlem görüyor. F1 kararının bundan etkilenmediğinin gerekçesi
+  `docs/WEEKLY_MOMENTUM.md` içinde ("Veri sürekliliği").

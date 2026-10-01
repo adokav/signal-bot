@@ -1,8 +1,13 @@
 # Haftalık momentum — Likit-100 evreninde kesitsel test
 
-**Durum:** Adım 1 (keşif). Bu belgenin protokol ve karar kuralları keşif
-sonuçlarından **önce** yazıldı (2026-10-01, kullanıcı onayı: "önerdiğin her
-iki adımı da uygulayalım").
+**Durum:** Keşif tamamlandı. **Altı varyantın hiçbiri etki göstermedi.**
+Hiçbiri ön-kayda alınmadı; doğrulama penceresi bu aile için mühürlü kaldı
+(ayrıntı: "Keşif sonuçları").
+
+Bu belgenin protokol ve karar kuralları keşif sonuçlarından **önce** yazıldı
+(2026-10-01, kullanıcı onayı: "önerdiğin her iki adımı da uygulayalım").
+Sonradan eklenen tek kural, veri sürekliliği kuralıdır. Nedeni ve nasıl
+seçildiği "Keşif sonuçları" bölümünde açıkça yazıyor.
 **Kod:** `trading/backtest/weekly_momentum.py`.
 
 Araştırma ölçümüdür. Sonucu ne olursa olsun emir yetkisi vermez
@@ -11,8 +16,20 @@ Araştırma ölçümüdür. Sonucu ne olursa olsun emir yetkisi vermez
 ## Neden
 
 Likit-100 radarı kısa vadede (24 saat) çok yükselmiş coinleri alıyor. Bu,
-sonraki günlerde geri veriliyor (`docs/SIGNAL_QUALITY.md`: uyarıları 7–30
-gün tutmak farkı büyütüyor). Kullanıcının sorusu: "Ufuk mu kısa?"
+sonraki günlerde geri veriliyor. Uyarıyı daha uzun tutmak, sepete göre farkı
+büyütüyor (keşif penceresi, bütün uyarılar, maliyet sonrası; sepet: o an
+24 saatlik hacmi ≥ 1M USD olan bütün çiftler, eşit ağırlık; veri sürekliliği
+kuralıyla düzeltilmiş tanılama, karar vermez):
+
+| Tutma süresi | 24 saat | 72 saat | 7 gün | 14 gün | 30 gün |
+|---|---:|---:|---:|---:|---:|
+| Sepete göre (puan) | −0.64 | −0.96 | −1.11 | −1.64 | −2.62 |
+
+İki yarıda da negatif. Sohbette önce bildirilen −3.3 / −3.9 / −8.6 (7/14/30
+gün) yanlıştı: Sepet, token değişimi yapan coinlerin 1000 katlık sahte
+sıçramasını içeriyordu (aşağıda "Veri sürekliliği").
+
+Kullanıcının sorusu: "Ufuk mu kısa?"
 
 Cevap: Aynı sinyali uzun tutmak çözüm değil. Uzun vade için o vadeye göre
 kurulmuş ayrı bir sinyal gerekir. Akademik çalışmalarda kriptoda **haftalık
@@ -51,6 +68,13 @@ kesitsel momentum** etkisi bildirildi:
 - **Borsadan kalkan coin:** Son işlem fiyatında donar. Verisi boşluktan
   sonra devam eden ya da indirme sınırına takılan coinin o haftası
   bilinmez; ortalamaya girmez ve sayılır.
+- **Veri sürekliliği (keşfin ilk koşusundan sonra eklendi):** Verinin
+  sonradan devam ettiği **24 saatten uzun** bir boşluk süreklilik kırılmasıdır.
+  - Kırılmanın üstünden getiri hesaplanmaz: o üye-haftası bilinmez sayılır.
+  - Kırılmanın üstünden sıralama yapılmaz: coin o hafta sıralanamaz.
+  - Kohortta kırılma, kohortun kuruluşundan sonra olduysa üye kohortun geri
+    kalanında bilinmez sayılır.
+  - Birkaç saatlik borsa bakımı kırılma değildir.
 - **Tanılayıcı (karar vermez):** En düşük %20 ve en yüksek − en düşük
   farkı (momentum mu, ters dönüş mü?).
 
@@ -62,7 +86,7 @@ ikisi** ön-kayda alınır.
 | Pencere | Aralık | Ne zaman görülür |
 |---|---|---|
 | Keşif | 2020-10 → 2024-08 (≈ 200 hafta) | Şimdi; veri 2024-09-01 itibarıyla mühürlü |
-| Doğrulama | 2024-09 → 2026-08 (≈ 104 hafta) | Ön-kayıttan sonra, **bir kez**, GitHub Actions'ta |
+| Doğrulama | 2024-09 → 2026-08 (≈ 104 hafta) | Ön-kayıttan sonra, **bir kez**. Ön-kayıt yapılmadı, kullanılmadı |
 
 **Bilinen kirlenme:** Likit-100 radarının yıllık sonuçları ve sinyal kalitesi
 doğrulamasının sonuçları (2024–26) görüldü. Haftalık momentum portföyünün
@@ -120,4 +144,93 @@ etki anlamlı çıkar. Gerçek ama küçük bir etki NO_EFFECT görünebilir.
 
 ## Keşif sonuçları
 
-Henüz yok.
+Koşu: `python -m trading.backtest.weekly_momentum discover`. Veri 2024-09-01
+itibarıyla mühürlü (`SealError` kontrolü). 442 aday çift; tarihsel kimlik
+katmanı stabil/sarılı olanları çıkarır. 204 pazartesi. Keşif yarıları 2022-09-01'de ayrılır.
+α = 0.05, 4 haftalık blok bootstrap.
+
+### Veri sürekliliği: ilk koşu geçersiz
+
+İlk koşu saçma sonuç verdi: Sepetin haftalık ortalaması +%7.5, L1_H1
+portföyününki +%35. Tek bir hafta (2021-01-18) sepeti +%1396 yaptı.
+
+- **Neden:** COCOS 2021-01'de token değişimi yaptı. İşlem 4 gün durdu, aynı
+  sembolle 1000 kat yüksek fiyattan yeniden başladı. Kod bunu +%138.825
+  getiri saydı.
+- **Benzerleri:** SUN 2021-06 (1000 kat düşük), DREP 2021-03, QUICK 2023-07,
+  BNX 2023-02, VIDT 2022-10, STRAX 2024-03; LUNA 2022-05 (LUNA 2.0 aynı
+  sembolü aldı, 110.000 kat).
+- **Mevcut kimlik katmanı neden yakalamadı:** Yalnızca sembol değişikliklerini
+  (MATIC → POL) tanıyor; aynı sembolle yapılan token değişimini tanımıyor.
+
+**Kural verideki boşluk uzunluklarına göre seçildi, getirilere göre değil.**
+Keşif verisindeki 2.448 boşluğun ölçümü:
+
+| Boşluk | Sayı | Uzunluk | Boşluğun iki yanındaki fiyat oranı |
+|---|---:|---|---|
+| Kısa (borsa bakımı; 168–325 coin aynı anda) | 2.350 | en fazla 19 mum (≈ 5 saat) | en fazla 1.22 kat |
+| Uzun (token değişimi, durdurma, çıkarılıp yeniden listelenme) | 98 | en az 384 mum (4 gün) | 1000 kata kadar |
+
+Arada hiç boşluk yok. Eşik 24 saat (`DAY_BARS`, borsadan kalkma kuralında
+da kullanılan sabit). Kural `continuity_breaks` / `continuous` içinde ve
+testli (`test_a_token_swap_gap_is_a_break_not_a_return`; kural olmadan bu
+test başarısız oluyor).
+
+**Diğer çalışmalara etkisi:**
+
+- **Sinyal kalitesi F1 (doğrulanmış KAÇIN etiketi): etkilenmiyor.** 72 saatlik
+  çıkış, keşifteki 4 günlük duruşların içine düşer; sonuç "çözümlenemez"
+  sayılır. Doğrulamadaki karar, geçen ve elenen uyarıların **net** sonuç
+  farkına dayanır; bu hesapta sepet yok. 1000 kat yukarı bir sıçrama tek
+  başına grup ortalamasını +15 puana çıkarırdı; görülen ortalamalar −0.12 ve
+  −1.37. 1000 kat aşağı bir sıçrama ortalamayı en fazla 0.015 puan oynatır;
+  farkın alt sınırı +0.73.
+- **7/14/30 günlük tutma tanılaması (sohbette bildirilmişti): etkilenmiş.**
+  Düzeltilmiş hali yukarıda, "Neden" bölümünde.
+
+### Sonuçlar (düzeltilmiş koşu)
+
+Haftalık %, maliyet sonrası. Fazla = net − eşit ağırlıklı ilk 100. Yarılar:
+2020-10 → 2022-08 ve 2022-09 → 2024-08.
+
+| Varyant | Hafta | Net | Fazla (%95 güven) | Fazla 1. yarı | Fazla 2. yarı | En yüksek − en düşük | Karar |
+|---|---:|---:|---|---:|---:|---:|---|
+| L1_H1 | 201 | +0.54 | −0.11 [−1.03, +1.09] | +0.43 | −0.61 | +0.50 | NO_EFFECT |
+| L1_H4 | 201 | +0.70 | +0.06 [−0.44, +0.70] | +0.44 | −0.31 | +0.20 | NO_EFFECT |
+| L2_H1 | 200 | +0.29 | −0.38 [−1.14, +0.50] | +0.24 | −0.97 | +0.08 | NO_EFFECT |
+| L2_H4 | 200 | +0.58 | −0.09 [−0.57, +0.42] | +0.18 | −0.34 | −0.17 | NO_EFFECT |
+| L4_H1 | 198 | +0.39 | −0.36 [−1.03, +0.34] | −0.04 | −0.66 | +0.22 | NO_EFFECT |
+| L4_H4 | 198 | +0.53 | −0.23 [−0.77, +0.34] | −0.15 | −0.29 | −0.59 | NO_EFFECT |
+
+- **Sepet:** Haftada ortalama +0.65 ile +0.75 arası (2021 boğa piyasası).
+- **Veri:** Bilinmeyen üye-haftası %0.04–0.10. Kurulamayan hafta 2–5 (ilk
+  haftalarda geriye bakış verisi yok).
+- **Net getiri pozitif, ama sepetin kendisi kadar.** Hiçbir varyant sepeti
+  yenmedi.
+
+**Okuma:**
+
+- Likit ilk 100'de, son 1–4 haftanın kazananları sonraki 1–4 haftada sepeti
+  **yenmiyor**.
+- 2022-09 sonrası yarıda altı varyantın altısında da fazla getiri negatif.
+  Yalnızca 2021 boğasında L1/L2 hafif pozitif.
+- Ters dönüş de anlamlı değil: Hiçbir güven aralığının üst sınırı sıfırın
+  altında değil.
+- Literatürdeki etki (çoğu 2014–2018, küçük coinler dahil) bu evrende ve bu
+  dönemde görülmüyor.
+
+### Karar: ön-kayıt yok, doğrulama penceresi açılmadı
+
+Protokol "en fazla iki varyant" diyor; sıfır da buna dahil. Hiçbir varyant
+keşifte destek kazanmadı: En iyisinin (L1_H4) fazla getirisi +0.06, güven
+aralığı sıfırın iki yanında ve 2. yarıda negatif. Böyle bir varyantı
+doğrulamaya göndermek, ≈ 104 haftalık pencereyi gücü olmayan bir teste
+harcamak olurdu (AGENTS.md §6: aday faktör tanıtımı kanıtla kazanılır).
+
+- `REGISTERED_VARIANTS` boş kalıyor. `confirm` ve `build-confirm` komutları
+  kayıt olmadan çalışmayı reddediyor (testli). Doğrulama için iş akışı
+  eklenmedi.
+- **Kullanıcının sorusuna cevap:** Ufku haftalara uzatmak, likit coinlerde tek
+  başına bir avantaj yaratmıyor. 24 saatte çok yükselen coini almak, tutma
+  süresi uzadıkça sepete göre daha çok kaybettiriyor (yukarıdaki tablo).
+- **Canlıya etkisi:** Yok. Emir yetkisi yok.

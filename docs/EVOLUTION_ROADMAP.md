@@ -234,6 +234,13 @@ güncellenenler belirtildi.
      - **F1 KAYBI_AZALTIR:** Elenenler geçenlerden 1.25 puan daha kötü.
        Geçenler sepeti yendi ama mutlak kâr yok. Canlıda "KAÇIN" etiketi.
      - **F2 (baz) NO_EFFECT.**
+9. ✅ **Haftalık kesitsel momentum (Likit-100)** — `docs/WEEKLY_MOMENTUM.md`.
+   - Mühürlü keşifte 6 varyant (1/2/4 hafta geriye bakış × 1/4 hafta tutma):
+     **hiçbiri sepeti yenmedi** (NO_EFFECT; 2022-09 sonrası hepsi negatif).
+   - Ön-kayıt yapılmadı; doğrulama penceresi açılmadı.
+   - Yan bulgu: Aynı sembolle yapılan token değişimleri (COCOS, SUN, LUNA 2.0)
+     1000 katlık sahte getiri üretiyordu. Haftalık çalışmaya süreklilik kuralı
+     eklendi. F1 kararı etkilenmiyor; 7/14/30 günlük tanılama düzeltildi.
 
 ## Kesin çizgiler
 
