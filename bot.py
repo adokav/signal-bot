@@ -22,6 +22,7 @@ from acce_unified.radar_gate import (
     family_disqualified,
     liquid_evidence_line,
     liquid_long_gate,
+    listing_evidence_line,
     live_vs_replay_text,
     status_line,
     tactical_gate,
@@ -337,7 +338,7 @@ def format_new(snapshot: dict[str, Any] | None) -> str:
             str(item.get("symbol") or ""),
         ), reverse=True,
     )[:5]
-    lines = ["🆕 MEXC NEW LISTING — DOĞRULANMIŞ ADAYLAR", ""]
+    lines = ["🆕 MEXC NEW LISTING — ADAYLAR (kimliği doğrulandı, getirisi kanıtlanmadı)", ""]
     if not rows:
         lines.append("Son 72 saatte doğrulanmış aktif aday yok.")
     for index, item in enumerate(rows, 1):
@@ -360,6 +361,7 @@ def format_new(snapshot: dict[str, Any] | None) -> str:
             f"   Risk: {', '.join(item.get('risk_flags') or []) or 'belirgin sert risk yok'}",
             "",
         ])
+    lines.append(listing_evidence_line())
     lines.append("Araştırma sıralamasıdır; otomatik işlem veya sermaye yetkisi vermez.")
     return "\n".join(lines)
 
@@ -378,7 +380,7 @@ def format_status(snapshot: dict[str, Any] | None) -> str:
         f"Taktik radar: {tactical_age} sn önce" if tactical else "Taktik radar: henüz yok",
         f"Likit evren: {int((snapshot or {}).get('liquid_universe_size') or 0)}/100",
         f"Long aday: {len((snapshot or {}).get('liquid_long_candidates') or [])}/3",
-        f"Doğrulanmış yeni aday: {len((snapshot or {}).get('listing_candidates') or [])}",
+        f"Yeni listeleme adayı (kimliği doğrulanmış): {len((snapshot or {}).get('listing_candidates') or [])}",
         f"Ana hata: {error_text}",
         f"Taktik hata: {STATE.get('tactical_last_error') or 'yok'}",
         evidence_status_text(),

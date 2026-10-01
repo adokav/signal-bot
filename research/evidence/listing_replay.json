@@ -1,0 +1,18 @@
+{
+ "schema": "listing-replay-evidence/v1",
+ "trial_id": "2381d2ac70c38a52",
+ "engine_fingerprint": "a7ca652e76ee1c02",
+ "source": "GitHub Actions listing_replay run 36870946696 (commit aacde29), values transcribed from the job log table",
+ "window": "2020-10 → 2026-08",
+ "data": "400 genuinely new Binance spot USDT listings incl. delisted; migrations, stable/leveraged/pegged/commodity tokens and earlier other-quote listings excluded",
+ "outcome": "gross return (no costs) from first trade + entry offset to + horizon; excess = return minus BTCUSDT over the same hours; percent; month-cluster bootstrap, family alpha 0.05/6",
+ "groups": {
+  "1h@30d": {"n": 388, "mean_gross_pct": -9.0, "median_gross_pct": -26.7, "share_beating_btc": 0.24, "mean_excess_pct": -12.7, "gross_ci_family": [-23.4, 8.9], "excess_ci_family": [-25.2, 4.1], "verdict": "NO_CLAIM"},
+  "1h@90d": {"n": 329, "mean_gross_pct": -10.0, "median_gross_pct": -48.1, "share_beating_btc": 0.15, "mean_excess_pct": -22.7, "gross_ci_family": [-34.4, 23.0], "excess_ci_family": [-36.8, -3.7], "verdict": "NO_CLAIM"},
+  "24h@30d": {"n": 388, "mean_gross_pct": -5.0, "median_gross_pct": -20.3, "share_beating_btc": 0.24, "mean_excess_pct": -8.9, "gross_ci_family": [-19.3, 14.0], "excess_ci_family": [-21.4, 9.3], "verdict": "NO_CLAIM"},
+  "24h@90d": {"n": 329, "mean_gross_pct": -4.7, "median_gross_pct": -44.9, "share_beating_btc": 0.19, "mean_excess_pct": -17.6, "gross_ci_family": [-31.1, 29.2], "excess_ci_family": [-33.2, 2.7], "verdict": "NO_CLAIM"},
+  "7d@30d": {"n": 378, "mean_gross_pct": 0.4, "median_gross_pct": -16.2, "share_beating_btc": 0.28, "mean_excess_pct": -3.6, "gross_ci_family": [-12.4, 15.0], "excess_ci_family": [-12.8, 7.0], "verdict": "NO_CLAIM"},
+  "7d@90d": {"n": 329, "mean_gross_pct": 0.7, "median_gross_pct": -33.4, "share_beating_btc": 0.22, "mean_excess_pct": -11.2, "gross_ci_family": [-27.3, 39.5], "excess_ci_family": [-26.7, 10.4], "verdict": "NO_CLAIM"}
+ },
+ "can_authorize_trade": false
+}

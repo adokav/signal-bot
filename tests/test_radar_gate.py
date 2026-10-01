@@ -335,3 +335,77 @@ def test_corrupt_liquid_evidence_fails_closed(tmp_path, mutate):
     decision = liquid_long_gate(_liquid_item(), market_regime="RISK_ON", generated_at=NOW - 5,
                                 now=NOW, max_age_seconds=360, evidence=evidence)
     assert decision.status == "WATCH"
+
+
+# ---------------------------------------------------------------------------
+# New-listing replay evidence (docs/LISTING_REPLAY_REPORT.md): a base rate on the panel, no gate
+# ---------------------------------------------------------------------------
+
+from acce_unified.radar_gate import (
+    LISTING_EVIDENCE_FILE,
+    LISTING_FINGERPRINT_FILES,
+    default_listing_evidence,
+    listing_evidence_line,
+    load_listing_evidence,
+)
+
+
+def _listing_file(tmp_path, mutate=None, fingerprint=FP):
+    payload = json.loads(LISTING_EVIDENCE_FILE.read_text("utf-8"))
+    payload["engine_fingerprint"] = fingerprint
+    if mutate is not None:
+        mutate(payload)
+    path = tmp_path / "listing.json"
+    path.write_text(json.dumps(payload), "utf-8")
+    return path
+
+
+def test_committed_listing_evidence_matches_the_running_code():
+    """Tripwire: changing the identity layer, the dataset builder or the study makes the base rate stale."""
+
+    pytest.importorskip("numpy")
+    from trading.backtest import listing_replay
+
+    assert LISTING_FINGERPRINT_FILES == listing_replay.FINGERPRINT_FILES
+    assert code_fingerprint(LISTING_FINGERPRINT_FILES) == listing_replay.engine_fingerprint()
+    evidence = default_listing_evidence()
+    assert evidence.status == "OK", evidence.detail
+    assert evidence.trial_id == "2381d2ac70c38a52" and len(evidence.groups) == 6
+
+
+def test_listing_panel_line_states_the_base_rate_and_its_limits(tmp_path):
+    line = listing_evidence_line(load_listing_evidence(_listing_file(tmp_path), current_fingerprint=FP))
+    assert "medyan %-20.3" in line and "BTC'yi geçen %24" in line and "NO_CLAIM" in line
+    assert "birkaç büyük kazanana" in line          # mean far above the median
+    assert "MEXC listelemeleri için test yok" in line
+
+
+def test_listing_status_summarises_all_six_tests(tmp_path):
+    listing = load_listing_evidence(_listing_file(tmp_path), current_fingerprint=FP)
+    assert "Yeni listeleme replay — NO_CLAIM 6/6" in evidence_status_text(listing_evidence=listing)
+
+
+def test_listing_evidence_for_other_code_is_not_shown(tmp_path):
+    evidence = load_listing_evidence(_listing_file(tmp_path), current_fingerprint="0" * 16)
+    assert evidence.status == "STALE"
+    assert listing_evidence_line(evidence).startswith("Geçmiş test: YOK")
+    assert "uygulanamıyor" in evidence_status_text(listing_evidence=evidence)
+    missing = load_listing_evidence(tmp_path / "nope.json", current_fingerprint=FP)
+    assert missing.status == "MISSING" and listing_evidence_line(missing).startswith("Geçmiş test: YOK")
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda p: p["groups"]["24h@30d"].update(verdict="AVOID_CONFIRMED"),      # interval reaches zero
+    lambda p: p["groups"]["24h@30d"].update(verdict="POSITIVE_SURPRISE"),    # intervals not above zero
+    lambda p: p["groups"]["24h@30d"].update(verdict="INSUFFICIENT"),         # n >= 100
+    lambda p: p["groups"]["24h@30d"].update(n=50),                            # NO_CLAIM needs 100
+    lambda p: p["groups"]["24h@30d"].update(share_beating_btc=1.4),
+    lambda p: p["groups"]["24h@30d"].update(median_gross_pct=float("nan")),
+    lambda p: p["groups"]["24h@30d"].update(verdict="SAFE"),
+    lambda p: p.update(can_authorize_trade=True),
+    lambda p: p.pop("window"),
+])
+def test_corrupt_listing_evidence_fails_closed(tmp_path, mutate):
+    evidence = load_listing_evidence(_listing_file(tmp_path, mutate), current_fingerprint=FP)
+    assert evidence.status == "INVALID"
+    assert listing_evidence_line(evidence).startswith("Geçmiş test: YOK")
