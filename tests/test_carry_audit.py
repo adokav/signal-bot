@@ -45,3 +45,22 @@ def test_cli_writes_json_with_extreme_funding(monkeypatch, tmp_path, capsys):
     report = json.loads(out.read_text())
     assert report["funding_extremes"]["negative"] == 1 and report["can_authorize_trade"] is False
     assert "funding prints" in capsys.readouterr().out
+
+
+def test_zero_volume_perp_candles_are_reported_as_a_dead_hedge():
+    """A settled perp keeps a frozen, zero-volume price while spot collapses: STATIC books the loss."""
+
+    perp, spot, funding = _market(3, funding_rate=lambda k, s: -0.0001 if s == 1 else 0.0001)
+    frozen = perp["S1USDT"]["open"][110]
+    for col in ("open", "high", "low", "close"):
+        perp["S1USDT"][col][110:] = frozen
+    perp["S1USDT"]["quote_volume"][110:] = 0.0
+    for col in ("open", "high", "low", "close"):
+        spot["S1USDT"][col][111:] = spot["S1USDT"][col][111:] * 0.1
+    report = ca.audit(cr.build_market(perp, spot, funding))
+    zv = report["zero_volume"]
+    assert zv["symbols"] == ["S1USDT"] and zv["candles"] > 0
+    static = zv["STATIC_CARRY"]
+    assert static["contribution_pct"] < -4 and static["worst"][0]["symbol"] == "S1USDT"
+    assert static["without_pct"] == pytest.approx(static["book_total_pct"] - static["contribution_pct"], abs=0.02)
+    assert zv["SIGNED_CARRY"]["periods"] == 0   # negative funding: SIGNED never held S1

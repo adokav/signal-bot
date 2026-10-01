@@ -195,3 +195,91 @@ PASS_CANDIDATE, emir yetkisi değil. Sıradaki adımlar:
 
 Son dönemdeki zayıflık ve risksiz getiri karşılaştırması nedeniyle bu sonuç
 **canlı sermaye için yeterli değil.**
+
+## Veri denetimi — carry_audit (2026-10-01)
+
+Tanılayıcıdır. Ön-kayıtlı kararları, deneme kodunu ve parmak izini
+değiştirmez.
+
+**Nasıl koşuldu:**
+- GitHub Actions `carry_audit` #1 veriyi indirdi, ama raporu yazarken bir
+  JSON hatasıyla durdu (PR #131'de düzeltildi).
+- Sonuçlar, düzeltilmiş kodla (`main` f0c763f) aynı veri oluşturucu kullanılarak
+  yerelde üretildi. Dosyalar CDN yerine aynı S3 bucket'ından indirildi.
+- Veri bugün yeniden indirildiği için pencere 2020-10 → 2026-09: replay'den
+  bir ay kaydı. 469 çift, replay ile aynı sayı.
+- Aşağıdaki "defter" sayıları dönem getirilerinin toplamı / 20'dir
+  (toplamsal, maliyetsiz). Karşılaştırma içindir; replay'in bileşik ve
+  maliyetli rakamları değildir.
+
+### Bulgu 1: STATIC kaybının tamamı birkaç uç olaydan geliyor
+
+STATIC defteri toplam −22.8 puan. 127.821 pozisyon-döneminden yalnızca en
+kötü 25'i toplam −23.0 puan. Bu 25 dönem çıkarılınca defter yaklaşık düz.
+Yani −83% düşüş, sürekli bir kayıptan değil, kuyruk olaylarından geliyor.
+
+### Bulgu 2: Kuyruğun yaklaşık yarısı bir veri artefaktı (ölü hedge)
+
+- **Ne oluyor:** Perp sözleşmesi borsada kapatıldıktan (settlement) sonra
+  arşiv verisi **hacmi sıfır, fiyatı donmuş** mumlar yazmaya devam ediyor.
+  Funding de varsayılan %0.01 ile sürüyor.
+- **Ölçek:** 55 sembolde 5.151 böyle mum var.
+- **Replay'e etkisi:** Replay veri durunca (NaN) iki bacağı da kapatıyor.
+  Ama bu mumlar NaN değil, bu yüzden ölü bir hedge'i canlı sayıyor. Bu
+  sırada spot bacak çöküyor.
+- **En büyük örnekler:**
+  - LUNA, 2022-05-12: perp %0.00, spot −%96.4;
+  - FTT, 2022-11-14: −%21.0;
+  - ALPACA, 2025-04-30 → 05-01: beş dönemde toplam yaklaşık −%114.
+- **Pay:** Bu mumlara denk gelen 15 dönem, STATIC defterinin −10.9 puanını
+  açıklıyor. Kalan defter −11.9 puan.
+- **Gerçekte ne olurdu:** Perp kapatıldığında short pozisyon da kapanır.
+  Spot aynı anda satılırsa kayıp, kapanış anındaki fiyat farkıyla sınırlı
+  kalır. Replay ise spot'u korumasız tutmaya devam ediyor.
+
+### Bulgu 3: Kalan yarı gerçek risk
+
+Her zaman açık short perp pozisyonu küçük coin'lerde sıkışmaya (squeeze)
+yakalanıyor:
+
+- **Uç funding:** ≥ %0.5/8 saat olan 751 funding ödemesinin **738'i
+  negatif**, yani short tarafı ödüyor.
+  - Örnekler: ALPACA −%11.8, DEXE −%8.7, LAYER −%7.7, FTT −%6.6
+    (8 saatlik pencere toplamı).
+- **FTX çöküşü (2022-11):** FTT ve SOL'de perp ile spot ayrıştı. Tek bir
+  8 saatte perp +%53, spot +%20 hareket etti.
+- **Borsadan kalkma dönemleri:** 73 sembolde perp/spot fiyat oranı 7 günlük
+  medyanından %10'dan fazla saptı. Çoğu 2025–2026'daki delist ve token
+  göçü dönemlerinde; sapmalar +%100 ile +%310 arasında (KDA, PHB, DEGO,
+  NFP, VIC).
+- **Yıllara göre (STATIC defter katkısı):**
+  - 2021: +38.2;
+  - 2022: −18.5 (LUNA, FTT, SOL);
+  - 2023: −9.1 (TRB −6.7, BLZ −3.7: sıkışmalar);
+  - 2024: +12.9;
+  - 2025: −20.6 (ALPACA −7.5, LAYER, FUN, TNSR);
+  - 2026: −28.9 (DEXE −5.4, AXS −3.0, COTI −2.7).
+
+### Bulgu 4: SIGNED etkilenmiyor
+
+- Ölü mumlara denk gelen yalnızca 1 dönem var: TON, 2026-06-23, katkısı
+  −0.17 puan (defter +79.4).
+- Funding işareti filtresi, yukarıdaki sıkışma ve çöküş dönemlerinin
+  çoğunda pozisyon taşımamış.
+- **SIGNED'in PASS_CANDIDATE kaydı geçerli kalır.** "Canlıya yetersiz"
+  gerekçeleri de değişmez: son 20 ay negatif, sermayeye göre getiri
+  risksiz getirinin altında, maliyet funding'in yarısı.
+
+### Sonuç ve sonraki denemeler için şart
+
+- **STATIC NO_EDGE kararı doğru.** Ölü mumlar çıkarılsa da defter negatif.
+  Kalan kayıp gerçek sıkışma ve uç negatif funding riski. "Her zaman short
+  perp" stratejisi, küçük coin'lerde sıkışma sigortası satmakla eşdeğer.
+- **Sonraki her carry denemesi için iki kural (fail closed):**
+  - Sıfır hacimli perp mumu "veri durdu" sayılır ve iki bacak birden
+    kapatılır.
+  - Delist veya göç dönemindeki sapmalar için ayrı bir dışlama kuralı
+    gerekir. Bu kural anlık (point-in-time) duyuru verisi olmadan tam
+    çözülemez; açık bir sorun olarak duruyor.
+- Bu değişiklikler `carry_replay.py`'yi, yani parmak izini değiştirir.
+  Bu yüzden ancak yeni, ön-kayıtlı bir denemede uygulanır.

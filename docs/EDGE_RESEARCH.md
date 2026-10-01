@@ -261,7 +261,7 @@ Her aday için şu sorular soruldu:
 
 | # | Aday | Neden | Beklenti |
 |---|---|---|---|
-| 0 | Geri dönüş testi + carry denetimi | Koşuyor | Zayıf / tanılayıcı |
+| 0 | Geri dönüş testi + carry denetimi | Tamamlandı: geri dönüş NEGATIVE; STATIC düşüşünün yarısı veri artefaktı, yarısı gerçek sıkışma riski | — |
 | 1 | **Yeni listeleme kohortu** (B2) | Kanıt güçlü, canlı radarı doğrudan etkiler, ucuz | Kayıptan kaçınma kuralı |
 | 2 | **Zorunlu satış sonrası toparlanma** (D1) | Yapısal mekanizma, long-only uyumlu, veri hazır | Belirsiz; INSUFFICIENT olabilir |
 | 3 | BTC saat etkisi, yayın sonrası (C1) | Ucuz, temiz örneklem dışı pencere | Maliyetten sonra büyük olasılıkla NO_EDGE |

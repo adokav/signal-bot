@@ -11,7 +11,10 @@ the same point-in-time universe, and lists
 - perp/spot price-ratio breaks (a ratio that leaves its own running median
   by more than 10% is not a hedge any more);
 - the symbols that drove each year's carry result;
-- extreme funding prints.
+- extreme funding prints;
+- zero-volume perp candles: after a contract is settled or delisted the
+  archive can keep printing a frozen price with no volume. The replay then
+  treats a dead hedge as live while the spot leg keeps moving.
 
 Research only; no order authority (AGENTS.md §4).
 """
@@ -94,6 +97,48 @@ def ratio_breaks(market: cr.CarryMarket) -> list[dict]:
     return sorted(out, key=lambda b: -b["breaks"])
 
 
+def zero_volume_impact(market: cr.CarryMarket, *, top: int = 10) -> dict:
+    """How much of each variant's book comes from periods that touch a zero-volume perp candle.
+
+    Book totals are additive (sum of position-period returns / UNIVERSE_SIZE), for comparison
+    only; they are not the replay's compounded, cost-adjusted figures.
+    """
+
+    with np.errstate(invalid="ignore"):
+        zero = market.perp_qv == 0
+    volume = cr.trailing_volume(market)
+    signal, complete = cr.trailing_funding(market)
+    out: dict = {
+        "candles": int(zero.sum()),
+        "symbols": sorted(market.symbols[s] for s in np.nonzero(zero.sum(axis=1))[0]),
+    }
+    for variant in cr.VARIANTS:
+        total, touched, rows = 0.0, 0.0, []
+        for k in range(market.n - 1):
+            universe = cr.universe_at(market, volume, k)
+            target = universe if variant == "STATIC_CARRY" else [
+                s for s in universe if complete[s, k] and signal[s, k] > 0]
+            for s in target:
+                p0, s0 = market.perp_open[s, k], market.spot_open[s, k]
+                p1, s1 = market.perp_open[s, k + 1], market.spot_open[s, k + 1]
+                if not (math.isfinite(p1) and math.isfinite(s1)):
+                    continue
+                r = (s1 / s0 - 1) * 100 - (p1 / p0 - 1) * 100 + market.funding[s, k] * 100
+                total += r / cr.UNIVERSE_SIZE
+                if zero[s, k] or zero[s, k + 1]:
+                    touched += r / cr.UNIVERSE_SIZE
+                    rows.append((r, _day(market.grid_open[k]), market.symbols[s]))
+        rows.sort()
+        out[variant] = {
+            "book_total_pct": round(total, 2),
+            "periods": len(rows),
+            "contribution_pct": round(touched, 2),
+            "without_pct": round(total - touched, 2),
+            "worst": [{"time": d, "symbol": sym, "total_pct": round(r, 2)} for r, d, sym in rows[:top]],
+        }
+    return out
+
+
 def _plain(value):
     """numpy scalars (np.int64 from counting np.bool_, np.float64 from round) as JSON-safe Python types."""
 
@@ -144,6 +189,7 @@ def audit(market: cr.CarryMarket, *, top: int = 25) -> dict:
             "negative": sum(p.funding_pct < 0 for p in extremes),
             "worst": [asdict(p) for p in sorted(extremes, key=lambda p: p.funding_pct)[:top]],
         },
+        "zero_volume": zero_volume_impact(market),
         "can_authorize_trade": False,
     })
 
@@ -171,6 +217,14 @@ def print_audit(report: dict) -> None:
     print(f"funding prints ≥{FUNDING_EXTREME_PCT}%/8h on held pairs: {fx['count']} ({fx['negative']} negative)")
     for p in fx["worst"][:15]:
         print(f"  {p['time']} {p['symbol']:<16} funding {p['funding_pct']:+.3f}% basis {p['basis_pct']:+.2f}")
+    zv = report["zero_volume"]
+    print(f"zero-volume perp candles (frozen after settlement/delisting): {zv['candles']} in {len(zv['symbols'])} symbols")
+    for variant in cr.VARIANTS:
+        info = zv[variant]
+        print(f"  {variant}: book {info['book_total_pct']:+.2f}% · {info['periods']} periods touch them, "
+              f"contribution {info['contribution_pct']:+.2f}% · without them {info['without_pct']:+.2f}%")
+        for row in info["worst"][:8]:
+            print(f"     {row['time']} {row['symbol']:<16}{row['total_pct']:+9.2f}")
 
 
 def _cli(argv: Iterable[str] | None = None) -> int:
