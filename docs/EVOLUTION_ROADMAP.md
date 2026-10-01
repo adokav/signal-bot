@@ -270,12 +270,17 @@ dönem 2019-04 → 2020-09. LOSERS@1g **NEGATIVE** (maliyet sonrası sepete gör
 Kimlik kuralından kaçan BULL/BEAR/PAX çıkarılınca da sonuç aynı. Ayrıntı:
 `docs/REVERSAL_REPLAY_REPORT.md`.
 
-**Sonraki iş:** (1) carry veri denetimi (`carry_audit`, tanılayıcı; STATIC'in
-−83% düşüşünün kaynağı). Sonra, `docs/EDGE_RESEARCH.md` sırasıyla: (2) yeni
+**Carry veri denetimi (2026-10-01):** STATIC'in −83% düşüşünün yaklaşık
+yarısı veri artefaktı: borsadan kalkan perp'lerin hacimsiz, fiyatı donmuş
+mumları replay'de ölü bir hedge'i canlı tutuyor (LUNA, FTT, ALPACA). Kalan
+yarı gerçek sıkışma ve uç negatif funding riski. SIGNED etkilenmiyor.
+Ayrıntı: `docs/CARRY_REPLAY_REPORT.md`.
+
+**Sonraki iş:** `docs/EDGE_RESEARCH.md` sırasıyla: (1) yeni
 listeleme kohortu (kayıptan kaçınma; canlı yeni listeleme radarının
-`HOT/BUILDING` etiketleri hiç test edilmedi); (3) zorunlu satış (açık
-pozisyon + fiyat çöküşü) sonrası toparlanma; (4) BTC saat etkisinin yayın
-sonrası testi; (5) haftalık kesitsel momentum. Maker emirli carry ancak
+`HOT/BUILDING` etiketleri hiç test edilmedi); (2) zorunlu satış (açık
+pozisyon + fiyat çöküşü) sonrası toparlanma; (3) BTC saat etkisinin yayın
+sonrası testi; (4) haftalık kesitsel momentum. Maker emirli carry ancak
 ileri kayıt funding'in risksiz getirinin üstüne çıktığını gösterirse.
 Her yeni hipotez deneme kaydına önceden girer; deneme sayısı arttıkça çıta
 yükselir.
