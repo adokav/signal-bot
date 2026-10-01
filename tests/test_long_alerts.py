@@ -162,12 +162,14 @@ def test_entries_without_a_plan_are_not_tracked_and_trim_keeps_open_ones():
 def test_texts_show_levels_status_and_no_authority():
     entry = _entry()
     text = la.alert_text(entry, icon="⛔", title="LONG SİNYALİ", evidence="Geçmiş test: NEGATIVE")
-    for needle in ("XUSDT", "Hard stop", "Pozisyon", "REJECT (zararda)", "Emir yetkisi yok", "<pre>"):
+    for needle in ("XUSDT", "Hard stop", "Pozisyon", "REJECT", "Kapı nedeni:</b> geçmiş test NEGATIVE",
+                   "Emir yetkisi yok", "<pre>"):
         assert needle in text
     stopped = dict(entry, status=la.STOPPED, exit_price=9.5, result_pct=-5.0, closed_at=NOW + H)
     assert "-5.0" in la.stop_alert_text(stopped)
     radar = la.format_radar([entry, stopped], now=NOW + H)
     assert "RADAR KAYDI" in radar and "açık" in radar and "stop %-5.0" in radar and "stop 9.5000" in radar
+    assert radar.count("XUSDT".removesuffix("USDT") + "        REJECT") == 2   # every row keeps its gate status
     assert "1 kapanmış kayıt" in la.summary_line([stopped], now=NOW + H)
 
 
@@ -333,7 +335,15 @@ def test_alert_html_escapes_untrusted_text_and_falls_back_to_plain(monkeypatch):
 def test_radar_log_stays_under_the_telegram_limit():
     rows = [dict(_entry(NOW - i * 60, symbol=f"COIN{i:03d}USDT")) for i in range(120)]
     text = la.format_radar(rows, now=NOW)
-    assert len(text) < 4096 and "+80 eski kayıt daha" in text
+    assert len(text) < 4096 and "+90 eski kayıt daha" in text
+
+
+def test_alert_shows_the_gate_s_own_reason_not_a_fixed_meaning():
+    stale = dict(_entry(), detail="Durum: REJECT — veri bayat (son mum 900 sn önce)")
+    text = la.alert_text(stale, icon="⛔", title="LONG", evidence="Geçmiş test: NEGATIVE")
+    assert "Kapı nedeni:</b> veri bayat (son mum 900 sn önce)" in text and "zararda" not in text
+    bare = dict(_entry(), gate_status="WATCH", detail="Durum: WATCH")
+    assert "Kapı nedeni" not in la.alert_text(bare, icon="👀", title="LONG", evidence="e")
 
 
 def test_small_prices_use_four_significant_digits():
