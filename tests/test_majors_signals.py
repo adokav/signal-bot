@@ -80,6 +80,33 @@ def test_download_plan_covers_lookbacks_and_starts_oi_at_its_coverage():
     assert min(days["BTCUSDT"]) == date(2024, 2, 9) and max(days["BTCUSDT"]) == date(2024, 2, 28)
 
 
+def _fake_downloads(monkeypatch, taker_value=600.0):
+    monkeypatch.setattr(md, "fetch_taker", lambda session, perp, months, decision_at: (
+        [(T0, 10.0, 1000.0, taker_value)], {"missing_months": [], "rejected_rows": 0}))
+    monkeypatch.setattr(md, "fetch_oi", lambda session, perp, days, decision_at: (
+        [(T0, 5.0)], {"missing_days": 0, "rejected_rows": 0, "outside_day_rows": 0}))
+
+
+def test_perp_data_is_one_verifiable_generation(tmp_path, monkeypatch):
+    feb, mar = 1_706_745_600, 1_709_251_200
+    args = ({feb: ["BTCUSDT"]}, {feb: mar}, {"BTCUSDT": "BTCUSDT"}, tmp_path)
+    _fake_downloads(monkeypatch)
+    md.build_perp_data(*args, decision_at=mar, oi_from=feb, session=object())
+    assert md.verify_generation(tmp_path, decision_at=mar)["universes"] == {str(feb): ["BTCUSDT"]}
+    with pytest.raises(md.carry.DataQualityError):
+        md.verify_generation(tmp_path, decision_at=mar + 1)                 # built for another cut-off
+    kept = (tmp_path / md.TAKER_FILE).read_bytes()
+    _fake_downloads(monkeypatch, taker_value=700.0)
+    md.build_perp_data(*args, decision_at=mar, oi_from=feb, session=object())
+    (tmp_path / md.OI_FILE).write_bytes((tmp_path / md.OI_FILE).read_bytes() + b"\n")  # an OI file from elsewhere
+    with pytest.raises(md.carry.DataQualityError):
+        md.verify_generation(tmp_path, decision_at=mar)
+    (tmp_path / md.MANIFEST_FILE).unlink()                                   # interrupted before the manifest
+    (tmp_path / md.TAKER_FILE).write_bytes(kept)
+    with pytest.raises(md.carry.DataQualityError):
+        md.verify_generation(tmp_path, decision_at=mar)
+
+
 # ---------------------------------------------------------------------------
 # Features: point in time
 # ---------------------------------------------------------------------------
@@ -225,6 +252,18 @@ def test_outcomes_start_at_the_next_open_and_a_swap_gap_is_unknown():
     assert thin is None                                # fewer than BASKET_MIN known members
 
 
+def test_a_pair_resuming_on_the_entry_bar_is_not_an_outcome():
+    flat = _rows(T0, 20 * 96)
+    i = 5 * 96 - 1
+    resumed = flat[: i - 2 * 96] + [r[:2] + tuple(x * 1000 for x in r[2:6]) + r[6:] for r in flat[i + 1:]]
+    series = {"BACKUSDT": resumed, **{f"F{k}USDT": flat for k in range(8)}}
+    market = lr.build_market({s: lr.rows_to_columns(r) for s, r in series.items()})
+    breaks = ms.wm.continuity_breaks(market)
+    assert int(breaks[market.index_of["BACKUSDT"]][0]) == i + 1          # trading resumes at the entry bar
+    returns, _ = ms.outcomes(market, [market.index_of[s] for s in series], i, 24, breaks)
+    assert math.isnan(returns[0])
+
+
 # ---------------------------------------------------------------------------
 # Candidate selection and verdicts (rules fixed before results)
 # ---------------------------------------------------------------------------
@@ -276,11 +315,14 @@ def test_completeness_fails_closed():
     assert ms.incomplete(empty, "F", 24)                                   # nothing measured is not "complete"
     row = {"F": None, "T": "T_NEUTRAL", "O": None, "in_O": False, "gross_24": 1.0, "basket_24": 0.5,
            "gross_72": None, "basket_72": None}
-    stats = ms.completeness([row], {T0: ["BTCUSDT"] * 12})
+    stats = ms.completeness([row], {T0: ["BTCUSDT", "ETHUSDT"] + [f"A{k:02d}USDT" for k in range(10)]})
     assert "unknown F 100.0%" in ms.incomplete(stats, "F", 24)
     assert ms.incomplete(stats, "T", 24) == []
     assert any(p.startswith("missing outcome") for p in ms.incomplete(stats, "T", 72))
     assert ms.completeness([row], {T0: ["BTCUSDT"] * 11})["short_month_share"] == 1.0
+    no_eth = {T0: ["BTCUSDT"] + [f"A{k:02d}USDT" for k in range(12)]}            # 13 names, ETH missing
+    stats = ms.completeness([row], no_eth)
+    assert stats["short_month_share"] == 0.0 and "1 months without BTC and ETH" in ms.incomplete(stats, "T", 24)
 
 
 # ---------------------------------------------------------------------------

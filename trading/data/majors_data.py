@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import hashlib
 import json
 import math
 from concurrent.futures import ThreadPoolExecutor
@@ -45,6 +46,8 @@ MEMES = frozenset({
     "1000SATS", "1MBABYDOGE", "DOGS", "PNUT", "ACT", "TRUMP", "PENGU",
 })
 
+SCHEMA = "majors-perp-data/v2"
+TAKER_FILE, OI_FILE, MANIFEST_FILE = "perp_taker_1h.csv.gz", "oi_5m.csv.gz", "manifest.json"
 TAKER_COLUMNS = ("spot_symbol", "perp_symbol", "multiplier", "open_time", "close", "quote_volume", "taker_buy_quote")
 OI_COLUMNS = ("spot_symbol", "perp_symbol", "create_time", "sum_open_interest")
 HOUR = 3600
@@ -231,7 +234,13 @@ def build_perp_data(
     session: requests.Session | None = None,
     workers: int = 16,
 ) -> dict:
-    """Download taker klines and OI for every member; write CSVs and a manifest atomically."""
+    """Download taker klines and OI for every member as one verifiable generation.
+
+    Both CSVs are written under temporary names; the manifest, written last,
+    records their SHA-256. ``verify_generation`` refuses a directory whose
+    files do not match its manifest, so an interrupted rebuild (new taker
+    file, old OI file, old manifest) can never be analysed as healthy.
+    """
 
     session = session or _pooled_session()
     months, days = plan_downloads(memberships, oi_from=oi_from, month_end=month_end)
@@ -247,7 +256,8 @@ def build_perp_data(
         return spot, perp, taker, oi, taker_report, oi_report
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    tmp_taker, tmp_oi = out_dir / "perp_taker_1h.csv.gz.tmp", out_dir / "oi_5m.csv.gz.tmp"
+    (out_dir / MANIFEST_FILE).unlink(missing_ok=True)           # no manifest while files are replaced
+    tmp_taker, tmp_oi = out_dir / (TAKER_FILE + ".tmp"), out_dir / (OI_FILE + ".tmp")
     report: dict[str, dict] = {}
     with gzip.open(tmp_taker, "wt", newline="", encoding="utf-8") as th, \
             gzip.open(tmp_oi, "wt", newline="", encoding="utf-8") as oh, \
@@ -264,18 +274,45 @@ def build_perp_data(
                 "taker_months_requested": len(months.get(spot, ())), "oi_days_requested": len(days.get(spot, ())),
                 **{f"taker_{k}": v for k, v in taker_report.items()}, **{f"oi_{k}": v for k, v in oi_report.items()},
             }
-    tmp_taker.replace(out_dir / "perp_taker_1h.csv.gz")
-    tmp_oi.replace(out_dir / "oi_5m.csv.gz")
+    tmp_taker.replace(out_dir / TAKER_FILE)
+    tmp_oi.replace(out_dir / OI_FILE)
     manifest = {
-        "schema": "majors-perp-data/v1",
+        "schema": SCHEMA,
         "decision_at": decision_at,
         "oi_from": oi_from,
+        "universes": {str(k): list(v) for k, v in sorted(memberships.items())},
+        "sha256": {name: _sha256(out_dir / name) for name in (TAKER_FILE, OI_FILE)},
         "pairs": report,
         "can_authorize_trade": False,
     }
-    tmp = out_dir / "manifest.json.tmp"
+    tmp = out_dir / (MANIFEST_FILE + ".tmp")
     tmp.write_text(json.dumps(manifest, indent=1, sort_keys=True), "utf-8")
-    tmp.replace(out_dir / "manifest.json")
+    tmp.replace(out_dir / MANIFEST_FILE)
+    return manifest
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_generation(data_dir: Path, *, decision_at: int) -> dict:
+    """The manifest, if the directory is one complete generation built as of ``decision_at``; else raise."""
+
+    path = data_dir / MANIFEST_FILE
+    if not path.exists():
+        raise carry.DataQualityError("perp data has no manifest: incomplete or interrupted build")
+    manifest = json.loads(path.read_text("utf-8"))
+    if manifest.get("schema") != SCHEMA:
+        raise carry.DataQualityError(f"perp data schema {manifest.get('schema')!r}, expected {SCHEMA}")
+    if manifest.get("decision_at") != decision_at:
+        raise carry.DataQualityError("perp data was built for a different cut-off")
+    for name in (TAKER_FILE, OI_FILE):
+        if not (data_dir / name).exists() or _sha256(data_dir / name) != manifest.get("sha256", {}).get(name):
+            raise carry.DataQualityError(f"{name} does not match the manifest: mixed or partial generation")
     return manifest
 
 

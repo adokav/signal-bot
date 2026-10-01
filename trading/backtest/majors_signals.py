@@ -274,7 +274,8 @@ def outcomes(market: lr.Market, members: Sequence[int], i: int, hours: int,
     bars = hours * 3600 // BAR
     returns, _ = lr.forward_returns(market, members, i, bars)
     for k, s in enumerate(members):
-        if not wm.continuous(breaks, s, i + 1, i + bars):
+        # from the decision bar: a pair resuming on the entry bar was not tradable when the signal formed
+        if not wm.continuous(breaks, s, i, i + bars):
             returns[k] = np.nan
     known = returns[np.isfinite(returns)]
     return returns, (float(known.mean()) if len(known) >= BASKET_MIN else None)
@@ -401,6 +402,7 @@ def completeness(rows: Sequence[Mapping[str, Any]], monthly: Mapping[int, Sequen
     out: dict[str, Any] = {
         "coin_days": len(rows),
         "short_month_share": (sum(len(m) < MIN_MEMBERS for m in monthly.values()) / len(monthly)) if monthly else 1.0,
+        "months_missing_fixed": sum(not set(FIXED) <= set(m) for m in monthly.values()),
     }
     for family in FAMILIES:
         scope = family_rows(rows, family)
@@ -420,6 +422,8 @@ def incomplete(stats: Mapping[str, Any], family: str, h: int) -> list[str]:
         problems.append(f"missing outcome {stats[f'missing_outcome_{h}']:.1%}")
     if stats["short_month_share"] > MAX_SHORT_MONTHS:
         problems.append(f"short months {stats['short_month_share']:.1%}")
+    if stats["months_missing_fixed"]:
+        problems.append(f"{stats['months_missing_fixed']} months without BTC and ETH")
     return problems
 
 
@@ -572,16 +576,18 @@ def build_perp(spot_dir: Path, out_dir: Path, *, window: tuple[int, int], end: i
     starts = sorted(monthly)
     month_end = {m: (starts[k + 1] if k + 1 < len(starts) else window[1]) for k, m in enumerate(starts)}
     manifest = build_perp_data(monthly, month_end, perp_of, out_dir, decision_at=end, oi_from=max(OI_FROM, window[0]))
-    (out_dir / "universes.json").write_text(json.dumps({str(k): v for k, v in monthly.items()}, indent=1), "utf-8")
     return {"months": len(monthly), "pairs": len(manifest["pairs"])}
 
 
 def run(spot_dir: Path, perp_dir: Path, *, window: tuple[int, int], end: int, alpha: float,
         half_at: int) -> dict[str, Any]:
-    from trading.data.majors_data import load_oi, load_taker
+    from trading.data.majors_data import load_oi, load_taker, verify_generation
 
+    built = verify_generation(perp_dir, decision_at=end)          # one complete generation for this cut-off
     market, excluded, funding, perp_of, funding_times = load_inputs(spot_dir, end=end)
     monthly = universes(market, window, perp_of=perp_of, funding_times=funding_times)
+    if built["universes"] != {str(k): list(v) for k, v in sorted(monthly.items())}:
+        raise SystemExit("perp data was downloaded for a different universe; rebuild it")
     rows = coin_day_rows(market, monthly, window, funding=funding, taker=load_taker(perp_dir), oi=load_oi(perp_dir))
     stats = completeness(rows, monthly)
     results = []
