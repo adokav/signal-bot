@@ -240,7 +240,7 @@ def test_rejected_setup_is_recorded_but_not_pushed(monkeypatch, tmp_path):
 def test_rejected_alerts_can_be_re_enabled_and_say_reject(monkeypatch, tmp_path):
     sent, _ = _scan(monkeypatch, tmp_path, "BREAKOUT_RETEST", rejected_alerts=True)
     assert len(sent) == 1 and sent[0].startswith("⛔") and "REJECT" in sent[0]
-    assert "geçmiş test NEGATIVE" in sent[0]
+    assert "Kapı nedeni" in sent[0] and "geçmiş test NEGATIVE" in sent[0]
 
 
 def test_watch_setup_is_still_pushed(monkeypatch, tmp_path):
