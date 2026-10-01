@@ -184,6 +184,21 @@ def test_delisting_exits_at_last_close_and_late_windows_are_left_out():
     assert gone.ended_before_entry == {"7d": 1}
 
 
+def test_maintenance_holes_use_the_next_candle_within_six_hours():
+    cols = _cols(START, 60 * 24, lambda i: 10.0 + i * 0.01)
+    entry_i = 24                                       # first trade at bar 0, entry +24h
+    keep = np.ones(60 * 24, dtype=bool)
+    keep[entry_i:entry_i + 3] = False                  # 3-hour maintenance hole at the entry
+    short = {k: v[keep] for k, v in cols.items()}
+    row = next(r for r in lp.observations({"X": lp.clean_series(short)}, _btc(), data_end=START + 400 * D).rows
+               if r.entry == "24h" and r.horizon == "30d")
+    assert row.gross_pct == pytest.approx(((10.0 + (24 + 720) * 0.01) / (10.0 + 27 * 0.01) - 1) * 100)
+    keep[entry_i:entry_i + 8] = False                  # 8 hours: longer than the tolerance
+    long_hole = {k: v[keep] for k, v in cols.items()}
+    obs = lp.observations({"X": lp.clean_series(long_hole)}, _btc(), data_end=START + 400 * D)
+    assert obs.unresolvable.get("24h@30d") == 1
+
+
 def test_future_candles_cannot_change_entry_features_or_earlier_outcomes():
     base = _cols(START, 120 * 24, lambda i: 10.0 * (1 + 0.002 * math.sin(i / 7)))
     poisoned = {k: v.copy() for k, v in base.items()}
@@ -251,7 +266,7 @@ def test_month_cluster_ci_resamples_months():
 
 def test_diagnostic_bands_follow_the_live_radar_thresholds():
     assert lp.pump_band(81) == "pump>80%" and lp.pump_band(80) == "pump-35..80%" and lp.pump_band(-36) == "pump<-35%"
-    assert lp.volume_band(1e6) == "vol24<5M" and lp.volume_band(6e6) == "vol24 5-50M" and lp.volume_band(6e7) == "vol24>50M"
+    assert lp.volume_band(1e6) == "vol<5M" and lp.volume_band(6e6) == "vol 5-50M" and lp.volume_band(6e7) == "vol>50M"
 
 
 # ---------------------------------------------------------------------------

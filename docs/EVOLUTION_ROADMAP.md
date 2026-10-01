@@ -276,9 +276,15 @@ mumları replay'de ölü bir hedge'i canlı tutuyor (LUNA, FTT, ALPACA). Kalan
 yarı gerçek sıkışma ve uç negatif funding riski. SIGNED etkilenmiyor.
 Ayrıntı: `docs/CARRY_REPLAY_REPORT.md`.
 
-**Sonraki iş:** `docs/EDGE_RESEARCH.md` sırasıyla: (1) yeni
-listeleme kohortu (kayıptan kaçınma; canlı yeni listeleme radarının
-`HOT/BUILDING` etiketleri hiç test edilmedi); (2) zorunlu satış (açık
+**Yeni listeleme kohortu (ön-kayıtlı, 2026-10-01):** trial `2381d2ac70c38a52`,
+`docs/LISTING_REPLAY_REPORT.md`, workflow `listing_replay`. Kaçınma iddiası:
+yeni Binance USDT listelemesini +1s/+24s/+7g'de alıp 30/90 gün tutmak brüt
+olarak para kaybettiriyor ve BTC'nin gerisinde kalıyor mu? AVOID_CONFIRMED
+çıkarsa canlı MEXC yeni listeleme radarı HOT/BUILDING adaylarını fırsat
+olarak göstermez (ayrı PR, parmak izli kanıt dosyası).
+
+**Sonraki iş:** (1) `listing_replay` koşusu ve sonucu; sonra
+`docs/EDGE_RESEARCH.md` sırasıyla (2) zorunlu satış (açık
 pozisyon + fiyat çöküşü) sonrası toparlanma; (3) BTC saat etkisinin yayın
 sonrası testi; (4) haftalık kesitsel momentum. Maker emirli carry ancak
 ileri kayıt funding'in risksiz getirinin üstüne çıktığını gösterirse.

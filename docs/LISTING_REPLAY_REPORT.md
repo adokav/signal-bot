@@ -2,8 +2,8 @@
 
 **Ön-kayıt tarihi:** 2026-10-01. Bu belge ve karar kuralları **hiçbir sonuç
 görülmeden** yazıldı.
-**Deneme:** `new_listing_avoidance_spot` ailesi (`research/trials/registry.jsonl`).
-Trial kimliği ve parmak izi kayıttadır.
+**Deneme:** `new_listing_avoidance_spot` ailesi, trial `2381d2ac70c38a52`
+(`research/trials/registry.jsonl`), kod parmak izi `a7ca652e76ee1c02`.
 **Kod:** `trading/data/binance_history_identity.py`,
 `trading/data/binance_listings.py`, `trading/backtest/listing_replay.py`,
 `trading/strategies/listing_dossier.py`, workflow `listing_replay`.
@@ -40,9 +40,15 @@ Test edilen iddia bir long stratejisi değil, bir **kaçınma** iddiası:
     EOS→A, RNDR→RENDER, KLAY→KAIA. Her birinde eski çiftin bittiği ay, yeni
     çiftin başladığı ay ya da bir önceki ay olmalı. Bu, liste yazılırken
     S3 listelemesiyle doğrulandı ve her derlemede yeniden kontrol edilir.
-- **Ön inceleme:** Yalnızca sayımlar incelendi, getiri hesaplanmadı. Pencerede
-  yaklaşık 390 yeni varlık listelemesi var; dışlamalardan sonra yaklaşık
-  320 kalıyor.
+- **Ön inceleme (smoke test, 2026-10-01):** Yalnızca sayımlar ve veri
+  kalitesi incelendi, getiri hesaplanmadı.
+  - Pencere 2020-10 → 2026-08: 400 yeni listeleme.
+  - Dışlananlar: 60'ı daha önce başka bir kotasyonla listelenmiş, 31'i
+    ticker değişikliği, 16 kaldıraçlı, 14 stabil coin, 4 başka varlığa
+    bağlı token, 1 emtia tokeni.
+  - 32 ticker değişikliğinin hepsi veriyle "OK".
+  - Son aylarda listelenenlerin 30/90 günlük penceresi henüz dolmadığı
+    için bu coin'ler ilgili testlere girmez.
 - **Mumlar:** Her listeleme için ilk ay dahil 5 aylık 1 saatlik mum.
   Karşılaştırma için tüm pencerede BTCUSDT 1 saatlik mum.
 - **Veri sonu:** BTCUSDT'nin yayımlanmış son ayının son saniyesi. Sonrası
@@ -55,6 +61,11 @@ Test edilen iddia bir long stratejisi değil, bir **kaçınma** iddiası:
   saatin mumunun açılışı.
 - **Tutma süreleri (2):** 30 gün ve 90 gün. Çıkış fiyatı, çıkış saatindeki
   mumun açılışı.
+- **Bakım boşlukları:** O saatte mum yoksa, 6 saat içinde açılan ilk mum
+  kullanılır. Daha uzun boşluk "çözümsüz" sayılır ve raporlanır.
+  - Bu kural ön-kayıttan önce, yalnızca veri kalitesine bakılarak eklendi.
+  - Smoke test verisinde 261 boşluğun 257'si en fazla 6 saat; medyan 2 saat.
+  - Getiri hesaplanmadı.
 - **Borsadan kalkma:** Çıkıştan önce verisi biten coin son kapanış
   fiyatından çıkar.
 - **Eksik pencere:** Çıkış saati veri sonundan sonraya düşen gözlem
@@ -122,6 +133,10 @@ Diğer durumlar:
 - **Ortalama ve kuyruk:** Ağır sağ kuyruk ortalamayı medyandan çok yukarı
   çekebilir. Karar ortalamaya dayanır, yani bütün listelemeleri eşit
   ağırlıkla alan bir portföye. Medyan ayrıca raporlanır.
+- **Aynı ay içindeki sıra:** "Daha önce başka kotasyonla listelenmiş" kontrolü
+  ay düzeyindedir. Aynı ay içinde önce BTC, sonra USDT çifti açılmışsa coin
+  yeni listeleme sayılır; ilk işlem anı USDT çiftinden alınır. Binance yeni
+  coin'lerde çiftleri genellikle aynı anda açar.
 - **Ticker değişiklik listesi:** Elle, bilgiye dayanarak yazıldı ve veriyle
   doğrulandı. Listede olmayan bir isim değişikliği "yeni listeleme"
   sayılır. Bu, sonucu sıfıra doğru çeker, yani kaçınma iddiasının aleyhine

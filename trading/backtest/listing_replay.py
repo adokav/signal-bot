@@ -45,7 +45,8 @@ FAMILY_ALPHA = 0.05 / (len(ENTRY_OFFSETS) * len(HORIZONS))
 MIN_LISTINGS = 100
 CROWDED_PUMP_PCT = 80.0       # live radar: first pump > 80% -> CROWDED ("kovalama yasak")
 HEAVY_SELL_PCT = -35.0        # live radar: < -35% -> "listeleme sonrası ağır satış"
-VOLUME_BANDS = (5e6, 50e6)    # first-24h quote volume bands (USD), fixed in advance
+VOLUME_BANDS = (5e6, 50e6)    # quote volume traded before entry (USD), fixed in advance
+PRICE_TOLERANCE = 6 * HOUR    # exchange maintenance leaves 1-4h holes; a longer hole is unresolvable
 BENCHMARK = "BTCUSDT"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -144,10 +145,10 @@ class Observation:
 
 
 def _price_at(series: Series, when: int) -> float | None:
-    """Open of the candle that opens exactly at ``when`` (hour grid); None if there is none."""
+    """Open of the first candle opening in [when, when + PRICE_TOLERANCE]; None if there is none."""
 
     i = int(np.searchsorted(series.open_time, when))
-    if i < len(series.open_time) and series.open_time[i] == when:
+    if i < len(series.open_time) and series.open_time[i] - when <= PRICE_TOLERANCE:
         return float(series.open[i])
     return None
 
@@ -307,10 +308,10 @@ def pump_band(pump_pct: float) -> str:
 def volume_band(volume: float) -> str:
     low, high = VOLUME_BANDS
     if volume < low:
-        return "vol24<5M"
+        return "vol<5M"
     if volume < high:
-        return "vol24 5-50M"
-    return "vol24>50M"
+        return "vol 5-50M"
+    return "vol>50M"
 
 
 # ---------------------------------------------------------------------------
@@ -375,8 +376,9 @@ def run_replay(listings: Mapping[str, Series], btc: Series, *, data_end: int, co
         "Karar brüt getiriyle (komisyon ve kayma yok): kayıp iddiası için muhafazakâr seçim; net değerler ayrıca.",
         f"Karşılaştırma: aynı giriş-çıkış saatlerinde BTCUSDT. Güven aralığı listeleme ayına göre küme bootstrap, "
         f"Bonferroni α={FAMILY_ALPHA:.4f} (6 test).",
-        "Giriş: ilk işlem mumunun açılışından +1s / +24s / +7g sonraki saatlik mumun açılışı. Borsadan kalkan coin "
-        "son kapanıştan çıkar; çıkışı veri sonundan sonraya düşen gözlem alınmaz.",
+        "Giriş: ilk işlem mumunun açılışından +1s / +24s / +7g sonraki saatlik mumun açılışı (bakım boşluğunda "
+        "6 saat içindeki ilk mum). Borsadan kalkan coin son kapanıştan çıkar; çıkışı veri sonundan sonraya düşen "
+        "gözlem alınmaz.",
         "Kanıt Binance listelemeleri içindir; canlı radar MEXC'de çalışır ve MEXC daha erken, daha riskli coin listeler.",
     ]
     rejected = sum(s.rejected for s in listings.values()) + btc.rejected
@@ -425,6 +427,7 @@ def replay_trial_params(*, fingerprint: str, costs: ListingCosts) -> dict:
     return {
         "engine_fingerprint": fingerprint,
         "entries_seconds": dict(ENTRY_OFFSETS), "horizons_seconds": dict(HORIZONS),
+        "price_tolerance_seconds": PRICE_TOLERANCE,
         "benchmark": BENCHMARK, "window_start": "2020-10", "min_listings": MIN_LISTINGS,
         "family_alpha": FAMILY_ALPHA, "decision_on": "gross_return_and_excess_vs_btc",
         "costs": asdict(costs), "outcome": "avoid_confirmed_if_upper_bounds_below_zero_and_both_halves_negative",
