@@ -22,6 +22,7 @@ a positive one. No order authority anywhere (AGENTS.md §4, §8, §10).
 
 from __future__ import annotations
 
+import html
 import math
 import statistics
 from dataclasses import asdict, dataclass
@@ -243,49 +244,109 @@ def _clock(ts: int) -> str:
 
 def _num(value: float) -> str:
     value = float(value)
+    if value >= 10_000:
+        return f"{value:,.0f}"
     if value >= 100:
         return f"{value:,.2f}"
     if value >= 1:
         return f"{value:.4f}"
-    return f"{value:.8f}".rstrip("0")
+    if value <= 0:
+        return f"{value:g}"
+    return f"{value:.{min(12, 3 - math.floor(math.log10(value)))}f}"   # 4 significant digits
 
 
-def plan_lines(plan: Mapping[str, Any] | None) -> list[str]:
+# Telegram shows a <pre> block in a monospace font; rows stay within ~32
+# characters so a phone screen does not wrap them.
+LABEL_WIDTH = 12
+GATE_MEANING = {"REJECT": "zararda", "WATCH": "kanıt yok"}
+RULE = "─" * 24
+FOOTER = "Stop zararı sınırlar; geçmişi negatif bir sinyali kârlı yapmaz. Emir yetkisi yok, karar senin."
+
+
+def esc(value: Any) -> str:
+    """Escape untrusted text for Telegram HTML (symbols, provider fields, evidence lines)."""
+
+    return html.escape(str(value), quote=False)
+
+
+Row = tuple[str, str] | None
+
+
+def table(rows: Iterable[Row]) -> str:
+    """Two-column monospace block; ``None`` draws a rule. Everything inside is escaped."""
+
+    lines = [RULE if row is None else f"{row[0]:<{LABEL_WIDTH}}{row[1]}".rstrip() for row in rows]
+    return "<pre>" + esc("\n".join(lines)) + "</pre>"
+
+
+def plan_rows(plan: Mapping[str, Any] | None, *, zone: Row = None, targets: Sequence[Row] = ()) -> list[Row]:
+    """Price, entry zone (tactical), invalidation, hard stop, targets (tactical), ATR, position share."""
+
     if not plan:
-        return ["Stop: hesaplanamadı (kapanmış 1 saatlik mum verisi yok) — bu sinyalle işlem yapılmamalı"]
-    lines = [
-        f"Uyarı fiyatı: {_num(plan['entry_price'])}",
-        f"Teknik geçersizlik (son 12 saatin dibi): {_num(plan['technical_invalidation'])}",
-        f"Hard stop: {_num(plan['hard_stop'])} (−%{plan['stop_pct']:.1f}"
-        + (f"; ATR %{plan['atr_pct']:.1f})" if plan.get("atr_pct") is not None else ")"),
-        f"%{RISK_PER_TRADE_PCT:g} hesap riski için pozisyon payı: sermayenin %{plan['position_pct']:.0f} kadarı",
+        return [("Stop", "hesaplanamadı"), *([zone] if zone else []), *targets]
+    rows: list[Row] = [("Fiyat", _num(plan["entry_price"]))]
+    if zone:
+        rows.append(zone)
+    rows += [
+        ("Geçersizlik", _num(plan["technical_invalidation"])),
+        ("Hard stop", f"{_num(plan['hard_stop'])}  −%{plan['stop_pct']:.1f}"),
+        *targets,
     ]
-    lines += [f"⚠️ {w}" for w in plan.get("warnings") or ()]
-    return lines
+    if plan.get("atr_pct") is not None:
+        rows.append(("ATR (1s)", f"%{plan['atr_pct']:.1f}"))
+    rows.append(("Pozisyon", f"%{plan['position_pct']:.0f} sermaye"))
+    return rows
 
 
-def alert_text(entry: Mapping[str, Any], *, headline: str, evidence: str,
-               extra_lines: Sequence[str] = ()) -> str:
+def plan_notes(plan: Mapping[str, Any] | None, *, invalidation: str = "son 12 saatin dibi") -> list[str]:
+    if not plan:
+        return ["⚠️ Stop hesaplanamadı (veri yok ya da fiyat stop'un altında): bu sinyalle işlem yapılmamalı."]
+    notes = [
+        f"Geçersizlik: {invalidation}. Pozisyon: hard stop'ta sermayenin "
+        f"%{RISK_PER_TRADE_PCT:g}'i riske girecek büyüklük."
+    ]
+    return notes + [f"⚠️ {w}" for w in plan.get("warnings") or ()]
+
+
+def alert_text(entry: Mapping[str, Any], *, icon: str, title: str, evidence: str, head_rows: Sequence[Row] = (),
+               zone: Row = None, targets: Sequence[Row] = (), fact_rows: Sequence[Row] = (),
+               notes: Sequence[str] = (), invalidation: str = "son 12 saatin dibi") -> str:
+    """Telegram HTML for one long signal: header, one table, then evidence and caveats."""
+
     source = SOURCE_LABELS.get(str(entry.get("source")), str(entry.get("source")))
-    lines = [
-        f"{headline}",
-        f"{entry['symbol']} · {source} · {_clock(int(entry['opened_at']))} TSİ",
-        str(entry.get("detail") or f"Durum: {entry.get('gate_status')}"),
-        *plan_lines(entry.get("plan")),
-        *extra_lines,
-        evidence,
-        "Stop zararı sınırlar, geçmişi negatif bir sinyali kârlı yapmaz. Emir yetkisi yok; karar senin.",
+    plan = entry.get("plan")
+    status = str(entry.get("gate_status") or "?")
+    rows: list[Row] = [("Kanıt", f"{status} ({GATE_MEANING[status]})" if status in GATE_MEANING else status),
+                       *head_rows, None,
+                       *plan_rows(plan, zone=zone, targets=targets)]
+    if fact_rows:
+        rows += [None, *fact_rows]
+    parts = [
+        f"{esc(icon)} <b>{esc(title)}</b>",
+        f"<b>{esc(entry['symbol'])}</b> · {esc(source)} · {esc(_clock(int(entry['opened_at'])))} TSİ",
+        table(rows),
+        *(esc(n) for n in (*plan_notes(plan, invalidation=invalidation), *notes) if n),
+        f"<i>{esc(evidence)}</i>",
+        esc(FOOTER),
     ]
-    return "\n".join(line for line in lines if line)
+    return "\n".join(parts)
 
 
 def stop_alert_text(entry: Mapping[str, Any]) -> str:
     source = SOURCE_LABELS.get(str(entry.get("source")), str(entry.get("source")))
-    return (
-        f"🛑 {entry['symbol']} ({source}) hard stop seviyesine indi\n"
-        f"Uyarı {_clock(int(entry['opened_at']))} TSİ · fiyat {_num(entry['entry_price'])} → çıkış "
-        f"{_num(entry['exit_price'])} (%{float(entry['result_pct']):+.1f})"
-    )
+    plan = entry.get("plan") or {}
+    rows: list[Row] = [
+        ("Uyarı", f"{_clock(int(entry['opened_at']))} TSİ"),
+        ("Giriş", _num(entry["entry_price"])),
+        ("Hard stop", _num(plan["hard_stop"]) if plan else "?"),
+        ("Çıkış", _num(entry["exit_price"])),
+        ("Sonuç", f"%{float(entry['result_pct']):+.1f}"),
+    ]
+    return "\n".join([
+        f"🛑 <b>STOP · {esc(entry['symbol'])}</b> · {esc(source)}",
+        table(rows),
+        esc("Çıkış stop fiyatından; mum stop'un altında açıldıysa açılış fiyatından. Maliyet hariç."),
+    ])
 
 
 def _status_label(entry: Mapping[str, Any]) -> str:
@@ -293,13 +354,13 @@ def _status_label(entry: Mapping[str, Any]) -> str:
     if status == OPEN:
         last, price = float(entry.get("last_price") or 0), float(entry.get("entry_price") or 0)
         change = (last / price - 1.0) * 100.0 if price else 0.0
-        return f"açık · son kapanış {_num(last)} (%{change:+.1f})"
+        return f"açık %{change:+.1f}"
     if status == STOPPED:
-        return f"🛑 stop (%{float(entry['result_pct']):+.1f})"
+        return f"stop %{float(entry['result_pct']):+.1f}"
     if entry.get("plan") is None:
-        return "stop hesaplanamadı"
-    note = f" · {entry['note']}" if entry.get("note") else ""
-    return f"72 saat doldu (%{float(entry['result_pct']):+.1f}){note}"
+        return "stop yok"
+    mark = "*" if entry.get("note") else ""
+    return f"72s %{float(entry['result_pct']):+.1f}{mark}"
 
 
 def summary_line(log: Sequence[Mapping[str, Any]], *, now: int, days: int = 30) -> str:
@@ -315,21 +376,31 @@ def summary_line(log: Sequence[Mapping[str, Any]], *, now: int, days: int = 30) 
     )
 
 
-def format_radar(log: Sequence[Mapping[str, Any]], *, now: int, hours: int = TRACK_HOURS) -> str:
-    recent = [e for e in log if e.get("status") == OPEN or now - int(e.get("opened_at") or 0) <= hours * 3_600]
-    lines = ["📋 RADAR KAYDI — son 72 saat", ""]
-    if not recent:
-        lines.append("Bu sürede radara giren long sinyali yok.")
-    for e in sorted(recent, key=lambda e: int(e.get("opened_at") or 0), reverse=True):
-        source = SOURCE_LABELS.get(str(e.get("source")), str(e.get("source")))
-        plan = e.get("plan") or {}
-        stop = f" · stop {_num(plan['hard_stop'])} (−%{plan['stop_pct']:.1f})" if plan else ""
-        lines.append(
-            f"{_clock(int(e['opened_at']))} {e['symbol']} · {source} · {e.get('gate_status')} · "
-            f"giriş {_num(e['entry_price']) if e.get('entry_price') else '?'}{stop}"
-        )
-        lines.append(f"   {_status_label(e)}")
-    lines += ["", summary_line(log, now=now),
-              "Stop kontrolü kapanmış 15 dk mumlarının dibiyle yapılır. Emir yetkisi yok."]
-    return "\n".join(lines)
+RADAR_ROWS = 40   # two lines each; keeps /radar well under Telegram's 4096 characters
 
+
+def format_radar(log: Sequence[Mapping[str, Any]], *, now: int, hours: int = TRACK_HOURS) -> str:
+    """Telegram HTML: one block per signal (time, coin, source, result; then entry and stop)."""
+
+    recent = [e for e in log if e.get("status") == OPEN or now - int(e.get("opened_at") or 0) <= hours * 3_600]
+    parts = [f"📋 <b>RADAR KAYDI</b> · son {hours} saat"]
+    if not recent:
+        parts.append("Bu sürede radara giren long sinyali yok.")
+    else:
+        lines = []
+        newest = sorted(recent, key=lambda e: int(e.get("opened_at") or 0), reverse=True)
+        for e in newest[:RADAR_ROWS]:
+            source = "T" if e.get("source") == "TAKTIK" else "L"
+            coin = str(e.get("symbol") or "?").removesuffix("USDT")[:8]
+            plan = e.get("plan") or {}
+            price = _num(e["entry_price"]) if e.get("entry_price") else "?"
+            stop = _num(plan["hard_stop"]) if plan else "yok"
+            lines.append(f"{_clock(int(e['opened_at']))} {source} {coin:<8} {_status_label(e)}")
+            lines.append(f"  giriş {price} · stop {stop}")
+        if len(newest) > RADAR_ROWS:
+            lines.append(f"+{len(newest) - RADAR_ROWS} eski kayıt daha")
+        parts.append("<pre>" + esc("\n".join(lines)) + "</pre>")
+        parts.append(esc("L: Likit-100, T: taktik (BTC/ETH). 72s: 72 saat doldu; * takip verisi eksikti."))
+    parts += [esc(summary_line(log, now=now)),
+              esc("Stop kontrolü kapanmış 15 dk mumlarının dibiyle yapılır. Emir yetkisi yok.")]
+    return "\n".join(parts)

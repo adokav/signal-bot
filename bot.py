@@ -1,6 +1,7 @@
 """Signal Bot v5 Core: MEXC research radars without order authority."""
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -181,9 +182,17 @@ def _api(method: str, payload: dict[str, Any] | None = None) -> Any:
     return body.get("result")
 
 
-def send(text: str, *, keyboard: dict[str, Any] | None = None) -> None:
+def _plain(text: str) -> str:
+    """Telegram HTML reduced to plain text (fallback when Telegram rejects the markup)."""
+
+    return html.unescape(re.sub(r"</?(?:b|i|pre|code)>", "", text))
+
+
+def send(text: str, *, keyboard: dict[str, Any] | None = None, html_mode: bool = False) -> None:
+    """Send a message. ``html_mode`` texts must escape every untrusted value (long_alerts.esc)."""
+
     if not TOKEN or not CHAT_ID:
-        log.info("Telegram kapalı: %s", text.replace("\n", " | ")[:180])
+        log.info("Telegram kapalı: %s", (_plain(text) if html_mode else text).replace("\n", " | ")[:180])
         return
     payload: dict[str, Any] = {
         "chat_id": CHAT_ID,
@@ -192,7 +201,17 @@ def send(text: str, *, keyboard: dict[str, Any] | None = None) -> None:
     }
     if keyboard:
         payload["reply_markup"] = keyboard
-    _api("sendMessage", payload)
+    if not html_mode:
+        _api("sendMessage", payload)
+        return
+    try:
+        _api("sendMessage", dict(payload, parse_mode="HTML"))
+    except RuntimeError as exc:
+        # A markup error must not swallow the alert: send the same text without formatting.
+        if not str(exc).startswith(("telegram_http_400", "telegram_api_error")):
+            raise
+        log.warning("HTML mesaj reddedildi, düz metin gönderiliyor: %s", exc)
+        _api("sendMessage", dict(payload, text=_plain(text)[:4096]))
 
 
 def panel_keyboard() -> dict[str, Any]:
@@ -288,6 +307,28 @@ def _fundamental_lines(fundamental: dict[str, Any] | None, *, indent: str = "   
     if dates:
         lines.append(f"{indent}Tarih: " + " · ".join(dates))
     return lines
+
+
+def _fundamental_rows(fundamental: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """The same facts as table rows for alerts; missing data is named, never shown as zero."""
+
+    f = fundamental or {}
+    if f.get("status") != "READY":
+        return [("Arz/ATH", str(f.get("status") or "DATA_PENDING"))]
+    circulating = _quantity(f.get("circulating_supply"))
+    if f.get("circulation_pct") is not None:
+        circulating += f" · %{float(f['circulation_pct']):.0f}"
+    rows = [
+        ("Dolaşan arz", circulating),
+        ("Toplam arz", _quantity(f.get("total_supply"))),
+        ("Max arz", _quantity(f.get("max_supply"), missing="açıklanmamış")),
+    ]
+    for label, prefix in (("ATH", "ath"), ("ATL", "atl")):
+        rows.append((label, f"{_price(f.get(prefix + '_price_usd'))} · {_pct(f.get(prefix + '_change_pct'))}"))
+        if f.get(prefix + "_date"):
+            day = str(f[prefix + "_date"])[:10]
+            rows.append((f"{label} tarihi", ".".join(reversed(day.split("-"))) if len(day) == 10 else day))
+    return rows
 
 
 def _tactical_fundamentals(symbols: Any) -> dict[str, dict[str, Any]]:
@@ -551,16 +592,16 @@ def _liquid_radar(snapshot: dict[str, Any]) -> None:
         for entry in opened:
             icon = "⛔" if entry["gate_status"] == "REJECT" else "👀"
             messages.append(long_alerts.alert_text(
-                entry, headline=f"{icon} LONG SİNYALİ — Likit-100 İlk 3 (#{entry['rank']}, radar puanı "
-                                f"{entry['radar_score']}/100)", evidence=liquid_evidence_line(),
-                extra_lines=_fundamental_lines(entry.get("fundamentals"), indent=""),
+                entry, icon=icon, title=f"LONG SİNYALİ · Likit-100 #{entry['rank']}", evidence=liquid_evidence_line(),
+                head_rows=[("Radar puanı", f"{entry['radar_score']}/100")],
+                fact_rows=_fundamental_rows(entry.get("fundamentals")),
             ))
     for entry in stopped:
         if (LIQUID_LONG_ALERTS if entry["source"] == "LIKIT100" else TACTICAL_ALERTS):
             messages.append(long_alerts.stop_alert_text(entry))
     for message in messages:
         try:
-            send(message, keyboard=panel_keyboard())
+            send(message, keyboard=panel_keyboard(), html_mode=True)
         except Exception:
             log.warning("Long uyarısı gönderilemedi", exc_info=True)
 
@@ -616,6 +657,44 @@ def _tactical_radar_entry(market: Any, item: dict[str, Any], decision: Any, now:
     return plan
 
 
+SETUP_LABELS = {
+    "TREND_PULLBACK": "Trend geri çekilme",
+    "BREAKOUT_RETEST": "Kırılım retest",
+    "RANGE_RECLAIM": "Aralık geri alma",
+    "LIQUIDITY_SWEEP_RECLAIM": "Likidite süpürme",
+}
+STRUCTURE_LABELS = {"BULLISH": "yükseliş", "BEARISH": "düşüş", "RANGE_OR_TRANSITION": "yatay"}
+
+
+def _tactical_alert(item: dict[str, Any], decision: Any, plan: long_alerts.StopPlan | None, now: int) -> Any:
+    """Alert builder; the fundamentals rows are fetched later, outside the state lock."""
+
+    symbol = str(item.get("symbol") or "?")
+    setup = str(item.get("setup") or "-")
+    levels = item.get("plan") or {}
+    icon = "⛔" if decision.status == "REJECT" else "👀"
+    entry = {"symbol": symbol, "source": "TAKTIK", "opened_at": now, "gate_status": decision.status,
+             "plan": plan.to_dict() if plan else None}
+    zone = ("Giriş", f"{long_alerts._num(levels['entry_low'])} – {long_alerts._num(levels['entry_high'])}") \
+        if levels.get("entry_low") and levels.get("entry_high") else None
+    targets = [
+        (f"Hedef {k}", f"{long_alerts._num(levels[f'target_{k}'])} · R/R {float(levels.get(f'net_rr_{k}') or 0):.1f}")
+        for k in (1, 2) if levels.get(f"target_{k}")
+    ]
+    risks = [str(r) for r in item.get("risk_flags") or []]
+    head = [("Setup", SETUP_LABELS.get(setup, setup)),
+            ("Durum", f"{item.get('state')} · 4s {STRUCTURE_LABELS.get(str(item.get('structure_4h')), '?')}")]
+
+    def render(fact_rows: list[tuple[str, str]]) -> str:
+        return long_alerts.alert_text(
+            entry, icon=icon, title="LONG SİNYALİ · Taktik", evidence=evidence_line(setup), head_rows=head,
+            zone=zone, targets=targets, fact_rows=fact_rows, invalidation="motorun teknik seviyesi",
+            notes=[*([f"Risk: {', '.join(risks)}"] if risks else []),
+                   "Sinyal bazında kalibre olasılık: YOK (aşağıdaki oran aile ortalamasıdır)."],
+        )
+    return render
+
+
 def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
     try:
         market = TACTICAL_DATA.snapshot()
@@ -627,7 +706,7 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
             STATE["tactical_last_error"] = error
             _save_state()
         return None
-    alerts: list[tuple[str | None, str]] = []
+    alerts: list[tuple[str | None, Any]] = []
     now = int(time.time())
     with LOCK:
         previous = dict(STATE.get("tactical_last_states") or {})
@@ -645,20 +724,13 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
                 plan = _tactical_radar_entry(market, item, decision, now)
                 if decision.status == "REJECT" and not TACTICAL_REJECTED_ALERTS:
                     continue
-                icon = "⛔" if decision.status == "REJECT" else "👀"
-                sizing = (
-                    f"\nUyarı fiyatı {plan.entry_price:g} · %{long_alerts.RISK_PER_TRADE_PCT:g} hesap riski için "
-                    f"pozisyon payı: sermayenin %{plan.position_pct:.0f} kadarı (hard stop'a göre)"
-                    if plan else "\nPozisyon payı hesaplanamadı (fiyat stop'un altında ya da veri yok)"
-                )
-                alerts.append((symbol,
-                    f"{icon} {symbol} setup {state} — {decision.status}\nSetup: {setup}\n"
-                    + format_tactical({"assessments": [item]}) + sizing
-                ))
+                alerts.append((symbol, _tactical_alert(item, decision, plan, now)))
             elif old and old.split(":", 1)[0] in {"READY", "TRIGGERED"} and state == "NO_LONG":
                 if family_disqualified(old.split(":", 1)[1]) and not TACTICAL_REJECTED_ALERTS:
                     continue  # its opening alert was never sent
-                alerts.append((None, f"⚠️ {symbol} Long formasyonu bozuldu.\nNeden: {', '.join(item.get('reasons') or ['NO_VALID_SETUP'])}"))
+                reasons = ", ".join(str(r) for r in item.get("reasons") or ["NO_VALID_SETUP"])
+                alerts.append((None, f"⚠️ <b>{long_alerts.esc(symbol)}</b> Long formasyonu bozuldu.\n"
+                                     f"Neden: {long_alerts.esc(reasons)}"))
         _update_forward_ledger(market, new_setups)
         STATE["tactical_snapshot"] = report
         STATE["tactical_last_states"] = current
@@ -667,10 +739,9 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
     if emit_alerts and TACTICAL_ALERTS and alerts:
         facts = _tactical_fundamentals(symbol for symbol, _ in alerts if symbol)
         for symbol, alert in alerts:
-            if symbol:
-                alert += "\n" + "\n".join(_fundamental_lines(facts.get(symbol), indent=""))
+            text = alert(_fundamental_rows(facts.get(symbol))) if callable(alert) else alert
             try:
-                send(alert, keyboard=panel_keyboard())
+                send(text, keyboard=panel_keyboard(), html_mode=True)
             except Exception:
                 log.warning("Taktik uyarı gönderilemedi", exc_info=True)
     return report
@@ -711,7 +782,7 @@ def handle(action: str) -> None:
     elif action == "RADAR":
         with LOCK:
             rows = [dict(e) for e in STATE.get("radar_log") or []]
-        send(long_alerts.format_radar(rows, now=int(time.time())), keyboard=panel_keyboard())
+        send(long_alerts.format_radar(rows, now=int(time.time())), keyboard=panel_keyboard(), html_mode=True)
     elif action == "STATUS":
         send(format_status(snapshot), keyboard=panel_keyboard())
     elif action == "SCAN":
