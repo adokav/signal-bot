@@ -264,13 +264,15 @@ def plan_lines(plan: Mapping[str, Any] | None) -> list[str]:
     return lines
 
 
-def alert_text(entry: Mapping[str, Any], *, headline: str, evidence: str) -> str:
+def alert_text(entry: Mapping[str, Any], *, headline: str, evidence: str,
+               extra_lines: Sequence[str] = ()) -> str:
     source = SOURCE_LABELS.get(str(entry.get("source")), str(entry.get("source")))
     lines = [
         f"{headline}",
         f"{entry['symbol']} · {source} · {_clock(int(entry['opened_at']))} TSİ",
         str(entry.get("detail") or f"Durum: {entry.get('gate_status')}"),
         *plan_lines(entry.get("plan")),
+        *extra_lines,
         evidence,
         "Stop zararı sınırlar, geçmişi negatif bir sinyali kârlı yapmaz. Emir yetkisi yok; karar senin.",
     ]
