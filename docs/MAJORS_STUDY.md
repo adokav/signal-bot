@@ -338,3 +338,12 @@ maliyet). Bir grubun sepeti yenmesi için maliyeti de aşması gerekir.
 - Bu, önceki BTC/ETH testleriyle (Faz A, taktik replay) tutarlı. Sinyalsiz
   bir majör sepeti tutmak, test edilen bütün sinyalli versiyonlardan daha iyi
   ya da onlara eşit sonuç verdi.
+
+**Not (2026-10-01, atlas incelemesi):**
+
+- Evren kuralı, veri setinin ilk gününde işlem gören her coini 90 günlük geçmişi tamamlamış sayıyordu. Keşif verisi 2020-10-01'de başladığı için 2020-11 ve 2020-12 evrenlerine 90 günden genç coinler girdi:
+  - 2020-11: DOT, UNI, YFI, YFII;
+  - 2020-12: UNI.
+- Bu, 46 keşif ayının 2'sinde, toplam yaklaşık 600 üye-aydan 5'inde görülür. Keşif sonucu zaten aday çıkarmamıştı; kayıtlı sonuçlar değiştirilmedi.
+- Doğrulama penceresi etkilenmez. Doğrulama verisi 2024-06'da başlıyor ve ilk evren 2024-09'da kuruluyor. Veri setinin başında görülen her coin o tarihte en az 92 günlüktür.
+- Atlas, coin yaşını veri setleri arasında taşıyarak bu durumu düzeltir (`monthly_universe(..., history_start=...)`, `docs/ATLAS.md`).

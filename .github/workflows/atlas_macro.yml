@@ -1,10 +1,12 @@
 name: atlas_macro
 
 # Manual-trigger research job for docs/ATLAS.md: downloads public FRED series
-# (rates, real rate, Fed funds target, Fed balance sheet, Treasury account,
-# reverse repo, dollar, VIX, equities, M2) for 2016..2024-08 and writes the
-# monthly macro table. Nothing after 2024-08-31 is requested (the
-# 2024-09..2026-08 confirmation window stays sealed). No API key, no secrets.
+# that are not revised after publication (rates, real rate, Fed funds target,
+# Fed balance sheet, Treasury account, reverse repo, EUR/USD, VIX, equities)
+# for 2016..2024-08 and writes the monthly macro table. Nothing after
+# 2024-08-31 is requested (the 2024-09..2026-08 confirmation window stays
+# sealed); revised series stay out, as their current vintage would carry
+# revisions published inside it. No API key, no secrets.
 #
 # Research only: no order authority, does not touch the production bot.
 

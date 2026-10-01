@@ -144,11 +144,16 @@ def perp_live(times: np.ndarray | None, start: int) -> bool:
 
 def monthly_universe(market: lr.Market, start: int, *, perp_of: Mapping[str, str],
                      funding_times: Mapping[str, np.ndarray], first_trade: np.ndarray,
-                     breaks: wm.Breaks, require_perp: bool = True) -> list[str]:
+                     breaks: wm.Breaks, require_perp: bool = True, history_start: int | None = None) -> list[str]:
     """Members for the month opening at ``start`` (docs/MAJORS_STUDY.md), from data visible then.
 
     ``require_perp=False`` drops the live-perpetual condition: before 2019-09
     Binance had no USDⓈ-M perpetuals (docs/TRADE_LOOP_STUDY.md, pre-history test).
+
+    A pair trading at the start of the data counts as seasoned, since its
+    listing is older than the data. ``history_start`` moves that point back
+    when ``first_trade`` carries listing times from older data (the atlas
+    joins two datasets); by default it is the market's first bar.
     """
 
     i = decision_bar(market, start)
@@ -158,7 +163,7 @@ def monthly_universe(market: lr.Market, start: int, *, perp_of: Mapping[str, str
     window = slice(lo, i + 1)
     volume = np.nansum(market.quote_volume[:, window], axis=1)
     days = np.isfinite(market.close[:, window]).reshape(len(market.symbols), VOLUME_DAYS, lr.DAY_BARS).any(axis=2)
-    data_start = int(market.grid_open[0])
+    data_start = int(market.grid_open[0]) if history_start is None else history_start
     eligible = []
     for s, symbol in enumerate(market.symbols):
         if days[s].sum() < MIN_VOLUME_DAYS:

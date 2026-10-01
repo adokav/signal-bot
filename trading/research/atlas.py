@@ -12,12 +12,13 @@ Layers:
   the point-in-time majors universe (BTC, ETH, top 10 by 30-day volume,
   largest meme; no perpetual condition, as perpetuals start in 2019-09),
   returns, volatility, drawdown, correlation, breadth, BTC's volume share;
-- **macro** (FRED, latest vintage, downloaded in GitHub Actions because this
-  container cannot reach FRED): rates, the real rate, the Fed funds target,
-  the Fed balance sheet, the Treasury account, reverse repo, the dollar, VIX,
-  equities and M2. Latest-vintage values are fine for description but are
-  not point in time: a hypothesis built on them must be tested with the
-  revision-aware ``macro_backfill`` data;
+- **macro** (FRED, downloaded in GitHub Actions because this container
+  cannot reach FRED): rates, the real rate, the Fed funds target, the Fed
+  balance sheet, the Treasury account, reverse repo, EUR/USD, VIX and
+  equities. FRED serves the current vintage, so only series that are not
+  revised after publication are used (``FRED_SERIES``); revised ones (M2,
+  the trade-weighted dollar, ...) would leak revisions published in the
+  sealed window and stay out until they come from ALFRED vintages;
 - **calendar**: halvings and Fed rate changes (both known when they happen),
   plus a short list of crypto shocks that are only known in hindsight and
   are shown as context, never used as inputs.
@@ -46,20 +47,25 @@ ATLAS_START = 1_504_224_000          # 2017-09-01
 ATLAS_END = 1_725_148_800            # 2024-09-01: the confirmation window starts here and stays sealed
 DAY = 86_400
 
+# Only series that are not revised after publication: market prices and rates,
+# policy settings and operational records. FRED serves the current vintage, so a
+# revised series (M2, the trade-weighted dollar, GDP, CPI, payrolls) would carry
+# revisions published inside the sealed 2024-09..2026-08 window back into the
+# atlas. Those stay out until they come from ALFRED vintages as of 2024-08-31.
 FRED_SERIES = {
-    "us_2y": "DGS2",
+    "us_2y": "DGS2",                  # Treasury yields (H.15): market rates
     "us_10y": "DGS10",
     "us_10y_real": "DFII10",
-    "fed_upper": "DFEDTARU",
-    "fed_assets_musd": "WALCL",       # millions of US dollars, weekly (Wednesday)
-    "tga_busd": "WTREGEN",            # billions of US dollars, weekly
-    "rrp_busd": "RRPONTSYD",          # billions of US dollars, daily
-    "usd_broad": "DTWEXBGS",
+    "fed_upper": "DFEDTARU",          # policy setting
+    "fed_assets_musd": "WALCL",       # H.4.1 record, millions of US dollars, weekly (Wednesday)
+    "tga_busd": "WTREGEN",            # H.4.1 record, billions of US dollars, weekly
+    "rrp_busd": "RRPONTSYD",          # NY Fed operation results, billions of US dollars, daily
+    "eur_usd": "DEXUSEU",             # H.10 noon rate, US dollars per euro: a falling value is a stronger dollar
     "vix": "VIXCLS",
     "nasdaq": "NASDAQCOM",
     "sp500": "SP500",
-    "m2_busd": "M2SL",                # billions of US dollars, monthly, revised
 }
+REVISED_SERIES = frozenset({"M2SL", "DTWEXBGS", "GDP", "GDPC1", "CPIAUCSL", "PCEPI", "PAYEMS", "UNRATE", "INDPRO"})
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 MAX_STALE_DAYS = 40                    # a month-end value older than this is missing, not carried
 
@@ -167,7 +173,7 @@ def macro_monthly(series: Mapping[str, Sequence[tuple[date, float]]], months: Se
     for month_end in months:
         row: dict[str, Any] = {"month": month_end.strftime("%Y-%m")}
         for name, rows in series.items():
-            row[name] = value_at(rows, month_end, max_stale=60 if name == "m2_busd" else MAX_STALE_DAYS)
+            row[name] = value_at(rows, month_end)
         assets, tga, rrp = row.get("fed_assets_musd"), row.get("tga_busd"), row.get("rrp_busd")
         row["net_liquidity_busd"] = (assets / 1000.0 - tga - rrp) if None not in (assets, tga, rrp) else None
         y2, y10 = row.get("us_2y"), row.get("us_10y")
@@ -176,11 +182,11 @@ def macro_monthly(series: Mapping[str, Sequence[tuple[date, float]]], months: Se
         moves = [(d, v) for d, v in series.get("fed_upper", ()) if first <= d <= month_end]
         before = value_at(series.get("fed_upper", ()), first - timedelta(days=1), max_stale=10)
         row["fed_move_bp"] = (round((moves[-1][1] - before) * 100) if moves and before is not None else None)
-        for name in ("us_10y_real", "net_liquidity_busd", "usd_broad", "vix", "nasdaq", "us_2y", "m2_busd"):
+        for name in ("us_10y_real", "net_liquidity_busd", "eur_usd", "vix", "nasdaq", "us_2y"):
             now, then = row.get(name), (prev or {}).get(name)
             if now is None or then is None:
                 row[f"{name}_chg"] = None
-            elif name in {"nasdaq", "usd_broad", "m2_busd"}:
+            elif name in {"nasdaq", "eur_usd"}:
                 row[f"{name}_chg"] = (now / then - 1.0) * 100.0
             else:
                 row[f"{name}_chg"] = now - then
@@ -274,6 +280,38 @@ def _daily_close(close: np.ndarray, bars: int) -> np.ndarray:
     return np.where(ok.any(axis=2), out, np.nan)
 
 
+def market_history(markets: Sequence[Any]) -> list[tuple[np.ndarray, dict[int, np.ndarray]]]:
+    """Per contiguous market, oldest first: each pair's listing time and its breaks.
+
+    The listing time comes from all older data, not just this market, so a
+    coin listed shortly before a dataset boundary is not seasoned by it. A
+    pair first seen in a later dataset counts as listed when that dataset
+    first shows it (conservative: its older history is not in the data).
+    Breaks are pair-specific holes of more than a day, inside the market
+    (``atlas_breaks``) or across its junction with the older ones.
+    """
+
+    from trading.backtest import majors_signals as ms
+
+    out: list[tuple[np.ndarray, dict[int, np.ndarray]]] = []
+    last_seen: dict[str, int] = {}
+    listed: dict[str, int] = {}
+    for market in markets:
+        breaks = atlas_breaks(market)
+        for s, bars in _junction_gaps(market, last_seen).items():
+            breaks[s] = np.union1d(breaks.get(s, np.array([], dtype=np.int64)), bars).astype(np.int64)
+        local = ms.first_trade_times(market)
+        first = np.array([listed.get(symbol, int(local[s])) for s, symbol in enumerate(market.symbols)],
+                         dtype=np.int64)
+        out.append((first, breaks))
+        for s, symbol in enumerate(market.symbols):
+            seen = np.nonzero(np.isfinite(market.close[s]))[0]
+            if len(seen):
+                last_seen[symbol] = int(market.grid_open[seen[-1]])
+                listed[symbol] = ms.listed_since(market, s, np.iinfo(np.int64).max, first, breaks)
+    return out
+
+
 def build_panel(markets: Sequence[Any], *, start: int = ATLAS_START, end: int = ATLAS_END) -> Panel:
     """Daily closes and volumes of every pair over [start, end), from contiguous 15m markets, oldest first.
 
@@ -290,8 +328,7 @@ def build_panel(markets: Sequence[Any], *, start: int = ATLAS_START, end: int = 
     close = np.full((len(symbols), n_days), np.nan)
     volume = np.full((len(symbols), n_days), np.nan)
     resumed = np.zeros((len(symbols), n_days), dtype=bool)
-    last_seen: dict[str, int] = {}                  # open time of each pair's last known bar in earlier markets
-    for market in markets:
+    for market, (_, breaks) in zip(markets, market_history(markets)):
         day0 = int(market.grid_open[0])
         if day0 % DAY:
             raise ValueError("the 15m grid must start at 00:00 UTC")
@@ -302,25 +339,19 @@ def build_panel(markets: Sequence[Any], *, start: int = ATLAS_START, end: int = 
         known = np.isfinite(market.close[:, : days * lr.DAY_BARS].reshape(shape)).any(axis=2)
         offset = (day0 - start) // DAY
         lo, hi = max(0, -offset), min(days, n_days - offset)
-        breaks = atlas_breaks(market)
-        junction = _junction_gaps(market, last_seen)
         for s, symbol in enumerate(market.symbols):
             g = index[symbol]
             close[g, offset + lo: offset + hi] = closes[s, lo:hi]
             volume[g, offset + lo: offset + hi] = np.where(known[s, lo:hi], vols[s, lo:hi], np.nan)
-            for bar in [*breaks.get(s, ()), *junction.get(s, ())]:
+            for bar in breaks.get(s, ()):
                 d = int(bar) // lr.DAY_BARS + offset
                 if 0 <= d < n_days:
                     resumed[g, d] = True
-        for s, symbol in enumerate(market.symbols):
-            seen = np.nonzero(np.isfinite(market.close[s]))[0]
-            if len(seen):
-                last_seen[symbol] = int(market.grid_open[seen[-1]])
     return Panel(symbols, start, close, volume, resumed)
 
 
-def _junction_gaps(market: Any, last_seen: Mapping[str, int]) -> dict[int, list[int]]:
-    """First bars of pairs whose data resumes in ``market`` more than a day after an earlier market last saw them.
+def _junction_gaps(market: Any, last_seen: Mapping[str, int]) -> dict[int, np.ndarray]:
+    """First bars of pairs whose data resumes in ``market`` more than a day after an older market last saw them.
 
     A gap BTC shares at the junction is an exchange-wide halt, like in ``atlas_breaks``.
     """
@@ -340,7 +371,7 @@ def _junction_gaps(market: Any, last_seen: Mapping[str, int]) -> dict[int, list[
             continue
         shared = btc is not None and abs(g[0] - btc[0]) * 900 <= DAY and abs(g[1] - btc[1]) <= DAY
         if not shared:
-            out[s] = [g[0]]
+            out[s] = np.array([g[0]], dtype=np.int64)
     return out
 
 
@@ -377,6 +408,38 @@ def _month_slices(panel: Panel) -> list[tuple[str, int, int]]:
     return out
 
 
+def member_return(panel: Panel, s: int, a: int, b: int) -> float | None:
+    """Return (%) of holding pair ``s`` from the close before day ``a`` to the close of day ``b``.
+
+    Predeclared treatment, so a member that fails is never silently dropped:
+    - a pair that stops trading for good inside the month is sold at its last
+      close (LUNA in 2022-05: about -100 %, not a missing value);
+    - a pair whose data resumes after a pair-specific hole (a possible token
+      swap) is sold at the old token's last close before the hole;
+    - a pair with no close at the month end that trades again later without
+      a break, or with no close before the month, is unknown (None).
+    """
+
+    if a < 1:
+        return None
+    close = panel.close[s]
+    c0 = close[a - 1]
+    if not np.isfinite(c0):
+        return None
+    resumed = np.nonzero(panel.resumed[s, a:b + 1])[0]
+    if len(resumed):
+        exit_at = a + int(resumed[0])                                   # first day of the new token
+    elif np.isfinite(close[b]):
+        return float((close[b] / c0 - 1.0) * 100.0)
+    elif np.isfinite(close[b + 1:]).any():
+        return None                                                     # a hole at the month end, not an exit
+    else:
+        exit_at = b + 1                                                 # stopped for good
+    seg = close[a - 1:exit_at]
+    last = seg[np.isfinite(seg)][-1]
+    return float((last / c0 - 1.0) * 100.0)
+
+
 def market_monthly(panel: Panel, universes: Mapping[str, Sequence[str]]) -> list[dict]:
     """One row per month: BTC, the equal-weight majors basket, volatility, correlation, breadth, volume share."""
 
@@ -393,24 +456,26 @@ def market_monthly(panel: Panel, universes: Mapping[str, Sequence[str]]) -> list
         row: dict[str, Any] = {"month": month, "members": len(members), "universe": " ".join(m[:-4] for m in members)}
 
         def month_return(s: int) -> float | None:
-            if a < 1 or panel.resumed[s, a:b + 1].any():
-                return None
-            c0, c1 = panel.close[s, a - 1], panel.close[s, b]
-            return float((c1 / c0 - 1.0) * 100.0) if np.isfinite(c0) and np.isfinite(c1) else None
+            return member_return(panel, s, a, b)
 
         def vol(s: int) -> float | None:
             x = log_ret[s, a:b + 1]
             x = x[np.isfinite(x)]
             return float(x.std(ddof=1) * math.sqrt(365) * 100.0) if len(x) >= 20 else None
 
-        rets = {m: month_return(idx[m]) for m in members}
-        known = [v for v in rets.values() if v is not None]
+        # A member with no close on the day before the month cannot be bought at its start; that is
+        # visible at the decision time, so leaving it out is not hindsight. It is counted.
+        investable = [m for m in members if a >= 1 and np.isfinite(panel.close[idx[m], a - 1])]
+        row["not_trading_at_start"] = len(members) - len(investable)
+        rets = {m: month_return(idx[m]) for m in investable}
+        complete = len(rets) >= 8 and all(v is not None for v in rets.values())     # no survivor-only average
+        row["unknown_returns"] = sum(v is None for v in rets.values())
         row["btc_ret_pct"] = month_return(btc)
-        row["basket_ret_pct"] = statistics.fmean(known) if len(known) >= 8 else None
-        alts = [v for m, v in rets.items() if v is not None and m != "BTCUSDT"]
+        row["basket_ret_pct"] = statistics.fmean(rets.values()) if complete else None
+        alts = [v for m, v in rets.items() if m != "BTCUSDT"]
         row["alts_minus_btc_pct"] = (statistics.fmean(alts) - row["btc_ret_pct"]
-                                     if len(alts) >= 7 and row["btc_ret_pct"] is not None else None)
-        row["dispersion_pct"] = statistics.stdev(known) if len(known) >= 8 else None
+                                     if complete and "BTCUSDT" in rets else None)
+        row["dispersion_pct"] = statistics.stdev(rets.values()) if complete else None
         row["btc_close"] = float(panel.close[btc, b]) if np.isfinite(panel.close[btc, b]) else None
         row["btc_drawdown_pct"] = (float((panel.close[btc, b] / running_max[b] - 1.0) * 100.0)
                                    if np.isfinite(panel.close[btc, b]) and running_max[b] > 0 else None)
@@ -493,36 +558,38 @@ def phases(rows: Sequence[Mapping[str, Any]]) -> list[dict]:
             first_change = rs[0].get(f"{key}_chg")
             if a is None or b is None or first_change is None:
                 return None
-            start = a - first_change if key not in {"usd_broad", "nasdaq"} else a / (1 + first_change / 100.0)
-            return (b - start) if key not in {"usd_broad", "nasdaq"} else (b / start - 1.0) * 100.0
+            start = a - first_change if key not in {"eur_usd", "nasdaq"} else a / (1 + first_change / 100.0)
+            return (b - start) if key not in {"eur_usd", "nasdaq"} else (b / start - 1.0) * 100.0
 
         summary.append({
             "state": ph["state"], "from": rs[0]["month"], "to": rs[-1]["month"], "months": len(rs),
             "btc_ret_pct": compound("btc_ret_pct"), "basket_ret_pct": compound("basket_ret_pct"),
             "btc_vol_pct": mean("btc_vol_pct"), "avg_correlation": mean("avg_correlation"),
             "real_rate_change": change("us_10y_real"), "net_liquidity_change_busd": change("net_liquidity_busd"),
-            "usd_change_pct": change("usd_broad"), "nasdaq_change_pct": change("nasdaq"),
+            "eur_usd_change_pct": change("eur_usd"), "nasdaq_change_pct": change("nasdaq"),
             "fed_moves_bp": sum(int(r.get("fed_move_bp") or 0) for r in rs),
             "events": [r["calendar"] for r in rs if r.get("calendar")],
         })
     return summary
 
 
-def market_universes(market: Any, end: int) -> dict[str, list[str]]:
-    """Majors universe of every month the market can rank (30 days of volume), spot only, halts not breaks.
+def market_universes(market: Any, end: int, *, first_trade: np.ndarray,
+                     breaks: Mapping[int, np.ndarray]) -> dict[str, list[str]]:
+    """Majors universe of every month the market can rank (30 days of volume), spot only.
 
-    The month opening at ``end`` is included: it is ranked from data before it,
+    ``first_trade`` and ``breaks`` come from ``market_history``: listing ages
+    run across dataset boundaries and exchange-wide halts are not breaks. The
+    month opening at ``end`` is included: it is ranked from data before it,
     which lets the next dataset start without a 30-day hole.
     """
 
     from trading.backtest import majors_signals as ms
 
-    first_trade, breaks = ms.first_trade_times(market), atlas_breaks(market)
     out = {}
     for m in ms.month_starts((int(market.grid_open[0]) + 30 * DAY, min(end, ATLAS_END) + DAY)):
         label = datetime.fromtimestamp(m, tz=timezone.utc).strftime("%Y-%m")
         out[label] = ms.monthly_universe(market, m, perp_of={}, funding_times={}, first_trade=first_trade,
-                                         breaks=breaks, require_perp=False)
+                                         breaks=breaks, require_perp=False, history_start=ATLAS_START)
     return out
 
 
@@ -574,6 +641,8 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.mode == "macro":
+        if REVISED_SERIES & set(FRED_SERIES.values()):
+            raise SystemExit("a revised FRED series would carry revisions from the sealed window; use ALFRED")
         start = datetime.fromtimestamp(ATLAS_START, tz=timezone.utc).date() - timedelta(days=400)
         end = datetime.fromtimestamp(ATLAS_END - DAY, tz=timezone.utc).date()
         series = {name: fetch_fred(sid, start=start, end=end) for name, sid in FRED_SERIES.items()}
@@ -585,19 +654,19 @@ def _cli(argv: Iterable[str] | None = None) -> int:
 
     from trading.backtest import signal_quality as sq
 
-    markets, universes = [], {}
+    markets, ends, universes = [], [], {}
     for spot_dir, manifest in zip(args.spot_dir, verify_datasets(args.spot_dir)):
-        end = int(manifest["data_end"]) + 1
-        market, _, _ = sq.load_likit_market(spot_dir, end=end)
-        markets.append(market)
-        for label, members in market_universes(market, end).items():
+        ends.append(int(manifest["data_end"]) + 1)
+        markets.append(sq.load_likit_market(spot_dir, end=ends[-1])[0])
+    for market, end, (first_trade, breaks) in zip(markets, ends, market_history(markets)):
+        for label, members in market_universes(market, end, first_trade=first_trade, breaks=breaks).items():
             universes.setdefault(label, members)
     panel = build_panel(markets)
     rows = combine(market_monthly(panel, universes), read_macro(args.macro) if args.macro else {})
     args.out.parent.mkdir(parents=True, exist_ok=True)
     tmp = args.out.with_name(args.out.name + ".tmp")
     tmp.write_text(json.dumps({"rows": rows, "phases": phases(rows), "sealed_from": "2024-09",
-                               "macro": "fred-latest-vintage" if args.macro else "missing",
+                               "macro": "fred-unrevised-series" if args.macro else "missing",
                                "can_authorize_trade": False}, indent=1, default=str), "utf-8")
     tmp.replace(args.out)
     print(f"wrote {len(rows)} months and {len(phases(rows))} phases to {args.out}")

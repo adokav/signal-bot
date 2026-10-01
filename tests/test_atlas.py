@@ -192,3 +192,91 @@ def test_dataset_verification_refuses_partial_gapped_or_sealed_data(tmp_path):
         atlas.verify_datasets([a, _dataset(tmp_path, "f", ("2020-10", "2024-08"), atlas.ATLAS_END - 1, files=False)])
     with pytest.raises(SystemExit, match="no manifest"):
         atlas.verify_datasets([a, tmp_path / "none"])
+
+
+def test_only_unrevised_macro_series_are_downloaded():
+    assert not atlas.REVISED_SERIES & set(atlas.FRED_SERIES.values())     # M2, broad dollar, CPI... stay out
+    assert "M2SL" in atlas.REVISED_SERIES and "DTWEXBGS" in atlas.REVISED_SERIES
+
+
+def test_listing_age_runs_across_the_dataset_boundary():
+    from trading.backtest import majors_signals as ms
+
+    jan, apr = 1_704_067_200, 1_711_929_600                 # 2024-01-01, 2024-04-01
+    old_days, new_days = (apr - jan) // 86_400, 122         # Jan..Mar, then Apr..Jul
+    new_listed = 70                                         # NEWUSDT lists on 2024-03-11, 21 days before the boundary
+    old = _market({"BTCUSDT": _rows([100.0] * old_days, jan), "ETHUSDT": _rows([10.0] * old_days, jan),
+                   "NEWUSDT": _rows([1.0] * old_days, jan, gap=(0, new_listed))})
+    new_series = {s: _rows([p] * new_days, apr) for s, p in
+                  (("BTCUSDT", 100.0), ("ETHUSDT", 10.0), ("NEWUSDT", 1.0), ("LATEUSDT", 5.0))}
+    new = _market(new_series)
+    (_, _), (first, breaks) = atlas.market_history([old, new])
+    end = apr + new_days * 86_400
+    months = atlas.market_universes(new, end, first_trade=first, breaks=breaks)
+    assert "NEWUSDT" not in months["2024-05"] and "NEWUSDT" not in months["2024-06"]   # under 90 days old
+    assert "NEWUSDT" in months["2024-07"]                   # 2024-03-11 + 90 days = 2024-06-09
+    assert "LATEUSDT" not in months["2024-06"]              # first seen at the boundary: counted from there
+    assert "LATEUSDT" in months["2024-07"]
+    # control: ranking the new dataset on its own would have seasoned NEWUSDT at once
+    alone = ms.monthly_universe(new, 1_714_521_600, perp_of={}, funding_times={},
+                                first_trade=ms.first_trade_times(new), breaks={}, require_perp=False)
+    assert "NEWUSDT" in alone
+
+
+def test_a_failed_member_is_sold_at_its_last_close_never_dropped():
+    start = 1_704_067_200
+    days = 60
+    close = np.full((4, days), 100.0)
+    close[1, 40:] = np.nan
+    close[1, 35:40] = 1.0                                   # collapses, then stops trading for good on day 40
+    close[2, 45:] = 5000.0
+    close[2, 42:45] = np.nan                                # a swap: old token last trades on day 41
+    close[2, 38:42] = 80.0
+    close[3, 59] = np.nan                                   # no month-end close, and nothing after: stopped
+    resumed = np.zeros_like(close, dtype=bool)
+    resumed[2, 45] = True
+    panel = atlas.Panel(["A", "B", "C", "D"], start, close, close.copy(), resumed)
+    a, b = 31, 59                                           # February
+    assert atlas.member_return(panel, 0, a, b) == pytest.approx(0.0)
+    assert atlas.member_return(panel, 1, a, b) == pytest.approx(-99.0)     # not missing
+    assert atlas.member_return(panel, 2, a, b) == pytest.approx(-20.0)     # the old token's last close
+    assert atlas.member_return(panel, 3, a, b) == pytest.approx(0.0)       # last close on day 58
+    gap = close.copy()
+    gap[0, 59] = np.nan
+    gap = np.concatenate([gap, np.full((4, 1), 100.0)], axis=1)            # trades again on day 60, no break
+    held = atlas.Panel(["A", "B", "C", "D"], start, gap, gap.copy(), np.zeros_like(gap, dtype=bool))
+    assert atlas.member_return(held, 0, a, b) is None                      # a hole, not an exit: unknown
+
+
+def test_the_basket_is_unknown_when_any_member_return_is_unknown():
+    start = 1_704_067_200
+    days = 91
+    rng = np.random.default_rng(5)
+    series = {name: _rows(list(100 * np.exp(np.cumsum(rng.normal(0, 0.02, days)))), start)
+              for name in ["BTCUSDT"] + [f"C{j}USDT" for j in range(9)]}
+    series["HOLEUSDT"] = _rows([50.0] * days, start, gap=(59, 60))         # no close on 2024-02-29, trades on
+    market = _market(series)
+    panel = atlas.build_panel([market], start=start, end=start + days * 86_400)
+    members = list(series)
+    rows = atlas.market_monthly(panel, {"2024-02": members, "2024-03": members})
+    feb, mar = rows[1], rows[2]
+    assert feb["unknown_returns"] == 1 and feb["basket_ret_pct"] is None and feb["dispersion_pct"] is None
+    assert feb["alts_minus_btc_pct"] is None and feb["btc_ret_pct"] is not None
+    assert mar["not_trading_at_start"] == 1 and mar["unknown_returns"] == 0  # no close before March: left out
+    assert mar["basket_ret_pct"] is not None
+
+
+def test_a_member_not_trading_at_the_month_start_is_left_out_and_counted():
+    start = 1_704_067_200
+    days = 91
+    rng = np.random.default_rng(7)
+    series = {name: _rows(list(100 * np.exp(np.cumsum(rng.normal(0, 0.02, days)))), start)
+              for name in ["BTCUSDT"] + [f"C{j}USDT" for j in range(8)]}
+    series["GONEUSDT"] = _rows([50.0] * 55, start)                          # last trade on 2024-02-24
+    panel = atlas.build_panel([_market(series)], start=start, end=start + days * 86_400)
+    members = list(series)
+    feb, mar = atlas.market_monthly(panel, {"2024-02": members, "2024-03": members})[1:3]
+    assert feb["not_trading_at_start"] == 0 and feb["unknown_returns"] == 0
+    assert feb["basket_ret_pct"] is not None                                # GONE sold at its last close
+    assert mar["not_trading_at_start"] == 1 and mar["unknown_returns"] == 0
+    assert mar["basket_ret_pct"] is not None and mar["members"] == 10

@@ -32,9 +32,10 @@ Kod: `trading/research/atlas.py`. Makro tablo: `.github/workflows/atlas_macro.ym
 - En büyük meme coin.
 - Bir coinin evrene girmesi için en az 90 günlük geçmişi olmalı.
 
-İki fark vardır:
+Üç fark vardır:
 - **Perp şartı yoktur.** Binance'te perp 2019-09'da başladı.
 - **Borsa çapındaki duruşlar kırılma sayılmaz.** Bir coindeki boşluk BTC'de de aynı anda varsa (±1 gün), bu borsanın durmasıdır, token değişimi değildir. Örnek: Binance, 2018-02-08..10, 54 saat. Coine özgü bir boşluk ise yeni bir token gibi ele alınır. O boşluğun üzerinden getiri, trend ya da ortalama hesaplanmaz. Aynı kural iki veri setinin birleştiği yerde de uygulanır.
+- **Coin yaşı veri setleri arasında taşınır.** 90 günlük geçmiş, coinin ilk işlem gördüğü ya da son kırılmadan döndüğü tarihten sayılır; yeni veri setinin başlangıcından sayılmaz. İlk kez yeni veri setinde görülen bir coin, temkinli olarak orada listelenmiş sayılır. Bu düzeltme olmasaydı 2020-11 evrenine DOT, UNI, YFI ve YFII, 2020-12 evrenine UNI 90 günden genç olarak girerdi.
 
 **Aylık ölçüler:**
 
@@ -61,6 +62,17 @@ Kod: `trading/research/atlas.py`. Makro tablo: `.github/workflows/atlas_macro.ym
 
 Eşikler (%40 / %80, EMA200, 20 gün) yaygın kullanılan sabitlerdir. **Veriden öğrenilmedi.**
 
+**Sepet getirisi, ay başındaki bütün üyeleri tutar.** Yalnızca sona kadar yaşayanların ortalamasını almak hayatta kalma yanlılığı olurdu. Bir üye başarısız olursa önceden belirlenmiş şu kurallar uygulanır:
+
+| Durum | İşlem |
+|---|---|
+| Ay içinde bir daha açılmamak üzere kapanan çift | Son kapanışından satılır. LUNA 2022-05'te yaklaşık −%100 sayılır; eksik sayılmaz. |
+| Coine özgü bir boşluktan sonra geri dönen çift (olası token değişimi) | Eski token, boşluktan önceki son kapanışından satılır. |
+| Ay başından önceki gün hiç işlem görmemiş çift | Ay başında alınamaz. Bu karar anında görülebilen bir bilgidir, sonradan bilinen değil. Çift sepete alınmaz ve `not_trading_at_start` olarak sayılır. Örnek: 2019-12'de BCHABC. |
+| Ay sonunda kapanışı olmayan ama kırılmasız işlem görmeye devam eden çift | Sonuç bilinmez (`unknown_returns`). O ayın sepet getirisi n/a olur. |
+
+Bilinen sınır: 2018-11'deki BCH çatallanmasında BCC, çatallanma öncesindeki son kapanışından satılmış sayılır. Sahiplerine verilen ABC ve SV coinlerinin sonraki çöküşü bu hesaba girmez.
+
 **Eksik veri eksik kalır.**
 - Sepet ölçüleri en az 8 üye ister.
 - Oynaklık ve korelasyon en az 20 gün ister.
@@ -71,18 +83,25 @@ Eşikler (%40 / %80, EMA200, 20 gün) yaygın kullanılan sabitlerdir. **Veriden
 
 Seriler GitHub Actions'ta indirilir, çünkü bu konteyner FRED'e erişemiyor. API anahtarı ya da sır gerekmez.
 
-| Alan | FRED | Birim |
-|---|---|---|
-| ABD 2 yıllık / 10 yıllık faiz | DGS2 / DGS10 | % |
-| 10 yıllık reel faiz | DFII10 | % |
-| Fed politika faizi (üst sınır) | DFEDTARU | % |
-| Fed bilançosu | WALCL | milyon $ |
-| Hazine hesabı (TGA) | WTREGEN | milyar $ |
-| Ters repo (RRP) | RRPONTSYD | milyar $ |
-| Dolar endeksi (geniş) | DTWEXBGS | endeks |
-| VIX | VIXCLS | endeks |
-| Nasdaq / S&P 500 | NASDAQCOM / SP500 | endeks |
-| M2 | M2SL | milyar $ |
+**Yalnızca yayımlandıktan sonra revize edilmeyen seriler kullanılır.**
+- FRED her zaman serinin güncel sürümünü verir.
+- Revize edilen bir seri, mühürlü 2024-09 → 2026-08 penceresinde yayımlanmış düzeltmeleri geçmişe taşır. Hipotez seçimine test döneminin bilgisi sızar.
+- Bu yüzden M2, ticaret ağırlıklı dolar endeksi, GDP, CPI ve istihdam gibi seriler atlasta yoktur. Ancak 2024-08-31 itibarıyla geçerli ALFRED sürümleriyle eklenebilirler.
+- Kod bunu zorlar: `REVISED_SERIES` listesindeki bir seri istenirse `macro` komutu çalışmayı reddeder.
+
+| Alan | FRED | Birim | Neden revize edilmez |
+|---|---|---|---|
+| ABD 2 yıllık / 10 yıllık faiz | DGS2 / DGS10 | % | Piyasa faizi (H.15) |
+| 10 yıllık reel faiz | DFII10 | % | Piyasa faizi (H.15) |
+| Fed politika faizi (üst sınır) | DFEDTARU | % | Politika kararı |
+| Fed bilançosu | WALCL | milyon $ | H.4.1 kaydı |
+| Hazine hesabı (TGA) | WTREGEN | milyar $ | H.4.1 kaydı |
+| Ters repo (RRP) | RRPONTSYD | milyar $ | NY Fed işlem sonucu |
+| EUR/USD | DEXUSEU | $ / € | Piyasa kuru (H.10). Değer düşerse dolar güçleniyor demektir. |
+| VIX | VIXCLS | endeks | Piyasa verisi |
+| Nasdaq / S&P 500 | NASDAQCOM / SP500 | endeks | Piyasa verisi |
+
+H.4.1 kayıtlarında nadir düzeltmeler olabilir. Bu küçük bir artık risktir.
 
 **Türetilen alanlar:**
 - **Net likidite** = Fed bilançosu − TGA − RRP. Birimler milyar $'a çevrilir.
@@ -90,11 +109,7 @@ Seriler GitHub Actions'ta indirilir, çünkü bu konteyner FRED'e erişemiyor. A
 - **Fed hamlesi** = Ay içindeki politika faizi değişikliği, baz puan.
 
 **Sınırlar:**
-- Ay sonu değeri, o güne kadarki son gözlemdir. 40 günden eski bir gözlem kullanılmaz, eksik sayılır. M2 aylık bir seri olduğu için onda bu sınır 60 gündür.
-- **FRED'in en son sürümü kullanılır. Bu nokta-zamanlı değildir.**
-  - M2 ve bilanço gibi seriler sonradan revize edilir.
-  - M2 bir ay sonra yayımlanır.
-  - Açıklama yapmak için bu yeterlidir. Ama bu verilerden çıkan bir hipotez, revizyon geçmişini tutan `macro_backfill` verisiyle test edilmelidir.
+- Ay sonu değeri, o güne kadarki son gözlemdir. 40 günden eski bir gözlem kullanılmaz, eksik sayılır.
 - Net likidite, likiditenin kaba bir ölçüsüdür. Hazine ihracı, itfa ve SOMA vadeleri gibi akışları içermez (AGENTS.md §6).
 
 ### 3. Takvim
