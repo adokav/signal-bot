@@ -1,0 +1,96 @@
+name: carry_replay
+
+# Manual-trigger research job: builds a survivorship-free Binance perp/spot/
+# funding universe and replays the delta-neutral funding carry (long spot,
+# short USDⓈ-M perp) over 72 months, scored against the rules pre-registered
+# in docs/CARRY_REPLAY_REPORT.md.
+#
+# No inputs on purpose: the protocol is fixed before any result.
+# Research only: no order authority, does not touch the production bot.
+#
+# How to run:
+#   GitHub → Actions → carry_replay → Run workflow
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements.txt
+          -r requirements-dev.txt
+          -r requirements-trading.txt
+      - name: Build survivorship-free perp/spot/funding universe (data.binance.vision)
+        run: |
+          set -euo pipefail
+          python -m trading.data.binance_carry_universe \
+              --out research/data/carry_universe \
+              --lookback-months 72
+          du -sh research/data/carry_universe
+      - name: Run carry replay
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.carry_replay \
+              --data-dir research/data/carry_universe \
+              --out research/data/carry_replay.json \
+              --trial-registry research/trials/registry.jsonl \
+              --record-trial
+      - name: Emit run summary
+        run: |
+          set -euo pipefail
+          {
+            echo "## Funding carry replay"
+            echo ""
+            echo '```json'
+            python -c "
+          import json, pathlib
+          data = json.loads(pathlib.Path('research/data/carry_replay.json').read_text())
+          keys = ('days_with_positions', 'annual_return_pct', 'ci_family_daily', 'annual_vol_pct', 'sharpe',
+                  'max_drawdown_pct', 'worst_day_pct', 'stressed_annual_return_pct', 'first_half_annual_pct',
+                  'second_half_annual_pct', 'annual_funding_pct', 'annual_basis_pct', 'annual_cost_pct',
+                  'avg_positions', 'margin_stress', 'verdict')
+          summary = {
+              'window': [data['start_time'], data['end_time']],
+              'symbols': data['symbols'], 'periods': data['periods'], 'rejected_rows': data['rejected_rows'],
+              'engine_fingerprint': data['engine_fingerprint'],
+              'variants': {name: {k: v[k] for k in keys} for name, v in data['variants'].items()},
+              'by_year': data['by_year'],
+              'universe': {k: data['universe_manifest'].get(k) for k in ('candidates', 'downloaded', 'mapping')},
+              'stopped_pairs': len(data['universe_manifest'].get('stopped_before_window_end') or []),
+              'notes': data['notes'],
+              'can_authorize_trade': data['can_authorize_trade'],
+          }
+          print(json.dumps(summary, indent=2, ensure_ascii=False))
+          "
+            echo '```'
+            echo ""
+            echo "<details><summary>Strateji raporu (hipotez, kırılganlık, WHAT COULD BLOW UP THIS ACCOUNT?)</summary>"
+            echo ""
+            cat research/data/carry_replay.md
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: carry-replay
+          path: |
+            research/data/carry_replay.json
+            research/data/carry_replay.md
+            research/data/carry_universe/manifest.json
+            research/trials/registry.jsonl
+          retention-days: 30

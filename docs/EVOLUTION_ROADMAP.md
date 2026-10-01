@@ -254,6 +254,8 @@ Likit-100 listesi de geçemedi: survivorship'ten arındırılmış 6 yıllık re
 grubu da NEGATIVE, her yıl ve rejimde aynı yön). Canlı kapı artık REJECT
 gösteriyor. Canlıda gösterilen radarların hiçbirinin kanıtlanmış bir kenarı yok.
 
-**Sonraki iş:** karar kullanıcıda — farklı bir edge sınıfı (funding/basis,
-order-flow) ya da radarların tamamen araştırma moduna çekilmesi. Her yeni
-hipotez deneme kaydına önceden girer.
+**Sonraki iş:** funding carry (spot long + perp short) replay'i — kaldıraçlı long
+talebinin ödediği funding primini survivorship'ten arındırılmış Binance
+perp/spot evreninde maliyet sonrası ölçmek; ön-kayıtlı karar kuralları
+(trial `e8d38a2af0f661de`, `docs/CARRY_REPLAY_REPORT.md`, workflow
+`carry_replay`). Her yeni hipotez deneme kaydına önceden girer.
