@@ -59,10 +59,10 @@ STARTUP_MESSAGE = os.getenv("CORE_SEND_STARTUP_MESSAGE", "1") == "1"
 TACTICAL_SCAN_SECONDS = max(60, int(os.getenv("TACTICAL_SCAN_INTERVAL_SECONDS", "300")))
 TACTICAL_ALERTS = os.getenv("TACTICAL_LONG_ALERTS_ENABLED", "1") == "1"
 # Setups whose family failed the historical replay are REJECT (spec §3, §38,
-# §40). User policy (2026-10-01): every long signal is pushed with its
-# evidence label, stop levels and position share; set to 0 to silence REJECT
-# setups. They are recorded in the forward ledger and the radar log either way.
-TACTICAL_REJECTED_ALERTS = os.getenv("TACTICAL_REJECTED_ALERTS_ENABLED", "1") == "1"
+# §40). User decision (2026-10-01): REJECT setups are not pushed (their 5m-structure
+# stops are noise for a multi-day hold and the family's replay is negative); they
+# stay in the forward ledger and the radar log, marked "sessiz". "1" pushes them.
+TACTICAL_REJECTED_ALERTS = os.getenv("TACTICAL_REJECTED_ALERTS_ENABLED", "0") == "1"
 # Likit-100 top 3: push a labelled alert with stop levels when a coin enters the list.
 LIQUID_LONG_ALERTS = os.getenv("LIQUID_LONG_ALERTS_ENABLED", "1") == "1"
 # User decision (2026-10-01): alerts the confirmed F1 filter labels KAÇIN are not pushed;
@@ -101,6 +101,8 @@ STATE: dict[str, Any] = {
     "snapshot": None,
     "tactical_snapshot": None,
     "tactical_last_states": {},
+    # symbol -> "STATE:SETUP" whose opening alert was not pushed (REJECT muted): no teardown alert either
+    "tactical_muted": {},
     "last_error": None,
     "tactical_last_error": None,
     "forward_ledger_status": None,
@@ -684,8 +686,9 @@ def _radar_status_line() -> str:
         rows = [dict(e) for e in STATE.get("radar_log") or []]
     open_count = sum(e.get("status") == long_alerts.OPEN for e in rows)
     avoid = "gönderiliyor" if LIQUID_AVOID_ALERTS else "gönderilmiyor, kayıtta"
+    reject = "gönderiliyor" if TACTICAL_REJECTED_ALERTS else "gönderilmiyor, kayıtta"
     return (f"Radar kaydı: {open_count} açık · " + long_alerts.summary_line(rows, now=int(time.time()))
-            + f" · KAÇIN etiketli Likit-100 uyarıları: {avoid}")
+            + f" · KAÇIN etiketli Likit-100 uyarıları: {avoid} · REJECT taktik uyarıları: {reject}")
 
 
 def scan_once() -> dict[str, Any] | None:
@@ -728,6 +731,7 @@ def _tactical_radar_entry(market: Any, item: dict[str, Any], decision: Any, now:
         entry = long_alerts.open_entry(source="TAKTIK", symbol=symbol, now=now, gate_status=decision.status,
                                        detail=status_line(decision), plan=plan, entry_price=float(last.close))
         entry["setup"] = str(item.get("setup") or "-")
+        entry["muted"] = decision.status == "REJECT" and not TACTICAL_REJECTED_ALERTS   # no opening, no stop alert
         STATE["radar_log"] = long_alerts.trim(rows + [entry])
     return plan
 
@@ -785,6 +789,7 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
     now = int(time.time())
     with LOCK:
         previous = dict(STATE.get("tactical_last_states") or {})
+        muted = dict(STATE.get("tactical_muted") or {})
         current: dict[str, str] = {}
         new_setups: list[dict[str, Any]] = []
         for item in report.get("assessments") or []:
@@ -798,10 +803,13 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
                 decision = tactical_gate(item, now=now, max_age_seconds=TACTICAL_MAX_AGE_SECONDS)
                 plan = _tactical_radar_entry(market, item, decision, now)
                 if decision.status == "REJECT" and not TACTICAL_REJECTED_ALERTS:
+                    muted[symbol] = current[symbol]   # whatever made it REJECT (family, staleness, geometry)
                     continue
+                muted.pop(symbol, None)
                 alerts.append((symbol, _tactical_alert(item, decision, plan, now)))
             elif old and old.split(":", 1)[0] in {"READY", "TRIGGERED"} and state == "NO_LONG":
-                if family_disqualified(old.split(":", 1)[1]) and not TACTICAL_REJECTED_ALERTS:
+                was_muted = muted.pop(symbol, None) is not None
+                if was_muted or (family_disqualified(old.split(":", 1)[1]) and not TACTICAL_REJECTED_ALERTS):
                     continue  # its opening alert was never sent
                 reasons = ", ".join(str(r) for r in item.get("reasons") or ["NO_VALID_SETUP"])
                 alerts.append((None, f"⚠️ <b>{long_alerts.esc(symbol)}</b> Long formasyonu bozuldu.\n"
@@ -809,6 +817,7 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
         _update_forward_ledger(market, new_setups)
         STATE["tactical_snapshot"] = report
         STATE["tactical_last_states"] = current
+        STATE["tactical_muted"] = {s: v for s, v in muted.items() if s in current}
         STATE["tactical_last_error"] = None
         _save_state()
     if emit_alerts and TACTICAL_ALERTS and alerts:

@@ -69,9 +69,21 @@ Kanıt dosyası mevcut kodla eşleşmezse etiket uygulanmaz.
 - "bilinmiyor" etiketi KAÇIN değildir; gönderilir.
 - Yeniden açmak için Render'da `LIQUID_AVOID_ALERTS_ENABLED=1`.
 
-Kapatmak için Render ortam değişkenleri:
-- `LIQUID_LONG_ALERTS_ENABLED=0`
-- `TACTICAL_REJECTED_ALERTS_ENABLED=0`
+**REJECT taktik uyarıları susturuldu (kullanıcı kararı, 2026-10-01):**
+
+- Geçmiş testi negatif olan taktik setup'lar (REJECT) Telegram'a gönderilmez.
+  Gerekçe: Seviyeler 5 dakikalık yapıdan geliyor (BTC'de stop ≈ %0.4).
+  1–7 günlük bir tutuşta bu stop gürültüyle tetiklenir. Ailenin geçmiş testi
+  de negatif (−0.28R).
+- İleri kayda ve radar kaydına yine girer, `/radar`'da "sessiz" görünür.
+  Böylece kapının doğruluğu canlıda izlenmeye devam eder.
+- Açılış uyarısı gönderilmediği için stop uyarısı da, "formasyon bozuldu"
+  uyarısı da gönderilmez.
+- WATCH setup'lar (yeterli geçmiş veri yok) gönderilmeye devam eder.
+- Yeniden açmak için Render'da `TACTICAL_REJECTED_ALERTS_ENABLED=1`.
+
+Bütün Likit-100 uyarılarını kapatmak için Render'da
+`LIQUID_LONG_ALERTS_ENABLED=0`.
 
 ## Stop kuralı
 

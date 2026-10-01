@@ -34,8 +34,10 @@ services:
       # (docs/SIGNAL_QUALITY.md) are logged but not pushed; "1" pushes them.
       - key: LIQUID_AVOID_ALERTS_ENABLED
         value: "0"
+      # Tactical setups whose family failed the replay (REJECT) are logged but
+      # not pushed (user decision 2026-10-01, docs/LONG_ALERTS.md); "1" pushes them.
       - key: TACTICAL_REJECTED_ALERTS_ENABLED
-        value: "1"
+        value: "0"
 
       # Exactly two MEXC opportunity engines
       - key: UNIFIED_ENGINE_ENABLED

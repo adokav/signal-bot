@@ -261,12 +261,29 @@ def test_tactical_setups_enter_the_radar_log_with_engine_levels(monkeypatch):
     assert plan.position_pct == pytest.approx(25.0)
     entry = bot.STATE["radar_log"][0]
     assert entry["source"] == "TAKTIK" and entry["setup"] == "TREND_PULLBACK" and entry["plan"]["hard_stop"] == 96.0
+    assert entry["muted"] is True                          # REJECT is not pushed by default
+    Decision.status = "WATCH"
+    monkeypatch.setitem(bot.STATE, "radar_log", [])
+    bot._tactical_radar_entry(Market(), item, Decision(), NOW)
+    assert bot.STATE["radar_log"][0]["muted"] is False
+
+
+def test_a_muted_reject_setup_never_sends_a_stop_alert(monkeypatch, wired):
+    entry = dict(_entry(symbol="BTCUSDT", source="TAKTIK"), muted=True)
+    bot.STATE["radar_log"] = [entry]
+    start = NOW - NOW % M15 + M15
+    monkeypatch.setattr(bot, "TACTICAL_ALERTS", True)
+    monkeypatch.setattr(bot, "KLINES", FakeKlines([], _m15(start, [9.4], lows=[9.3], opens=[9.6])))
+    monkeypatch.setattr(bot.time, "time", lambda: start + 2 * M15)
+    bot._liquid_radar({"liquid_long_candidates": []})
+    assert wired == [] and bot.STATE["radar_log"][0]["status"] == la.STOPPED   # tracked, not pushed
+    assert "REJECT taktik uyarıları: gönderilmiyor, kayıtta" in bot._radar_status_line()
 
 
 def test_radar_command_and_default_alert_policy():
     assert bot._command("/radar") == "RADAR"
     assert any(row["command"] == "radar" for row in bot.COMMANDS)
-    assert bot.TACTICAL_REJECTED_ALERTS is True and bot.LIQUID_LONG_ALERTS is True
+    assert bot.TACTICAL_REJECTED_ALERTS is False and bot.LIQUID_LONG_ALERTS is True     # REJECT: logged, not pushed
 
 
 # ---------------------------------------------------------------------------
