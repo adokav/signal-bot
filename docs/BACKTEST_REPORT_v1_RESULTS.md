@@ -258,6 +258,64 @@ lehine** gevşek kalıyordu. Artık fiyat yolundan basit yüzde hesaplanıyor.
 Protokolün nihai karşılaştırması, düzeltilmiş kodla tek bir `variant=all`
 koşusundan alınacak (aynı pencere, aynı kod).
 
+## Faz A3 sonucu — run #57 (2026-10-01, `variant=all`, 72 ay)
+
+Tek koşuda, aynı pencerede (2020-09 → 2026-08, 2161 gün) ve aynı kodla
+(düzeltilmiş B&H düşüşü dahil). Al-tut: Sharpe 0.59, net +%574, max DD −%76.7.
+
+| | ladder | signal_exit (saf TSMOM) | always_long (kontrol) |
+|---|---:|---:|---:|
+| İşlem | 267 | 49 (SMALL) | 459 |
+| EV/işlem (net) | +0.231% | +4.009% | +0.031% |
+| Profit factor | 1.16 | 2.63 | 1.02 |
+| Sharpe | 0.45 | **0.62** | 0.08 |
+| Max DD | −49.6% | −46.2% | −73.1% |
+| İsabet oranı | %64.8 | %34.7 | %61.0 |
+| Bootstrap %95 CI (EV) | [−0.18, +0.64] | [−0.56, +9.63] | [−0.29, +0.36] |
+| Walk-forward (fold Sharpe > 0.5) | 3/4 ✅ | 1/4 ❌ | 0/4 ❌ |
+| Maliyet / gecikme stresi | ✅ / ✅ | ✅ / ✅ | ❌ / ❌ |
+| Pertürbasyon | FRAGILE | **ROBUST** | FRAGILE |
+| Monte Carlo p05 DD (limit −46%) | −86.5% ❌ | −88.4% ❌ | −161% ❌ |
+| Deflated Sharpe (N=4) | 0.507 | 0.726 | 0.192 |
+| Aşama | REJECTED | REJECTED | REJECTED |
+
+### Önceden sabitlenmiş kurallara göre
+
+1. **Filtrenin katkısı** = ladder EV − kontrol EV = **+0.200 puan/işlem > 0**.
+   Kural filtreyi reddetmiyor; nokta tahmini filtrenin lehine. Ancak iki
+   güven aralığı geniş ölçüde çakışıyor. Bu yüzden "filtre edge ekliyor"
+   değil, "filtre olmadan merdiven para kazandırmıyor" demek doğru. Decay
+   verisi de aynı yönde: LONG sinyali sonrasındaki getiri, koşulsuz
+   getiriyi 24 saatte +0.09% (t=2.57) ve 72 saatte +0.22% (t=2.32) aşıyor.
+   Bu etki küçük, ve 6 ufuk × 4 deneme düşünüldüğünde çoklu test
+   düzeltmesine dayanıklı değil.
+2. **Saf TSMOM** 49 işlemle 30 eşiğinin üstünde; yani "sonuçsuz" değil,
+   ama terfi aşaması `REJECTED_AT_BACKTEST`. Paper adayı **değil**.
+3. **ladder 36 ay vs 72 ay:** EV +0.227% / +0.231%, Sharpe 0.48 / 0.45.
+   Tutarlı; ikisi de REJECTED. Seçim yapmaya gerek yok.
+4. Sonuç görüldükten sonra hiçbir parametre değişmedi; N=4 kaldı.
+
+### Yorum
+
+- **Saf TSMOM dört denemenin en iyisi, ama edge kanıtı değil.**
+  - Sharpe (0.62) al-tut'unkiyle (0.59) pratikte aynı; düşüşü daha küçük
+    (−46% / −77%), getirisi ise çok daha düşük: yıllık ≈ %33 toplamsal,
+    ≤1x. Literatürdeki TSMOM profiliyle uyumlu: alfa değil, risk yönetimi
+    katmanı.
+  - Kârın **%43'ü tek bir işlemden** geliyor (2020, +%84.6). O işlem
+    çıkarılınca ortalama +%2.33.
+  - Dönemler arasında tutarsız (fold Sharpe −0.33 / 0.06 / 0.79 / 0.12),
+    bootstrap aralığı sıfırı içeriyor.
+- **Ladder** zayıf pozitif ve kırılgan; sinyal betanın biraz ötesine
+  geçiyor ama al-tut'u geçmiyor.
+- **Kontrol** çıkış merdiveninin tek başına bir şey kazandırmadığını
+  gösteriyor.
+
+**Faz A3 kararı: dört deneme de NO-GO.** Tek sembol BTC long-only yönlü
+stratejiler bu testlerde al-tut'u risk-ayarlı olarak geçemedi. Saf TSMOM
+"daha az düşüşle benzer Sharpe" sunuyor. Bu bir risk tercihi olabilir, ama
+spec'in aradığı anlamda istatistiksel bir edge değil.
+
 ## Chassis geleceği
 
 `trading/` paketi silinmez — Faz A altyapısı gelecekteki hipotez denemeleri
