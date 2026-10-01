@@ -249,6 +249,16 @@ güncellenenler belirtildi.
     - Ön-kayıt yapılmadı; doğrulama penceresi açılmadı.
     - Not edilen hipotez: Uç funding (negatif ya da yüksek) sonrası majörler
       sepetten kötü. Önceden tanımlı aday olmadığı için test edilmedi.
+11. ✅ **İşlem döngüsü (doğru zamanda gir, doğru zamanda çık, tekrarla)** —
+    `docs/TRADE_LOOP_STUDY.md`.
+    - Majörlerde 4 döngü test edildi: kanal kırılımı 20/10 ve 55/20, trendde
+      geri çekilme.
+    - **Giriş zamanı rastgeleden iyi değil.**
+    - **Çıkış kuralı asıl değeri taşıyor:** D1_20_10 portföyü al-tut'a göre
+      +%415 / +%113 getiri, −%44 / −%92 düşüş, Sharpe 1.26 / 0.67. 2022 kaybı
+      −%88 yerine −%30.
+    - Ama 2. yarıda Sharpe al-tut'un altında. Aday kuralı sağlanmadı;
+      doğrulama açılmadı.
 
 ## Kesin çizgiler
 
