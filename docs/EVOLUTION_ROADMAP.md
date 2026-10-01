@@ -283,8 +283,13 @@ olarak para kaybettiriyor ve BTC'nin gerisinde kalıyor mu? AVOID_CONFIRMED
 çıkarsa canlı MEXC yeni listeleme radarı HOT/BUILDING adaylarını fırsat
 olarak göstermez (ayrı PR, parmak izli kanıt dosyası).
 
-**Sonraki iş:** (1) `listing_replay` koşusu ve sonucu; sonra
-`docs/EDGE_RESEARCH.md` sırasıyla (2) zorunlu satış (açık
+**Yeni listeleme sonucu (run #1):** 6/6 NO_CLAIM; kaçınma iddiası
+doğrulanmadı, canlı radar davranışı değişmedi. Medyan getiri −16 ile −48,
+yeni listelemelerin yalnızca %15–28'i BTC'yi geçiyor; ortalamayı nadir
+büyük kazananlar (özellikle 2020 sonu) sıfıra yakın tutuyor. 2024 sonrası
+her testte negatif (sonuç sonrası bölme, karar değil).
+
+**Sonraki iş:** `docs/EDGE_RESEARCH.md` sırasıyla (2) zorunlu satış (açık
 pozisyon + fiyat çöküşü) sonrası toparlanma; (3) BTC saat etkisinin yayın
 sonrası testi; (4) haftalık kesitsel momentum. Maker emirli carry ancak
 ileri kayıt funding'in risksiz getirinin üstüne çıktığını gösterirse.
