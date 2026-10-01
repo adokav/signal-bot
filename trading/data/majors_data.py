@@ -152,17 +152,32 @@ def fetch_taker(session: requests.Session, perp: str, months: Iterable[str], *,
     return [rows[t] for t in sorted(rows)], report
 
 
+def own_day(rows: Sequence[tuple[int, float]], day: date) -> tuple[list[tuple[int, float]], int]:
+    """Rows created inside ``day`` (UTC) and how many fell outside it.
+
+    A daily dump is authoritative for its own day only: some files also carry
+    the next day's 00:00 snapshot with a slightly different value (ARBUSDT
+    2024-04-03), which would otherwise collide with that day's own file.
+    """
+
+    start = int(datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp())
+    inside = [(t, v) for t, v in rows if start <= t < start + 86_400]
+    return inside, len(rows) - len(inside)
+
+
 def fetch_oi(session: requests.Session, perp: str, days: Iterable[date], *,
              decision_at: int) -> tuple[list[tuple[int, float]], dict]:
     rows: dict[int, float] = {}
-    report = {"missing_days": 0, "rejected_rows": 0}
+    report = {"missing_days": 0, "rejected_rows": 0, "outside_day_rows": 0}
     for day in sorted(set(days)):
         text = carry._csv(session, metrics_url(perp, day), f"{perp} metrics {day.isoformat()}")
         if text is None:
             report["missing_days"] += 1
             continue
         parsed, rejected = parse_metrics(text, decision_at=decision_at)
+        parsed, outside = own_day(parsed, day)
         report["rejected_rows"] += rejected
+        report["outside_day_rows"] += outside
         for t, oi in parsed:
             if t in rows and rows[t] != oi:
                 raise carry.DataQualityError(f"{perp}: conflicting OI snapshots")

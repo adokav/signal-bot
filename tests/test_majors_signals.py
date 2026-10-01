@@ -56,6 +56,23 @@ def test_metrics_keep_snapshots_created_by_the_decision_time():
         md.parse_metrics("time,oi\n1,2", decision_at=T0)
 
 
+def test_a_daily_oi_file_is_authoritative_for_its_own_day_only():
+    rows = [(T0 - 300, 1.0), (T0, 2.0), (T0 + D - 300, 3.0), (T0 + D, 4.0)]
+    inside, outside = md.own_day(rows, date(2024, 1, 1))
+    assert inside == [(T0, 2.0), (T0 + D - 300, 3.0)] and outside == 2
+
+
+def test_conflicting_oi_inside_a_day_still_fails_the_build(monkeypatch):
+    files = {date(2024, 1, 1): "create_time,sum_open_interest\n2024-01-01 00:05:00,5\n",
+             date(2024, 1, 2): "create_time,sum_open_interest\n2024-01-02 00:00:00,7\n2024-01-01 00:05:00,6\n"}
+    monkeypatch.setattr(md.carry, "_csv", lambda session, url, what: files[date.fromisoformat(url[-14:-4])])
+    rows, report = md.fetch_oi(None, "BTCUSDT", files, decision_at=T0 + 3 * D)
+    assert rows == [(T0 + 300, 5.0), (T0 + D, 7.0)] and report["outside_day_rows"] == 1
+    files[date(2024, 1, 1)] += "2024-01-01 00:05:00,9\n"            # the day's own file contradicts itself
+    with pytest.raises(md.carry.DataQualityError):
+        md.fetch_oi(None, "BTCUSDT", files, decision_at=T0 + 3 * D)
+
+
 def test_download_plan_covers_lookbacks_and_starts_oi_at_its_coverage():
     feb, mar = 1_706_745_600, 1_709_251_200          # 2024-02-01, 2024-03-01
     months, days = md.plan_downloads({feb: ["BTCUSDT"]}, oi_from=feb + 10 * D, month_end={feb: mar})
