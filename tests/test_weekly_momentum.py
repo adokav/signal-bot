@@ -67,7 +67,7 @@ def test_a_token_swap_gap_is_a_break_not_a_return():
     assert list(breaks) == [s] and int(breaks[s][0]) == resume
     steps = wm.monday_steps(market, (0, 2_000_000_000))
     universes = {i: list(range(len(market.symbols))) for i in steps}
-    rows, _ = wm.weekly_series(market, steps, universes, lookback_w=1, hold_w=4)
+    rows = wm.weekly_series(market, steps, universes, lookback_w=1, hold_w=4).rows
     assert all(abs(r.portfolio_pct) < 50 and abs(r.benchmark_pct) < 50 for r in rows)
     assert sum(r.unknown_member_weeks for r in rows) > 0              # counted, never a 1000x return
     after = next(i for i in steps if i > resume)
@@ -82,7 +82,7 @@ def test_a_maintenance_hole_of_a_few_hours_is_not_a_break():
     assert wm.continuity_breaks(market) == {}
     steps = wm.monday_steps(market, (0, 2_000_000_000))
     universes = {i: list(range(len(market.symbols))) for i in steps}
-    rows, _ = wm.weekly_series(market, steps, universes, lookback_w=1, hold_w=1)
+    rows = wm.weekly_series(market, steps, universes, lookback_w=1, hold_w=1).rows
     assert sum(r.unknown_member_weeks for r in rows) == 0
 
 
@@ -101,13 +101,49 @@ def test_persistent_winners_beat_the_basket_and_costs_are_charged_per_cohort():
     market = _market()
     steps = wm.monday_steps(market, (0, 2_000_000_000))
     universes = {i: list(range(len(market.symbols))) for i in steps}
-    rows1, skipped = wm.weekly_series(market, steps, universes, lookback_w=1, hold_w=1)
-    assert skipped == 1                             # the first Monday has no week of history to rank on
+    series = wm.weekly_series(market, steps, universes, lookback_w=1, hold_w=1)
+    rows1 = series.rows
+    assert series.skipped == 1                      # the first Monday has no week of history to rank on
+    assert series.outcome_weeks == len(steps) - 1
+    assert series.dropped_weeks == 2                # week 1 has no cohort; the last has no open after the data ends
+    assert series.unknown_slots == len(market.symbols) + 1      # that last week: benchmark plus the cohort
     assert rows1 and all(r.portfolio_pct > r.benchmark_pct for r in rows1)
     assert all(r.cost_pct == pytest.approx(wm.COST_PCT) for r in rows1)
-    rows4, _ = wm.weekly_series(market, steps, universes, lookback_w=1, hold_w=4)
+    rows4 = wm.weekly_series(market, steps, universes, lookback_w=1, hold_w=4).rows
     assert rows4[-1].cohorts == 4 and rows4[-1].cost_pct == pytest.approx(wm.COST_PCT / 4)
     assert all(r.unknown_member_weeks == 0 for r in rows4)
+
+
+def test_trades_happen_at_the_open_after_the_decision_not_at_the_close_that_made_it():
+    i = wm.monday_steps(_market(), (0, 2_000_000_000))[1]
+    leader = _rows(0.00002 * 5)                    # the top-ranked name gaps up 3x right after the decision bar
+    market = _market({"C5USDT": leader[: i + 1] + [
+        (o, c, op * 3, hi * 3, lo * 3, cl * 3, v) for o, c, op, hi, lo, cl, v in leader[i + 1:]
+    ]})
+    steps = wm.monday_steps(market, (0, 2_000_000_000))
+    s = market.index_of["C5USDT"]
+    assert wm.exec_price(market, s, i) == pytest.approx(market.open[s, i + 1])
+    assert wm.exec_price(market, s, i) == pytest.approx(3 * market.close[s, i], rel=1e-3)
+    universes = {j: list(range(len(market.symbols))) for j in steps}
+    rows = wm.weekly_series(market, steps, universes, lookback_w=1, hold_w=1).rows
+    first = next(r for r in rows if r.start == int(market.grid_open[i]) + 900)
+    assert first.portfolio_pct < 10 and first.benchmark_pct < 10    # a same-bar entry would book +200%
+
+
+def test_dropped_outcome_weeks_and_empty_runs_give_no_verdict(monkeypatch):
+    def week(k):
+        return wm.WeekRow(start=wm.HALF_AT + (k - 50) * wm.WEEK, portfolio_pct=2.0 + k % 3, benchmark_pct=0.0,
+                          bottom_pct=None, cost_pct=0.2, cohorts=1, member_weeks=120, unknown_member_weeks=0)
+
+    rows = [week(k) for k in range(100)]
+    monkeypatch.setattr(wm, "weekly_series", lambda *a, **k: wm.Series(rows, 0, 100, 12_000, 0))
+    steps = list(range(101))
+    assert wm.evaluate(None, steps, {}, lookback_w=1, hold_w=1, alpha=0.05, half_at=wm.HALF_AT)["verdict"] == "PASS"
+    monkeypatch.setattr(wm, "weekly_series", lambda *a, **k: wm.Series(rows, 0, 200, 12_000, 0))
+    out = wm.evaluate(None, list(range(201)), {}, lookback_w=1, hold_w=1, alpha=0.05, half_at=wm.HALF_AT)
+    assert out["dropped_weeks"] == 100 and out["verdict"] == "INCOMPLETE_DATA"
+    monkeypatch.setattr(wm, "weekly_series", lambda *a, **k: wm.Series([], 0, 0, 0, 0))
+    assert wm.evaluate(None, [], {}, lookback_w=1, hold_w=1, alpha=0.05, half_at=wm.HALF_AT)["verdict"] == "INCOMPLETE_DATA"
 
 
 def test_future_prices_do_not_change_who_is_bought():

@@ -8,7 +8,8 @@ one cohort per week (Jegadeesh-Titman), so the weekly return series does not
 overlap. The benchmark is the equal-weight top 100, rebalanced weekly.
 
 - **Point in time:** ranking and universe use candles closed at the Monday
-  bar; returns start at that close.
+  bar; every trade, and every weekly mark, is at the next bar's open (the
+  first price after the decision), for cohorts and benchmark alike.
 - **Survivorship:** a pair that stops trading for good is frozen at its last
   close; a hole that data later resumes from, or the end of what was
   downloaded, is unknown (excluded and counted), never a flat price.
@@ -123,6 +124,25 @@ def price_at(market: lr.Market, s: int, i: int) -> float | None:
     return None                                         # a hole or the download edge: unknown
 
 
+def exec_price(market: lr.Market, s: int, i: int) -> float | None:
+    """The price a decision at bar ``i`` trades at: the next bar's open.
+
+    A pair that stopped trading for good is frozen at its last close; a hole
+    or the download edge is unknown (None).
+    """
+
+    j = i + 1
+    if i < 0 or j >= market.n_grid:
+        return None
+    price = market.open[s, j]
+    if np.isfinite(price):
+        return float(price)
+    last = int(market.last_index[s])
+    if 0 <= last < j and last < int(market.coverage_end[s]) - lr.DAY_BARS:
+        return float(market.close[s, last])
+    return None
+
+
 def rank(market: lr.Market, members: Sequence[int], i: int, lookback_w: int,
          breaks: Breaks | None = None) -> list[tuple[float, int]] | None:
     """(trailing return %, symbol index), best first; None when fewer than ``MIN_RANKED`` can be ranked."""
@@ -153,9 +173,9 @@ def top_bottom(ranked: Sequence[tuple[float, int]]) -> tuple[list[int], list[int
 
 @dataclass(frozen=True)
 class Cohort:
-    formed: int                 # grid index of the formation bar
+    formed: int                         # grid index of the formation (decision) bar
     members: tuple[int, ...]
-    entry: tuple[float, ...]    # prices at formation
+    entry: tuple[float | None, ...]     # execution prices: the open after the formation bar
 
 
 @dataclass(frozen=True)
@@ -184,8 +204,8 @@ def _cohort_week(market: lr.Market, cohort: Cohort, i0: int, i1: int,
 
     weight_sum, value_sum, unknown = 0.0, 0.0, 0
     for s, entry in zip(cohort.members, cohort.entry):
-        p0, p1 = price_at(market, s, i0), price_at(market, s, i1)
-        if p0 is None or p1 is None or not continuous(breaks, s, cohort.formed, i1):
+        p0, p1 = exec_price(market, s, i0), exec_price(market, s, i1)
+        if entry is None or p0 is None or p1 is None or not continuous(breaks, s, cohort.formed + 1, i1 + 1):
             unknown += 1
             continue
         weight = p0 / entry
@@ -200,12 +220,25 @@ def _equal_weight(market: lr.Market, members: Sequence[int], i0: int, i1: int,
                   breaks: Breaks) -> tuple[float | None, int]:
     returns, unknown = [], 0
     for s in members:
-        p0, p1 = price_at(market, s, i0), price_at(market, s, i1)
-        if p0 is None or p1 is None or not continuous(breaks, s, i0, i1):
+        p0, p1 = exec_price(market, s, i0), exec_price(market, s, i1)
+        if p0 is None or p1 is None or not continuous(breaks, s, i0 + 1, i1 + 1):
             unknown += 1
             continue
         returns.append((p1 / p0 - 1.0) * 100.0)
     return (statistics.fmean(returns) if returns else None), unknown
+
+
+@dataclass(frozen=True)
+class Series:
+    rows: list[WeekRow]
+    skipped: int                # Mondays whose cohort could not be formed
+    outcome_weeks: int          # weeks a return was attempted for (rows plus dropped weeks)
+    member_slots: int           # cohort and benchmark slots over every attempted week
+    unknown_slots: int          # of which could not be priced
+
+    @property
+    def dropped_weeks(self) -> int:
+        return self.outcome_weeks - len(self.rows)
 
 
 def weekly_series(
@@ -215,8 +248,8 @@ def weekly_series(
     *,
     lookback_w: int,
     hold_w: int,
-) -> tuple[list[WeekRow], int]:
-    """Weekly rows and the number of weeks whose cohort could not be formed."""
+) -> Series:
+    """Weekly rows plus every week and slot that could not be priced (for the completeness gate)."""
 
     breaks = continuity_breaks(market)
     tops: dict[int, Cohort] = {}
@@ -229,15 +262,15 @@ def weekly_series(
             continue
         top, bottom = top_bottom(ranked)
         for target, members in ((tops, top), (bottoms, bottom)):
-            target[w] = Cohort(i, tuple(members), tuple(price_at(market, s, i) for s in members))
+            target[w] = Cohort(i, tuple(members), tuple(exec_price(market, s, i) for s in members))
     rows = []
-    for k in range(len(steps) - 1):
+    all_slots = all_unknown = 0
+    outcome_weeks = max(0, len(steps) - 1)
+    for k in range(outcome_weeks):
         i0, i1 = steps[k], steps[k + 1]
         if i1 - i0 != WEEK_BARS:
-            continue                                     # a gap in the Monday grid: no weekly return
+            continue                                     # a gap in the Monday grid: a dropped week
         active = [tops[w] for w in range(k - hold_w + 1, k + 1) if w in tops]
-        if not active:
-            continue
         parts, unknown, slots = [], 0, len(universes[i0])
         for cohort in active:
             ret, missing = _cohort_week(market, cohort, i0, i1, breaks)
@@ -246,8 +279,10 @@ def weekly_series(
             if ret is not None:
                 parts.append(ret)
         bench, bench_unknown = _equal_weight(market, universes[i0], i0, i1, breaks)
+        all_slots += slots
+        all_unknown += unknown + bench_unknown
         if not parts or bench is None:
-            continue
+            continue                                     # dropped, and counted by the caller
         low = [b for w in range(k - hold_w + 1, k + 1) if (b := bottoms.get(w)) is not None]
         low_parts = [r for c in low if (r := _cohort_week(market, c, i0, i1, breaks)[0]) is not None]
         rows.append(WeekRow(
@@ -260,7 +295,7 @@ def weekly_series(
             member_weeks=slots,
             unknown_member_weeks=unknown + bench_unknown,
         ))
-    return rows, skipped
+    return Series(rows, skipped, outcome_weeks, all_slots, all_unknown)
 
 
 # ---------------------------------------------------------------------------
@@ -320,10 +355,12 @@ def verdict(net: Mapping[str, Any], excess: Mapping[str, Any], stress: Mapping[s
 
 def evaluate(market: lr.Market, steps: Sequence[int], universes: Mapping[int, Sequence[int]], *, lookback_w: int,
              hold_w: int, alpha: float, half_at: int) -> dict[str, Any]:
-    rows, skipped = weekly_series(market, steps, universes, lookback_w=lookback_w, hold_w=hold_w)
-    member_weeks = sum(r.member_weeks for r in rows) or 1
-    unknown_share = sum(r.unknown_member_weeks for r in rows) / member_weeks
-    skipped_share = skipped / max(1, len(steps))
+    series = weekly_series(market, steps, universes, lookback_w=lookback_w, hold_w=hold_w)
+    rows = series.rows
+    # Nothing attempted counts as fully missing: an empty or truncated run never gives a verdict.
+    unknown_share = series.unknown_slots / series.member_slots if series.member_slots else 1.0
+    skipped_share = series.skipped / len(steps) if steps else 1.0
+    dropped_share = series.dropped_weeks / series.outcome_weeks if series.outcome_weeks else 1.0
     net = summary(rows, lambda r: r.net_pct, alpha=alpha, half_at=half_at)
     excess = summary(rows, lambda r: r.excess_pct, alpha=alpha, half_at=half_at)
     stress = summary(rows, lambda r: r.portfolio_pct - STRESS_COST_PCT / hold_w, alpha=alpha, half_at=half_at)
@@ -338,9 +375,12 @@ def evaluate(market: lr.Market, steps: Sequence[int], universes: Mapping[int, Se
         "stress_net_pct": stress,
         "benchmark_pct": summary(rows, lambda r: r.benchmark_pct, alpha=alpha, half_at=half_at),
         "top_minus_bottom_pct": spread,
-        "skipped_weeks": skipped,
+        "skipped_weeks": series.skipped,
+        "outcome_weeks": series.outcome_weeks,
+        "dropped_weeks": series.dropped_weeks,
         "unknown_member_week_share": unknown_share,
-        "verdict": verdict(net, excess, stress, unknown_share=unknown_share, skipped_share=skipped_share),
+        "verdict": verdict(net, excess, stress, unknown_share=unknown_share,
+                           skipped_share=max(skipped_share, dropped_share)),
         "can_authorize_trade": False,
     }
 
@@ -424,6 +464,7 @@ def _fmt(value: Any, spec: str = "+.3f") -> str:
 
 def print_result(result: Mapping[str, Any]) -> None:
     print(f"## {result['variant']}: {result['verdict']}  (skipped weeks {result['skipped_weeks']}, "
+          f"dropped weeks {result['dropped_weeks']}/{result['outcome_weeks']}, "
           f"unknown member-weeks {result['unknown_member_week_share']:.2%})")
     for key in ("net_pct", "excess_pct", "stress_net_pct", "benchmark_pct", "top_minus_bottom_pct"):
         s = result[key]

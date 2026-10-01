@@ -53,6 +53,9 @@ kesitsel momentum** etkisi bildirildi:
   - 50'den az coin sıralanabiliyorsa o hafta portföy kurulmaz.
 - **Portföy:** En yüksek getirili **%20** (ilk 100'de 20 coin), eşit ağırlık,
   **H hafta** tutulur.
+  - **İşlem fiyatı:** Karar pazartesi 00:00'da kapanan mumla verilir. Alım,
+    satım ve haftalık değerleme **bir sonraki mumun açılışıyla** yapılır
+    (inceleme üzerine; kararı veren kapanıştan işlem yapılamaz).
   - H ∈ {1, 4}.
   - H = 4 için her hafta yeni bir kohort kurulur. Haftalık getiri, aktif
     kohortların ortalamasıdır (Jegadeesh–Titman). Böylece haftalık seri
@@ -128,6 +131,8 @@ Diğer kararlar:
 - **NO_EFFECT:** Diğer durumlar.
 - **INCOMPLETE_DATA (karar yok):** Bilinmeyen üye-haftası %2'yi ya da
   portföy kurulamayan hafta %5'i aşarsa.
+  - Getirisi hesaplanamayıp düşen haftalar ve onların fiyatlanamayan üyeleri
+    de sayılır (inceleme üzerine). Hiç hafta yoksa da karar verilmez.
 
 **Canlıya etkisi:**
 
@@ -193,18 +198,23 @@ test başarısız oluyor).
 Haftalık %, maliyet sonrası. Fazla = net − eşit ağırlıklı ilk 100. Yarılar:
 2020-10 → 2022-08 ve 2022-09 → 2024-08.
 
+İnceleme (Codex) üzerine iki düzeltmeyle yeniden koşuldu: İşlem kararı veren
+kapanıştan değil, sonraki açılıştan yapılıyor; düşen haftalar eksik veri
+kapısına sayılıyor. Sayılar en fazla 0.01 puan değişti, kararlar aynı.
+
 | Varyant | Hafta | Net | Fazla (%95 güven) | Fazla 1. yarı | Fazla 2. yarı | En yüksek − en düşük | Karar |
 |---|---:|---:|---|---:|---:|---:|---|
-| L1_H1 | 201 | +0.54 | −0.11 [−1.03, +1.09] | +0.43 | −0.61 | +0.50 | NO_EFFECT |
-| L1_H4 | 201 | +0.70 | +0.06 [−0.44, +0.70] | +0.44 | −0.31 | +0.20 | NO_EFFECT |
-| L2_H1 | 200 | +0.29 | −0.38 [−1.14, +0.50] | +0.24 | −0.97 | +0.08 | NO_EFFECT |
-| L2_H4 | 200 | +0.58 | −0.09 [−0.57, +0.42] | +0.18 | −0.34 | −0.17 | NO_EFFECT |
-| L4_H1 | 198 | +0.39 | −0.36 [−1.03, +0.34] | −0.04 | −0.66 | +0.22 | NO_EFFECT |
-| L4_H4 | 198 | +0.53 | −0.23 [−0.77, +0.34] | −0.15 | −0.29 | −0.59 | NO_EFFECT |
+| L1_H1 | 201 | +0.54 | −0.11 [−1.03, +1.09] | +0.43 | −0.61 | +0.51 | NO_EFFECT |
+| L1_H4 | 201 | +0.70 | +0.06 [−0.44, +0.70] | +0.43 | −0.31 | +0.20 | NO_EFFECT |
+| L2_H1 | 200 | +0.29 | −0.38 [−1.13, +0.50] | +0.24 | −0.97 | +0.08 | NO_EFFECT |
+| L2_H4 | 200 | +0.58 | −0.09 [−0.57, +0.42] | +0.18 | −0.33 | −0.17 | NO_EFFECT |
+| L4_H1 | 198 | +0.39 | −0.36 [−1.03, +0.34] | −0.04 | −0.66 | +0.23 | NO_EFFECT |
+| L4_H4 | 198 | +0.52 | −0.23 [−0.77, +0.34] | −0.16 | −0.29 | −0.59 | NO_EFFECT |
 
 - **Sepet:** Haftada ortalama +0.65 ile +0.75 arası (2021 boğa piyasası).
-- **Veri:** Bilinmeyen üye-haftası %0.04–0.10. Kurulamayan hafta 2–5 (ilk
-  haftalarda geriye bakış verisi yok).
+- **Veri:** Bilinmeyen üye-haftası %0.04–0.10. Portföy kurulamayan ve
+  getirisi hesaplanamayan hafta 2–5 / 203 (ilk haftalarda geriye bakış
+  verisi yok).
 - **Net getiri pozitif, ama sepetin kendisi kadar.** Hiçbir varyant sepeti
   yenmedi.
 
