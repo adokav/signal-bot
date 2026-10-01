@@ -430,12 +430,14 @@ def format_radar(log: Sequence[Mapping[str, Any]], *, now: int, hours: int = TRA
             lines.append(f"{_clock(int(e['opened_at']))} {source} {coin:<8} {e.get('gate_status') or '?'}")
             lines.append(f"  giriş {price} · stop {stop}")
             quality = QUALITY_MARKS.get(str(e.get("quality") or ""), "")
-            lines.append(f"  {_status_label(e)}" + (f" · F1 {quality}" if quality else ""))
+            lines.append(f"  {_status_label(e)}" + (f" · F1 {quality}" if quality else "")
+                         + (" · sessiz" if e.get("muted") else ""))
         if len(newest) > RADAR_ROWS:
             lines.append(f"+{len(newest) - RADAR_ROWS} eski kayıt daha")
         parts.append("<pre>" + esc("\n".join(lines)) + "</pre>")
         parts.append(esc("L: Likit-100, T: taktik (BTC/ETH). Sağdaki: uyarı anındaki kapı durumu. "
-                         "72s: 72 saat doldu; * takip verisi eksikti. F1: kalite filtresi etiketi."))
+                         "72s: 72 saat doldu; * takip verisi eksikti. F1: kalite filtresi etiketi. "
+                         "sessiz: KAÇIN olduğu için Telegram'a gönderilmedi, yalnızca kayıtta."))
     parts += [esc(summary_line(log, now=now)),
               *([esc(line)] if (line := quality_summary_line(log, now=now)) else []),
               esc("Stop kontrolü kapanmış 15 dk mumlarının dibiyle yapılır. Emir yetkisi yok.")]
