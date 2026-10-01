@@ -85,6 +85,55 @@ Parmak izi şu dosyaların içeriğinden hesaplanır: `acce_unified/tactical_lon
 `tests/test_tactical_replay.py::test_replay_trial_is_pre_registered_for_the_current_code`
 kırılır: değişiklik yeni bir denemedir ve koşulmadan önce kayda girmelidir.
 
-## Sonuç
+## Sonuç — tactical_replay run #1 (2026-10-01): **NEGATIVE**
 
-_Henüz koşulmadı._
+Koşu: GitHub Actions `tactical_replay` #1, commit `e372778`, parmak izi
+`c27c0a510eb76779` (ön-kayıtlı trial ile eşleşti: "pre-registered").
+Veri: Binance spot, 2020-10 → 2026-08 (2161 gün); ilk 40 gün ısınma.
+
+**Veri kalitesi:** 622.368 karar adımı; 610.531 değerlendirildi, 11.519 ısınma,
+318 eksik/bayat veri nedeniyle atlandı (%0.05), motor hatası 0, bozuk satır 0.
+
+| Grup | Kayıt | Dolmadı | Çözüm. | İsabet | İsabet %95 | Başabaş isabet | Ort. R | %99 güven (Bonferroni) | Stres R | 1. yarı | 2. yarı | Karar |
+|---|---:|---:|---:|---:|---|---:|---:|---|---:|---:|---:|---|
+| **ALL** | 8397 | 601 | 7786 | 0.24 | [0.23, 0.25] | 0.40 | **−0.272** | [−0.31, −0.24] | −0.364 | −0.25 | −0.30 | **NEGATIVE** |
+| BREAKOUT_RETEST | 4080 | 256 | 3818 | 0.18 | [0.17, 0.20] | 0.35 | −0.278 | [−0.33, −0.23] | −0.370 | −0.25 | −0.31 | **NEGATIVE** |
+| LIQUIDITY_SWEEP_RECLAIM | 3662 | 304 | 3354 | 0.31 | [0.30, 0.33] | 0.47 | −0.255 | [−0.30, −0.21] | −0.346 | −0.23 | −0.28 | **NEGATIVE** |
+| TREND_PULLBACK | 620 | 32 | 588 | 0.22 | [0.19, 0.26] | 0.37 | −0.334 | [−0.46, −0.20] | −0.431 | −0.30 | −0.37 | **NEGATIVE** |
+| RANGE_RECLAIM | 35 | 9 | 26 | 0.42 | [0.26, 0.61] | 0.51 | −0.127 | [−0.87, +0.61] | −0.230 | +0.55 | −0.81 | INSUFFICIENT |
+
+Tanılayıcı kırılımlar (karar vermez): BTCUSDT −0.321R (4294 çözümlenmiş),
+ETHUSDT −0.211R (3492); yıllar 2020 −0.23, 2021 −0.20, 2022 −0.27, 2023 −0.32,
+2024 −0.23, 2025 −0.33, 2026 −0.31 — **hiçbir yıl ve hiçbir sembol pozitif değil.**
+
+### Ön-kayıtlı kurallara göre değerlendirme
+
+- Havuz ve üç setup ailesi **NEGATIVE**: %99 güven aralığının üst sınırı bile
+  sıfırın altında. İsabet oranı, maliyet sonrası başabaş için gereken orandan
+  12–17 puan düşük. Sonuç yıllara ve sembollere göre tutarlı; tek bir dönemin
+  eseri değil.
+- RANGE_RECLAIM 6 yılda yalnızca 26 çözümlenmiş örnek üretti → **INSUFFICIENT**;
+  kenarı olduğuna dair kanıt yok.
+- **Hiçbir aile PASS_CANDIDATE değil.** Protokole göre dört setup ailesinin
+  hiçbiri WATCH'tan yukarı çıkamaz; üçü için kanıt, uyarıların takip
+  edilmesinin işlem başına yaklaşık −0.25…−0.33R kaybettireceği yönünde.
+
+### Sonucu nasıl okumalı
+
+- **Varsayımlar iyimserdi, sonuç yine negatif.** Limit dolumu fiyat değince
+  kabul edildi (ters seçilim yok sayıldı). Gerçek dolumlarla sonuç büyük
+  olasılıkla daha kötü olur. Muhafazakâr seçimler (aynı mumda stop önce, dolum
+  mumunda yalnızca stop) M5 çözünürlüğünde küçük etkilidir ve 12–17 puanlık
+  isabet açığını açıklayamaz.
+- **Maliyet büyük pay, ama tek neden değil.** Taban ve stres maliyetindeki R
+  farkından kaba bir geri hesap (tüm işlemlerde ortak risk varsayımıyla, ölçüm
+  değil): planlanan risk ortalama ≈ %0.5, yani %0.14 gidiş-dönüş maliyet ≈
+  0.2–0.25R. Aynı kaba hesapla maliyetsiz senaryoda bile ortalama ≈ −0.06R;
+  yani maker ücretleri sıfır olsa bile pozitif beklenti görünmüyor (kesin
+  ölçüm için işlem bazında brüt R gerekir).
+- **Aşırı uyarı:** 6 yılda 8397 kayıt (iki sembolde günde ≈ 4). Yukarıdaki
+  ≈ %0.5'lik risk tahmini doğruysa stoplar M5/M15 gürültüsüne göre dar ve
+  maliyet bu dar riske oranla pahalı.
+- Sonuç gördükten sonra motor ayarlanıp aynı veride yeniden denenirse bu yeni
+  bir denemedir (parmak izi değişir, test kırılır) ve bu denemeyle birlikte
+  sayılır.
