@@ -51,6 +51,25 @@ Her ayın 1'i, 00:00 UTC'de kurulur ve ay boyunca sabit kalır.
   TRUMP, PENGU.
 - **12 üyeden az:** O ay için bir eksiklik sayılır (aşağıda).
 
+**Ek (2026-10-01, veri denetiminden sonra, hiçbir sinyal sonucu görülmeden):**
+İlk evren listesinde iki kimlik sorunu çıktı.
+
+- **LUNAUSDT, Ekim 2022:** Bu sembol o tarihte token değişimi sonrası LUNA
+  2.0'dı. Eski LUNA'nın perp'i Mayıs 2022'de kapanmıştı.
+- **FTTUSDT, Aralık 2023:** Eylül 2023'te uzun bir işlem durmasından sonra
+  yeniden başlamıştı.
+
+Bu yüzden iki kural netleştirildi:
+
+- **Olgunluk:** 24 saatten uzun bir süreklilik kırılmasından sonra çift
+  yeniden listelenmiş sayılır. 90 gün o andan itibaren hesaplanır.
+- **Perp "var" demek:** Perp en az 30 gün önce funding ödemeye başlamış
+  olmalı ve ay başından önceki 24 saatte de ödemiş olmalı. Kapanmış bir perp
+  sayılmaz.
+
+İki kural da testli. Etkisi: Keşif evreninde yalnızca bu iki coin-ay
+değişti.
+
 ## Karar anı ve sonuç
 
 - **Karar:** Her gün 00:00 UTC, her üye coin için. Özellikler yalnızca o ana

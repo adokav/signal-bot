@@ -122,8 +122,29 @@ def is_meme(symbol: str) -> bool:
     return symbol.endswith("USDT") and symbol[:-4] in MEMES
 
 
+def listed_since(market: lr.Market, s: int, start: int, first_trade: np.ndarray, breaks: wm.Breaks) -> int:
+    """When pair ``s`` was (re)listed as seen at ``start``: its first trade, or the end of its latest break.
+
+    A break (a hole of more than a day the data resumes from) is a new listing:
+    token swaps reuse the ticker (LUNA 2.0 traded as LUNAUSDT from 2022-05-31).
+    """
+
+    resumed = [int(market.grid_open[r]) for r in breaks.get(s, ()) if int(market.grid_open[r]) < start]
+    return max([int(first_trade[s]), *resumed])
+
+
+def perp_live(times: np.ndarray | None, start: int) -> bool:
+    """A perpetual counts only if it paid funding 30+ days ago and again in the day before ``start``."""
+
+    if times is None or not len(times):
+        return False
+    a = int(np.searchsorted(times, start, side="left"))
+    return int(times[0]) <= start - PERP_SEASON_DAYS * DAY and a > 0 and int(times[a - 1]) >= start - DAY
+
+
 def monthly_universe(market: lr.Market, start: int, *, perp_of: Mapping[str, str],
-                     first_funding: Mapping[str, int], first_trade: np.ndarray) -> list[str]:
+                     funding_times: Mapping[str, np.ndarray], first_trade: np.ndarray,
+                     breaks: wm.Breaks) -> list[str]:
     """Members for the month opening at ``start`` (docs/MAJORS_STUDY.md), from data visible then."""
 
     i = decision_bar(market, start)
@@ -136,9 +157,12 @@ def monthly_universe(market: lr.Market, start: int, *, perp_of: Mapping[str, str
     data_start = int(market.grid_open[0])
     eligible = []
     for s, symbol in enumerate(market.symbols):
-        seasoned = first_trade[s] <= data_start + DAY or first_trade[s] <= start - SEASON_DAYS * DAY
-        perp_ok = symbol in perp_of and first_funding.get(symbol, math.inf) <= start - PERP_SEASON_DAYS * DAY
-        if days[s].sum() >= MIN_VOLUME_DAYS and seasoned and perp_ok:
+        if days[s].sum() < MIN_VOLUME_DAYS:
+            continue
+        listed = listed_since(market, s, start, first_trade, breaks)
+        seasoned = listed <= data_start + DAY or listed <= start - SEASON_DAYS * DAY
+        perp_ok = symbol in perp_of and perp_live(funding_times.get(symbol), start)
+        if seasoned and perp_ok:
             eligible.append((float(volume[s]), symbol))
     eligible.sort(key=lambda row: (-row[0], row[1]))
     names = [symbol for _, symbol in eligible]
@@ -154,10 +178,10 @@ def monthly_universe(market: lr.Market, start: int, *, perp_of: Mapping[str, str
 
 
 def universes(market: lr.Market, window: tuple[int, int], *, perp_of: Mapping[str, str],
-              first_funding: Mapping[str, int]) -> dict[int, list[str]]:
-    first_trade = first_trade_times(market)
-    return {m: monthly_universe(market, m, perp_of=perp_of, first_funding=first_funding, first_trade=first_trade)
-            for m in month_starts(window)}
+              funding_times: Mapping[str, np.ndarray]) -> dict[int, list[str]]:
+    first_trade, breaks = first_trade_times(market), wm.continuity_breaks(market)
+    return {m: monthly_universe(market, m, perp_of=perp_of, funding_times=funding_times, first_trade=first_trade,
+                                breaks=breaks) for m in month_starts(window)}
 
 
 # ---------------------------------------------------------------------------
@@ -536,15 +560,15 @@ def load_inputs(spot_dir: Path, *, end: int):
     market, _, excluded = sq.load_likit_market(spot_dir, end=end)
     funding = load_funding(spot_dir / "funding")
     manifest = json.loads((spot_dir / "funding" / "manifest.json").read_text("utf-8"))
-    first_funding = {spot: int(times[0]) for spot, (times, _) in funding.items() if times}
-    return market, excluded, funding, manifest["perp_of"], first_funding
+    funding_times = {spot: np.asarray(times, dtype=np.int64) for spot, (times, _) in funding.items()}
+    return market, excluded, funding, manifest["perp_of"], funding_times
 
 
 def build_perp(spot_dir: Path, out_dir: Path, *, window: tuple[int, int], end: int) -> dict:
     from trading.data.majors_data import build_perp_data
 
-    market, _, _, perp_of, first_funding = load_inputs(spot_dir, end=end)
-    monthly = universes(market, window, perp_of=perp_of, first_funding=first_funding)
+    market, _, _, perp_of, funding_times = load_inputs(spot_dir, end=end)
+    monthly = universes(market, window, perp_of=perp_of, funding_times=funding_times)
     starts = sorted(monthly)
     month_end = {m: (starts[k + 1] if k + 1 < len(starts) else window[1]) for k, m in enumerate(starts)}
     manifest = build_perp_data(monthly, month_end, perp_of, out_dir, decision_at=end, oi_from=max(OI_FROM, window[0]))
@@ -556,8 +580,8 @@ def run(spot_dir: Path, perp_dir: Path, *, window: tuple[int, int], end: int, al
         half_at: int) -> dict[str, Any]:
     from trading.data.majors_data import load_oi, load_taker
 
-    market, excluded, funding, perp_of, first_funding = load_inputs(spot_dir, end=end)
-    monthly = universes(market, window, perp_of=perp_of, first_funding=first_funding)
+    market, excluded, funding, perp_of, funding_times = load_inputs(spot_dir, end=end)
+    monthly = universes(market, window, perp_of=perp_of, funding_times=funding_times)
     rows = coin_day_rows(market, monthly, window, funding=funding, taker=load_taker(perp_dir), oi=load_oi(perp_dir))
     stats = completeness(rows, monthly)
     results = []

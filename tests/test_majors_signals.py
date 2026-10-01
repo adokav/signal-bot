@@ -161,14 +161,18 @@ def _universe_market(extra=None):
     series.update(extra or {})
     market = lr.build_market({s: lr.rows_to_columns(r) for s, r in series.items()})
     perp_of = {s: s for s in series if s != "NOPERPUSDT"}
-    first_funding = {s: T0 for s in perp_of}
-    return market, perp_of, first_funding
+    funding_times = {s: np.arange(T0, MONTH, 8 * H, dtype=np.int64) for s in perp_of}
+    return market, perp_of, funding_times
+
+
+def _members(market, perp_of, funding_times):
+    return ms.monthly_universe(market, MONTH, perp_of=perp_of, funding_times=funding_times,
+                               first_trade=ms.first_trade_times(market), breaks=ms.wm.continuity_breaks(market))
 
 
 def test_universe_is_btc_eth_top_ten_seasoned_with_a_perp_and_one_meme():
-    market, perp_of, first_funding = _universe_market()
-    members = ms.monthly_universe(market, MONTH, perp_of=perp_of, first_funding=first_funding,
-                                  first_trade=ms.first_trade_times(market))
+    market, perp_of, funding_times = _universe_market()
+    members = _members(market, perp_of, funding_times)
     assert members[:2] == ["BTCUSDT", "ETHUSDT"]
     assert members[2:12] == [f"A{k:02d}USDT" for k in range(10)]           # A10 is 11th: out
     assert members[12:] == ["PEPEUSDT"]                                     # no meme in the top 10
@@ -178,15 +182,25 @@ def test_universe_is_btc_eth_top_ten_seasoned_with_a_perp_and_one_meme():
 def test_universe_ignores_volume_after_the_month_start():
     late_pump = _rows(T0, BARS, qv=1e3)
     late_pump = [r[:6] + ((9e9,) if r[0] >= MONTH else (1e3,)) for r in late_pump]
-    market, perp_of, first_funding = _universe_market({"A10USDT": late_pump})
-    members = ms.monthly_universe(market, MONTH, perp_of=perp_of, first_funding=first_funding,
-                                  first_trade=ms.first_trade_times(market))
+    market, perp_of, funding_times = _universe_market({"A10USDT": late_pump})
+    members = _members(market, perp_of, funding_times)
     assert "A10USDT" not in members and "PEPEUSDT" in members               # its pump comes after the start
-    market, perp_of, first_funding = _universe_market()
-    young_perp = dict(first_funding, A00USDT=MONTH - 10 * D)               # perp listed 10 days ago
-    members = ms.monthly_universe(market, MONTH, perp_of=perp_of, first_funding=young_perp,
-                                  first_trade=ms.first_trade_times(market))
-    assert "A00USDT" not in members and "A10USDT" in members
+    market, perp_of, funding_times = _universe_market()
+    young = dict(funding_times, A00USDT=np.arange(MONTH - 10 * D, MONTH, 8 * H, dtype=np.int64))
+    assert "A00USDT" not in _members(market, perp_of, young)                # perp listed 10 days ago
+    dead = dict(funding_times, A00USDT=np.arange(T0, MONTH - 5 * D, 8 * H, dtype=np.int64))
+    assert "A00USDT" not in _members(market, perp_of, dead)                 # perp stopped paying 5 days ago
+    assert "A10USDT" in _members(market, perp_of, dead)
+
+
+def test_a_token_swap_relists_the_pair_for_seasoning():
+    """LUNA 2.0 reused LUNAUSDT after a long halt: it is a new listing, not a seasoned major."""
+
+    full = _rows(T0, BARS, qv=8e6)
+    resume = 80 * 96                                                       # 40 days before the month start
+    swapped = full[: 70 * 96] + [r[:2] + tuple(x * 1000 for x in r[2:6]) + r[6:] for r in full[resume:]]
+    market, perp_of, funding_times = _universe_market({"A00USDT": swapped})
+    assert "A00USDT" not in _members(market, perp_of, funding_times)
 
 
 # ---------------------------------------------------------------------------
