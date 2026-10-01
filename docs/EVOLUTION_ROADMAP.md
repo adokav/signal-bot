@@ -246,7 +246,8 @@ uyarıları kanıta göre takip edilmemesi gereken sinyallerdir.
 Radar bu kanıtı artık gösteriyor: negatif aileler REJECT ve push edilmiyor,
 ileri kayıt canlı sonuçları replay ile karşılaştırıyor.
 
-**Sonraki iş:** karar kullanıcıda — canlıda hâlâ hiç test edilmemiş olan
-Likit-100 radarının (elle ağırlıklı puan) tarihsel testi ya da farklı bir edge
-sınıfı (funding/basis, order-flow). Her yeni hipotez deneme kaydına önceden
-girer.
+**Sonraki iş:** Likit-100 radarının (elle ağırlıklı puan) tarihsel replay'i —
+survivorship'ten arındırılmış Binance spot evreni, canlı fonksiyonlar,
+ön-kayıtlı karar kuralları (trial `69f6387eaf32ed4f`,
+`docs/LIQUID_REPLAY_REPORT.md`, workflow `liquid_replay`). Her yeni hipotez
+deneme kaydına önceden girer.
