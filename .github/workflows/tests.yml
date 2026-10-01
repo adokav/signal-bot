@@ -53,6 +53,8 @@ jobs:
             tests/test_tactical_replay.py \
             tests/test_binance_universe.py \
             tests/test_liquid_replay.py \
+            tests/test_binance_carry_universe.py \
+            tests/test_carry_replay.py \
             tests/test_observation_archive_cadence.py \
             tests/test_macro_data.py \
             tests/test_macro_treasury.py \
