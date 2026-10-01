@@ -49,7 +49,7 @@ def _snapshot():
 
 def test_public_commands_include_tactical_radar_without_legacy_bloat():
     assert [row["command"] for row in bot.COMMANDS] == [
-        "panel", "tactical", "longs", "new", "status", "scan"
+        "panel", "tactical", "longs", "new", "radar", "status", "scan"
     ]
 
 

@@ -1,0 +1,76 @@
+# Long uyarıları, stop seviyeleri ve radar kaydı
+
+**Tarih:** 2026-10-01
+**Kod:** `acce_unified/long_alerts.py`; entegrasyon `bot.py`; testler
+`tests/test_long_alerts.py`.
+
+Bu bir araştırma ve risk aracıdır. Emir yetkisi vermez
+(`can_authorize_trade = false`, AGENTS.md §4, §8, §10).
+
+## Uyarı politikası
+
+Kullanıcının kararı (2026-10-01): **bütün long sinyalleri, etiketli olarak
+push edilir.**
+
+- **Likit-100 İlk 3:** Bir coin listeye girdiğinde uyarı gelir. Aynı coin
+  için açık kayıt varsa ya da son 12 saatte kayıt açılmışsa yeni uyarı
+  gelmez.
+- **BTC/ETH taktik radarı:** Kurulum READY veya TRIGGERED olduğunda uyarı
+  gelir. Geçmiş testi negatif olan (REJECT) kurulumlar da artık gönderiliyor.
+
+Her uyarıda şunlar açıkça yazar:
+- kapı durumu ve geçmiş test sonucu (bugün hepsi NEGATIVE / REJECT);
+- uyarı fiyatı;
+- teknik geçersizlik;
+- hard stop ve stop mesafesi;
+- %1 hesap riski için pozisyon payı.
+
+Kapatmak için Render ortam değişkenleri:
+- `LIQUID_LONG_ALERTS_ENABLED=0`
+- `TACTICAL_REJECTED_ALERTS_ENABLED=0`
+
+## Stop kuralı
+
+Kural sabittir. Uyarıdan sonra hiçbir seviye kaydırılmaz.
+
+- **Likit-100:** Yalnızca kapanmış 1 saatlik MEXC mumları kullanılır.
+  - Teknik geçersizlik = son 12 kapanmış saatin en düşük fiyatı.
+  - Hard stop = bu dip − 0.5 × ATR(14, 1 saat). Ama uyarı fiyatının en az
+    1.5 × ATR altında, yani stop tek bir mumun gürültüsüne konmaz.
+  - Mum verisi yetersizse stop hesaplanmaz ve uyarı bunu söyler: "bu
+    sinyalle işlem yapılmamalı".
+- **Taktik:** Taktik motorun kendi teknik geçersizlik ve hard stop
+  seviyeleri kullanılır. Bunlar `/tactical` panelindekiyle aynıdır.
+- **Pozisyon payı:** %1 ÷ stop mesafesi.
+  - Örnek: stop %5 aşağıdaysa pozisyon payı sermayenin %20'si olur; stop
+    tetiklenirse kayıp sermayenin %1'i kadardır.
+  - Stop mesafesi %12'yi geçerse uyarı "çok geniş" der.
+
+## Radar kaydı (`/radar`)
+
+Her sinyal, stop seviyeleriyle birlikte kayda girer. Kayıt durum dosyasında
+(`/data/core_state.json`) tutulur; en fazla 200 kayıt saklanır, açık
+kayıtların hepsi korunur.
+
+- **Stop takibi:**
+  - Uyarıdan **sonra** açılan kapanmış 15 dakikalık mumların en düşük
+    fiyatı hard stop'a değerse kayıt "stop" olarak kapanır ve ayrıca uyarı
+    gelir.
+  - Çıkış fiyatı stop seviyesidir. Mum stop'un altında açıldıysa (boşluk)
+    açılış fiyatı kullanılır.
+- **72 saat** dolunca kayıt son kapanış fiyatıyla kapanır. Takip verisi hiç
+  gelmezse 6 saat sonra son bilinen fiyatla kapanır ve not düşülür.
+- **`/radar` ekranı:** Son 72 saatte radara giren coinleri, giriş ve stop
+  seviyelerini, şu anki durumlarını ve son 30 günün özetini (kapanan
+  kayıtlar, stop sayısı, ortalama ve medyan sonuç) gösterir.
+
+## Bilinmesi gerekenler
+
+- **Stop beklentiyi değiştirmez.** Bu sinyallerin geçmiş testi negatif.
+  Stop ve pozisyon büyüklüğü zararı sınırlar, ama sinyali kârlı yapmaz.
+- **Gerçek çıkış daha kötü olabilir.** Stop kontrolü 15 dakikalık mumlarla
+  yapılır; gerçek bir stop emri ani fitillerde stop'tan daha kötü bir
+  fiyattan dolabilir. Komisyon ve kayma sonuçlara dahil değildir.
+- **Erken sonuçlar anlamsız.** Radar kaydındaki özet, az sayıda kayıtla
+  istatistiksel olarak bir şey söylemez. Anlamlı bir karşılaştırma için
+  yüzlerce kayıt gerekir.
