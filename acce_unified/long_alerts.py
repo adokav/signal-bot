@@ -437,7 +437,7 @@ def format_radar(log: Sequence[Mapping[str, Any]], *, now: int, hours: int = TRA
         parts.append("<pre>" + esc("\n".join(lines)) + "</pre>")
         parts.append(esc("L: Likit-100, T: taktik (BTC/ETH). Sağdaki: uyarı anındaki kapı durumu. "
                          "72s: 72 saat doldu; * takip verisi eksikti. F1: kalite filtresi etiketi. "
-                         "sessiz: KAÇIN olduğu için Telegram'a gönderilmedi, yalnızca kayıtta."))
+                         "sessiz: KAÇIN ya da REJECT olduğu için Telegram'a gönderilmedi, yalnızca kayıtta."))
     parts += [esc(summary_line(log, now=now)),
               *([esc(line)] if (line := quality_summary_line(log, now=now)) else []),
               esc("Stop kontrolü kapanmış 15 dk mumlarının dibiyle yapılır. Emir yetkisi yok.")]

@@ -59,10 +59,10 @@ STARTUP_MESSAGE = os.getenv("CORE_SEND_STARTUP_MESSAGE", "1") == "1"
 TACTICAL_SCAN_SECONDS = max(60, int(os.getenv("TACTICAL_SCAN_INTERVAL_SECONDS", "300")))
 TACTICAL_ALERTS = os.getenv("TACTICAL_LONG_ALERTS_ENABLED", "1") == "1"
 # Setups whose family failed the historical replay are REJECT (spec §3, §38,
-# §40). User policy (2026-10-01): every long signal is pushed with its
-# evidence label, stop levels and position share; set to 0 to silence REJECT
-# setups. They are recorded in the forward ledger and the radar log either way.
-TACTICAL_REJECTED_ALERTS = os.getenv("TACTICAL_REJECTED_ALERTS_ENABLED", "1") == "1"
+# §40). User decision (2026-10-01): REJECT setups are not pushed (their 5m-structure
+# stops are noise for a multi-day hold and the family's replay is negative); they
+# stay in the forward ledger and the radar log, marked "sessiz". "1" pushes them.
+TACTICAL_REJECTED_ALERTS = os.getenv("TACTICAL_REJECTED_ALERTS_ENABLED", "0") == "1"
 # Likit-100 top 3: push a labelled alert with stop levels when a coin enters the list.
 LIQUID_LONG_ALERTS = os.getenv("LIQUID_LONG_ALERTS_ENABLED", "1") == "1"
 # User decision (2026-10-01): alerts the confirmed F1 filter labels KAÇIN are not pushed;
@@ -684,8 +684,9 @@ def _radar_status_line() -> str:
         rows = [dict(e) for e in STATE.get("radar_log") or []]
     open_count = sum(e.get("status") == long_alerts.OPEN for e in rows)
     avoid = "gönderiliyor" if LIQUID_AVOID_ALERTS else "gönderilmiyor, kayıtta"
+    reject = "gönderiliyor" if TACTICAL_REJECTED_ALERTS else "gönderilmiyor, kayıtta"
     return (f"Radar kaydı: {open_count} açık · " + long_alerts.summary_line(rows, now=int(time.time()))
-            + f" · KAÇIN etiketli Likit-100 uyarıları: {avoid}")
+            + f" · KAÇIN etiketli Likit-100 uyarıları: {avoid} · REJECT taktik uyarıları: {reject}")
 
 
 def scan_once() -> dict[str, Any] | None:
@@ -728,6 +729,7 @@ def _tactical_radar_entry(market: Any, item: dict[str, Any], decision: Any, now:
         entry = long_alerts.open_entry(source="TAKTIK", symbol=symbol, now=now, gate_status=decision.status,
                                        detail=status_line(decision), plan=plan, entry_price=float(last.close))
         entry["setup"] = str(item.get("setup") or "-")
+        entry["muted"] = decision.status == "REJECT" and not TACTICAL_REJECTED_ALERTS   # no opening, no stop alert
         STATE["radar_log"] = long_alerts.trim(rows + [entry])
     return plan
 
