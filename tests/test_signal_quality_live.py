@@ -184,6 +184,7 @@ def test_alert_panel_and_radar_log_use_closed_candles_not_the_ticker(monkeypatch
     monkeypatch.setattr(bot, "_save_state", lambda: None)
     monkeypatch.setitem(bot.STATE, "radar_log", [])
     monkeypatch.setattr(bot, "LIQUID_LONG_ALERTS", True)
+    monkeypatch.setattr(bot, "LIQUID_AVOID_ALERTS", True)    # this test reads the KAÇIN alert text
     monkeypatch.setattr(bot, "KLINES", klines)
     monkeypatch.setattr(bot.ENGINE, "cex_provider", _Tickers())
     monkeypatch.setattr(bot, "F1_CACHE", {})
@@ -222,3 +223,58 @@ def test_provider_failure_leaves_the_label_unknown(monkeypatch):
     monkeypatch.setattr(bot, "F1_CACHE", {})
     label = bot._f1_label("SOLUSDT", {"long_metrics": {"status": "READY", "atr_pct": 0.6}}, NOW)
     assert label.status == "UNKNOWN" and "SECRET" not in label.detail
+
+
+def _wire(monkeypatch, *, avoid_alerts):
+    sent = []
+    monkeypatch.setattr(bot, "send", lambda text, keyboard=None, html_mode=False: sent.append(text))
+    monkeypatch.setattr(bot, "_save_state", lambda: None)
+    monkeypatch.setitem(bot.STATE, "radar_log", [])
+    monkeypatch.setattr(bot, "LIQUID_LONG_ALERTS", True)
+    monkeypatch.setattr(bot, "LIQUID_AVOID_ALERTS", avoid_alerts)
+    monkeypatch.setattr(bot, "KLINES", _Klines())
+    monkeypatch.setattr(bot.ENGINE, "cex_provider", _Tickers())
+    monkeypatch.setattr(bot, "F1_CACHE", {})
+    monkeypatch.setattr(bot.time, "time", lambda: NOW)
+    return sent
+
+
+def _candidate(symbol="SOLUSDT", atr=0.6):
+    meta = {"change_pct": 2.0, "long_metrics": {"status": "READY", "atr_pct": atr},
+            "market_context": {"median_change_pct": 2.0, "universe_size": 60}, "last_price": 10.0, "spread_bps": 3}
+    return {"symbol": symbol, "score": 70, "metadata": meta}
+
+
+def test_avoid_alerts_are_logged_but_not_pushed_by_default(monkeypatch):
+    assert bot.LIQUID_AVOID_ALERTS is False                 # the user's decision is the default
+    sent = _wire(monkeypatch, avoid_alerts=False)
+    snapshot = {"generated_at": NOW, "liquid_market_context": {"regime": "RISK_ON"},
+                "liquid_long_candidates": [_candidate("SOLUSDT"), _candidate("C01USDT")]}
+    bot._liquid_radar(snapshot)
+    log = {e["symbol"]: e for e in bot.STATE["radar_log"]}
+    assert log["SOLUSDT"]["quality"] == "AVOID" and log["SOLUSDT"]["muted"] is True
+    assert log["C01USDT"]["quality"] == "PASSED" and log["C01USDT"]["muted"] is False
+    assert len(sent) == 1 and "C01USDT" in sent[0] and "SOLUSDT" not in sent[0]
+
+    stopped = dict(log["SOLUSDT"], status=la.OPEN, checked_until=NOW)
+    bot.STATE["radar_log"] = [stopped]
+    sent.clear()
+    stop_hit = la.track_entry(stopped, [[(NOW + 900 - NOW % 900) * 1000, "10", "10", "1", "1"]], now=NOW + 3 * 900)
+    assert stop_hit[1] == la.STOPPED
+    monkeypatch.setattr(bot, "_track_radar", lambda rows, now: ([stop_hit[0]], [stop_hit[0]]))
+    bot._liquid_radar({"liquid_long_candidates": []})
+    assert sent == []                                       # its opening alert was never sent: no stop alert
+    assert "sessiz" in la.format_radar([stop_hit[0]], now=NOW + 3 * 900)
+
+
+def test_avoid_alerts_can_be_pushed_again_and_unknown_is_never_muted(monkeypatch):
+    sent = _wire(monkeypatch, avoid_alerts=True)
+    bot._liquid_radar({"generated_at": NOW, "liquid_market_context": {"regime": "RISK_ON"},
+                       "liquid_long_candidates": [_candidate("SOLUSDT")]})
+    assert len(sent) == 1 and "KAÇIN" in sent[0] and bot.STATE["radar_log"][0]["muted"] is False
+
+    sent = _wire(monkeypatch, avoid_alerts=False)
+    unknown = _candidate("SOLUSDT", atr=None)
+    bot._liquid_radar({"generated_at": NOW, "liquid_market_context": {"regime": "RISK_ON"},
+                       "liquid_long_candidates": [unknown]})
+    assert len(sent) == 1 and "bilinmiyor" in sent[0]       # UNKNOWN is not AVOID: still pushed

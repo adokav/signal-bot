@@ -65,6 +65,9 @@ TACTICAL_ALERTS = os.getenv("TACTICAL_LONG_ALERTS_ENABLED", "1") == "1"
 TACTICAL_REJECTED_ALERTS = os.getenv("TACTICAL_REJECTED_ALERTS_ENABLED", "1") == "1"
 # Likit-100 top 3: push a labelled alert with stop levels when a coin enters the list.
 LIQUID_LONG_ALERTS = os.getenv("LIQUID_LONG_ALERTS_ENABLED", "1") == "1"
+# User decision (2026-10-01): alerts the confirmed F1 filter labels KAÇIN are not pushed;
+# they stay in the radar log so the filter keeps being checked live. "1" pushes them again.
+LIQUID_AVOID_ALERTS = os.getenv("LIQUID_AVOID_ALERTS_ENABLED", "0") == "1"
 
 CONFIG = UnifiedConfig.from_env()
 # A snapshot older than three scan cycles is stale evidence, not a current view.
@@ -647,13 +650,16 @@ def _liquid_radar(snapshot: dict[str, Any]) -> None:
         entry.update(rank=index, radar_score=int(item.get("score") or 0),
                      fundamentals={key: fundamentals.get(key) for key in FUNDAMENTAL_KEYS},
                      quality=quality.status, quality_text=quality.text, quality_detail=quality.detail,
-                     quality_inputs={"atr15_pct": quality.atr15_pct, "rel_24h": quality.rel_24h})
+                     quality_inputs={"atr15_pct": quality.atr15_pct, "rel_24h": quality.rel_24h},
+                     muted=quality.status == "AVOID" and not LIQUID_AVOID_ALERTS)
         fresh.append(entry)
     updated, stopped = _track_radar(rows, now)
     opened = _merge_radar(fresh, updated)
     messages = []
     if LIQUID_LONG_ALERTS:
         for entry in opened:
+            if entry.get("muted"):
+                continue        # KAÇIN: logged and tracked, not pushed
             icon = "⛔" if entry["gate_status"] == "REJECT" else "👀"
             messages.append(long_alerts.alert_text(
                 entry, icon=icon, title=f"LONG SİNYALİ · Likit-100 #{entry['rank']}", evidence=liquid_evidence_line(),
@@ -662,6 +668,8 @@ def _liquid_radar(snapshot: dict[str, Any]) -> None:
                 notes=[f"Kalite filtresi: {entry['quality_detail']}"],
             ))
     for entry in stopped:
+        if entry.get("muted"):
+            continue            # its opening alert was never sent
         if (LIQUID_LONG_ALERTS if entry["source"] == "LIKIT100" else TACTICAL_ALERTS):
             messages.append(long_alerts.stop_alert_text(entry))
     for message in messages:
@@ -675,7 +683,9 @@ def _radar_status_line() -> str:
     with LOCK:
         rows = [dict(e) for e in STATE.get("radar_log") or []]
     open_count = sum(e.get("status") == long_alerts.OPEN for e in rows)
-    return f"Radar kaydı: {open_count} açık · " + long_alerts.summary_line(rows, now=int(time.time()))
+    avoid = "gönderiliyor" if LIQUID_AVOID_ALERTS else "gönderilmiyor, kayıtta"
+    return (f"Radar kaydı: {open_count} açık · " + long_alerts.summary_line(rows, now=int(time.time()))
+            + f" · KAÇIN etiketli Likit-100 uyarıları: {avoid}")
 
 
 def scan_once() -> dict[str, Any] | None:

@@ -30,6 +30,10 @@ services:
       # long signal is pushed with its evidence label; set to "0" to silence.
       - key: LIQUID_LONG_ALERTS_ENABLED
         value: "1"
+      # Likit-100 alerts labelled KAÇIN by the confirmed F1 filter
+      # (docs/SIGNAL_QUALITY.md) are logged but not pushed; "1" pushes them.
+      - key: LIQUID_AVOID_ALERTS_ENABLED
+        value: "0"
       - key: TACTICAL_REJECTED_ALERTS_ENABLED
         value: "1"
 
