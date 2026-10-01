@@ -264,15 +264,18 @@ Ancak prim 2025–2026'da negatif, sermayeye göre getiri (≈ +3.9%/yıl) risks
 getirinin altında, maliyet funding'in yarısını yiyor ve 68 pozisyon 1x
 teminatta tasfiye seviyesine ulaştı. Canlı sermaye için yeterli değil.
 
+**Kısa vadeli geri dönüş (2026-10-01):** trial `6a2bc19afcf3dd25`, etkin
+dönem 2019-04 → 2020-09. LOSERS@1g **NEGATIVE** (maliyet sonrası sepete göre
+−0.67%/gün, [−1.05, −0.29]); LOSERS@3g INSUFFICIENT (123 < 200 kohort).
+Kimlik kuralından kaçan BULL/BEAR/PAX çıkarılınca da sonuç aynı. Ayrıntı:
+`docs/REVERSAL_REPLAY_REPORT.md`.
+
 **Sonraki iş:** (1) carry veri denetimi (`carry_audit`, tanılayıcı; STATIC'in
-−83% düşüşünün kaynağı); (2) kısa vadeli kesitsel geri dönüş hipotezinin
-hiç dokunulmamış 2017-09 → 2020-09 verisinde ön-kayıtlı testi (trial
-`6a2bc19afcf3dd25`, `docs/REVERSAL_REPLAY_REPORT.md`, workflow
-`reversal_replay`). Sonra, `docs/EDGE_RESEARCH.md` sırasıyla: (3) yeni
+−83% düşüşünün kaynağı). Sonra, `docs/EDGE_RESEARCH.md` sırasıyla: (2) yeni
 listeleme kohortu (kayıptan kaçınma; canlı yeni listeleme radarının
-`HOT/BUILDING` etiketleri hiç test edilmedi); (4) zorunlu satış (açık
-pozisyon + fiyat çöküşü) sonrası toparlanma; (5) BTC saat etkisinin yayın
-sonrası testi; (6) haftalık kesitsel momentum. Maker emirli carry ancak
+`HOT/BUILDING` etiketleri hiç test edilmedi); (3) zorunlu satış (açık
+pozisyon + fiyat çöküşü) sonrası toparlanma; (4) BTC saat etkisinin yayın
+sonrası testi; (5) haftalık kesitsel momentum. Maker emirli carry ancak
 ileri kayıt funding'in risksiz getirinin üstüne çıktığını gösterirse.
 Her yeni hipotez deneme kaydına önceden girer; deneme sayısı arttıkça çıta
 yükselir.
