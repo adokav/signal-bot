@@ -151,6 +151,67 @@ python -m trading.research.atlas build \
 
 `--macro` verilmezse makro sütunları eksik kalır, sıfır yazılmaz.
 
-## Sonuçlar
+## Sonuçlar: piyasa katmanı (2026-10-01)
 
-Makro tablo çıktıktan sonra eklenecek.
+Aylık veri `research/atlas/market_monthly.csv` dosyasındadır: 84 ay, evren, ölçüler ve takvim. Makro katman, `atlas_macro` iş akışı çalıştıktan sonra eklenecek.
+
+**Bu bölümdeki her şey keşiftir, kanıt değildir.**
+- 83 ay, aslında 2 büyük döngü ve birkaç bağımsız bölümdür.
+- Aşağıdaki her karşılaştırma bir "bakış" sayılır.
+- Buradan çıkan bir fikir yalnızca ön-kayda girip 2024-09 → 2026-08 penceresinde bir kez test edilirse kanıt olur.
+
+### Dönem kimlik kartları
+
+BTC'nin ay sonundaki trend durumuna göre gruplanmıştır. Durum ay sonunda ölçülür, yani o ayın hareketini de içerir; bu tablo yalnızca açıklama içindir.
+
+| Dönem | Ay | BTC | Sepet | BTC oynaklığı | Korelasyon | Olaylar (sonradan bilinen) |
+|---|---:|---:|---:|---:|---:|---|
+| (trend ölçülemiyor) 2017-09 → 2018-03 | 7 | n/a | n/a | %115 | n/a | Çin ICO yasağı, CME vadelileri ve BTC zirvesi, Coincheck |
+| DÜŞÜŞ 2018-05 → 2019-03 | 11 | −%56 | n/a | %57 | 0.78 | BCH çatallanması ve çöküş |
+| YÜKSELİŞ 2019-04 → 2019-08 | 5 | +%134 | −%6 | %83 | 0.69 | Binance hack, Libra |
+| DÜŞÜŞ 2019-11 → 2019-12 | 2 | −%21 | −%29 | %50 | 0.76 | |
+| DÜŞÜŞ 2020-03 | 1 | −%25 | −%33 | %207 | 0.97 | COVID çöküşü |
+| YÜKSELİŞ 2020-05 → 2021-04 | 12 | +%569 | +%1344 | %65 | 0.60 | Halving, MicroStrategy, PayPal, Tesla, Coinbase |
+| DÜŞÜŞ 2021-05 → 2021-06 | 2 | −%39 | −%48 | %106 | 0.85 | Çin baskısı |
+| YÜKSELİŞ 2021-08 → 2021-11 | 4 | +%37 | +%85 | %67 | 0.54 | El Salvador, Çin yasağı |
+| DÜŞÜŞ 2021-12 → 2022-02 | 3 | −%24 | −%44 | %67 | 0.76 | |
+| DÜŞÜŞ 2022-04 → 2022-12 | 9 | −%64 | −%80 | %60 | 0.71 | LUNA, Celsius/3AC, Merge, FTX |
+| YÜKSELİŞ 2023-01 → 2023-07 | 7 | +%77 | +%17 | %44 | 0.64 | SVB, BlackRock ETF başvurusu |
+| YÜKSELİŞ 2023-10 → 2024-07 | 10 | +%140 | +%95 | %49 | 0.53 | Spot ETF onayı, halving |
+
+Tabloda olmayan dönemler 1–2 aylık GEÇİŞ dönemleridir (2018-04, 2019-09/10, 2020-02, 2020-04, 2021-07, 2022-03, 2023-09, 2024-08) ve 2020-01, 2023-08 gibi tek aylık dönemlerdir. Hepsi `market_monthly.csv` dosyasında.
+
+### Ay başında bilinen durum → o ayın getirisi
+
+Bu bölüm hindsight içermez. Önceki ayın sonundaki durum, ay başında bilinen bilgidir.
+
+| Ay başındaki BTC durumu | Ay | Sepet ort. | Sepet medyan | Pozitif ay | BTC ort. |
+|---|---:|---:|---:|---:|---:|
+| YÜKSELİŞ | 39 | +%8.1 | −%0.7 | 17 / 39 | +%8.2 |
+| GEÇİŞ | 8 | +%1.6 | +%6.4 | 4 / 7 | −%2.1 |
+| DÜŞÜŞ | 29 | −%2.3 | −%1.2 | 12 / 27 | +%1.1 |
+
+**Gözlemler:**
+
+1. **Asimetri tipik ayda değil, uçlardadır.**
+   - Tipik ayda trend durumu neredeyse hiçbir şey söylemiyor: YÜKSELİŞ'te bile medyan ay negatif.
+   - Ama en iyi 5 sepet ayının **hepsinden** önce durum YÜKSELİŞ'ti: 2021-01 +%108, 2021-02 +%77, 2021-04 +%70, 2019-05 +%51, 2020-11 +%46.
+   - En kötü 5 sepet ayının **hiçbirinden** önce durum YÜKSELİŞ değildi:
+     - DÜŞÜŞ'ten sonra gelenler: 2022-05 −%38, 2018-11 −%36, 2022-01 −%33.
+     - GEÇİŞ'ten sonra gelenler: 2020-03 −%33, 2022-04 −%31.
+   - Bu, "trend bozulunca çık" döngüsünün keşif ve ön-tarih testlerindeki sonucuyla uyumlu. Girişin zamanlaması rastgeleden iyi değildi; değer, büyük çöküşlerin dışında kalmaktan geliyordu.
+2. **Düşüşte çeşitlendirme çalışmıyor.** Ay başındaki duruma göre, o ayın majörler arası ortalama korelasyonu: YÜKSELİŞ'ten sonra 0.61 (39 ay), GEÇİŞ'ten sonra 0.71 (7 ay), DÜŞÜŞ'ten sonra 0.74 (27 ay). Aynı ayın etiketine göre bakıldığında bu değerler 0.60 ve 0.76 olur; ama o etiket ayın kendi hareketini içerdiği için yalnızca açıklama içindir. COVID ayında korelasyon 0.97'ye çıktı. Çöküşte her şey birlikte düşüyor.
+3. **Altcoin sezonu nadir ve kısa.** Altcoinlerin BTC'yi 15 puandan fazla geçtiği ay sayısı 8:
+   - 2021'de 4 ay: 2021-01, 2021-02, 2021-04, 2021-08;
+   - 2019-02 ve 2019-03;
+   - 2020-07 ve 2024-05.
+   - BTC'nin hacim payı 2021'de %32'ye indi; 2024'te %39, diğer yıllarda %52–58.
+   - YÜKSELİŞ'te ortalama ay "altcoinler eksi BTC" −0.1 puan, medyan −4.0 puan. Yani altcoinler tipik ayda BTC'nin gerisinde kalıyor, fark birkaç uç ayda kapanıyor.
+4. **Derin dip bölgesi.** Ay başında BTC zirveden %70'ten fazla aşağıdaysa, sonraki ay sepet ortalaması +%14 ve 11 ayın 7'si pozitif. Ama bu 11 ay aslında iki bölüm (2018-12 → 2019-05 ve 2022-07 → 2023-01). **Kanıt değil.**
+5. **Sakin oynaklık.** BTC oynaklığı SAKİN (< %40) olan aylardan sonra BTC ortalaması +%8.5, 10 ayın 6'sı pozitif. 10 ay çok az. **Kanıt değil.**
+
+### Sınırlar
+
+- 2018-08'den önce Binance'te 8'den az USDT çifti vardı. Bu yüzden 2017-09 → 2018-07 arasında sepet ölçüsü yok. 2017 balonu yalnızca BTC üzerinden görülüyor (2017-12'de BTC oynaklığı %155).
+- Trend durumu ve oynaklık eşikleri yaygın kullanılan sabitlerdir, veriden öğrenilmedi. Yine de bunlara bakarak bir eşik "seçmek", keşif sayılır.
+- Ortalamalar birkaç uç ay tarafından sürükleniyor. Medyanlar ve pozitif ay sayıları bu yüzden yanlarında verildi.
