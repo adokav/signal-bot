@@ -85,6 +85,7 @@ jobs:
           set -euo pipefail
           python -m trading.backtest.signal_quality tactical \
               --data-dir research/data/sq_binance_spot \
+              --perp-dir research/data/sq_binance_spot/perp \
               --out-dir research/data/signal_quality \
               --workers "$(nproc)" | tee research/data/signal_quality_tactical.txt
       - name: Upload artifacts

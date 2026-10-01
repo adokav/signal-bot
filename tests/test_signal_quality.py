@@ -308,3 +308,85 @@ def test_rows_file_round_trips_missing_as_empty(tmp_path):
     sq.write_rows([{"a": 1, "b": None}, {"a": 2, "c": "x"}], path)
     with gzip.open(path, "rt") as handle:
         assert handle.read().splitlines() == ["a,b,c", "1,,", "2,,x"]
+
+
+# ---------------------------------------------------------------------------
+# Basis (perpetual vs spot)
+# ---------------------------------------------------------------------------
+
+
+def _perp_series(market, s, *, premium=0.01, factor=1.0, upto=None):
+    """Hourly perpetual closes = spot hourly close × (1 + premium) × factor."""
+
+    times, closes = [], []
+    for k in range(3, market.n_grid if upto is None else upto, 4):
+        hour = int(market.grid_open[k - 3])
+        times.append(hour)
+        closes.append(float(market.close[s, k]) * (1 + premium) * factor)
+    return np.asarray(times, dtype=np.int64), np.asarray(closes)
+
+
+def test_basis_compares_the_same_closed_hour_and_ignores_the_forming_one():
+    market = _market()
+    s = market.index_of["AAAUSDT"]
+    times, closes = _perp_series(market, s)
+    closes[(times >= START + 400 * 900)] *= 10   # the forming hour (bars 400-403) and later: must not be read
+    out = sq.basis_at({"AAAUSDT": (times, closes)}, market, s, 401)
+    assert out["basis_status"] == "OK" and out["basis_pct"] == pytest.approx(1.0)
+    assert out["basis_24h"] == pytest.approx(1.0)
+
+
+def test_basis_flags_missing_stale_and_mismatched_perpetuals():
+    market = _market()
+    s = market.index_of["AAAUSDT"]
+    assert sq.basis_at(None, market, s, 401)["basis_status"] == "NOT_LOADED"
+    assert sq.basis_at({}, market, s, 401)["basis_status"] == "NO_PERP"
+    stale = _perp_series(market, s, upto=390)
+    assert sq.basis_at({"AAAUSDT": stale}, market, s, 401)["basis_pct"] is None
+    thousand = _perp_series(market, s, factor=1000.0)   # e.g. 1000PEPE not divided by its multiplier
+    out = sq.basis_at({"AAAUSDT": thousand}, market, s, 401)
+    assert out["basis_status"] == "MISMATCH" and out["basis_pct"] is None
+    few = _perp_series(market, s)
+    keep = few[0] >= START + (400 - 4 * 10) * 900       # only 10 of the last 24 hours
+    out = sq.basis_at({"AAAUSDT": (few[0][keep], few[1][keep])}, market, s, 401)
+    assert out["basis_pct"] == pytest.approx(1.0) and out["basis_24h"] is None
+
+
+def test_likit_rows_carry_basis_without_changing_other_features():
+    market = _market()
+    s = market.index_of["AAAUSDT"]
+    plain = sq.likit_rows(market, _steps(market), params=PARAMS, window=WINDOW)[0]
+    with_perp = sq.likit_rows(market, _steps(market), params=PARAMS, window=WINDOW,
+                              perp={"AAAUSDT": _perp_series(market, s, premium=-0.002)})[0]
+    assert with_perp["basis_pct"] == pytest.approx(-0.2) and plain["basis_status"] == "NOT_LOADED"
+    assert {k: v for k, v in plain.items() if not k.startswith("basis")} == \
+        {k: v for k, v in with_perp.items() if not k.startswith("basis")}
+
+
+def test_perp_prices_are_divided_by_the_contract_multiplier(tmp_path, monkeypatch):
+    assert uf.multiplier_of("1000PEPEUSDT", "PEPEUSDT") == 1000 and uf.multiplier_of("XUSDT", "XUSDT") == 1
+    with pytest.raises(uf.carry.DataQualityError):
+        uf.multiplier_of("YUSDT", "XUSDT")
+    universe = tmp_path / "u"
+    universe.mkdir()
+    (universe / "manifest.json").write_text(json.dumps({"symbols": {"PEPEUSDT": {"months": ["2024-01"]}}}))
+    kline = lambda t, c: f"{t}000,{c},{c},{c},{c},1,{t + 3599}999,1,1,1,1,0"
+    text = "\n".join([kline(START, 0.012), kline(START + 3600, 0.013), kline(START + 7200, 0.014)])
+    monkeypatch.setattr(uf.carry, "_csv", lambda session, url, what: text)
+    summary = uf.build_perp_hourly(universe, tmp_path / "p", decision_at=START + 7199, session=object(),
+                                   perps=["1000PEPEUSDT"])
+    assert summary["rows"] == 2                     # the third candle closes after the decision time
+    times, closes = uf.load_perp_hourly(tmp_path / "p")["PEPEUSDT"]
+    assert list(times) == [START, START + 3600] and closes == pytest.approx([0.000012, 0.000013])
+
+
+def test_tactical_basis_uses_spot_and_perp_hours_closed_at_the_alert():
+    t = START + 30 * 86_400 - 1
+    data = _tactical_data(lambda s: 100.0)
+    h1 = data["BTCUSDT"][TacticalTimeframe.H1]
+    hours = np.arange(START, START + 31 * 86_400, 3600, dtype=np.int64)
+    perp = {"BTCUSDT": (hours, np.where(hours < t, 100.5, 150.0))}
+    out = sq.tactical_basis(perp, h1, "BTCUSDT", t)
+    assert out["basis_status"] == "OK" and out["basis_pct"] == pytest.approx(0.5)
+    row = sq.tactical_rows([_record(t)], data, perp=perp, window=WINDOW)[0]
+    assert row["basis_pct"] == pytest.approx(0.5) and row["funding_status"] == "NOT_LOADED"

@@ -67,19 +67,24 @@ Likit-100:
 | Piyasa rejimi | canlı rejim etiketi; BTC 24s/7g/30g getiri; BTC'nin 20 günlük ortalamaya uzaklığı; evren medyanı 24s ve 7g getiri; 20 günlük ortalamasının üstündeki coin oranı (genişlik) |
 | Aşırı uzama | coinin 1s/4s/24s/7g değişimi; EMA20 uzaklığı ve eğimi; RSI14; 96 mumluk aralıktaki konumu; zirveden uzaklığı; 20 günlük ortalamaya uzaklığı; evrene göre 24s/7g göreli getiri |
 | Likidite / oynaklık | hacim sırası; log 24s hacim; hacim oranı; 15 dk ATR %; 1 saatlik ATR %; stop mesafesi |
-| Kalabalık | son ödenen perp funding oranı ve 3 günlük ortalaması |
+| Kalabalık / türev talebi | son ödenen perp funding oranı ve 3 günlük ortalaması; **baz** (perp fiyatı / spot fiyatı − 1) son kapanmış saatte ve son 24 saatin ortalaması |
 | Diğer | teknik puan; İlk 3 içindeki sıra; yapı zaten bozuk mu |
 
 Taktik: kurulum; sembol; 4 saatlik yapı; planlanan risk %; maliyet/risk
 oranı; T1 ödül/risk; uyarı fiyatının giriş bölgesine uzaklığı; 1 saatlik ATR
 %; motor stopu ve ATR stopu mesafeleri; 4s/24s/7g/30g değişim; coinin ve
 BTC'nin 20 günlük ortalamaya uzaklığı; 4 saatlik 50 mumluk ortalamaya
-uzaklık.
+uzaklık; BTC/ETH perp bazı ve funding'i.
+
+**Baz (2026-10-01'de kullanıcı isteğiyle eklendi):** Perp ve spot için aynı
+saat kullanılır: uyarı anında kapanmış son 1 saatlik mum. Perp fiyatı kontrat
+çarpanına bölünür (`1000PEPE` → PEPE). Perp/spot oranı 0.8–1.25 dışındaysa
+farklı varlık ya da birim demektir; değer `MISMATCH` olur, kullanılmaz.
 
 **Eksik veri:** Hesaplanamayan özellik `None` olarak kalır ve tablolarda
 kendi kovasında (`n/a`) görünür. Asla sıfır ya da nötr sayılmaz. Funding
 için durumlar ayrıdır: `NO_PERP` (perp yok), `STALE` (son ödeme 12 saatten
-eski), `NOT_LOADED`. Açık pozisyon (OI) geçmişi yalnızca günlük dosyalarda
+eski), `NOT_LOADED`. Baz için de aynı durumlar ve `MISMATCH` vardır. Açık pozisyon (OI) geçmişi yalnızca günlük dosyalarda
 ve 5 dakikalık çözünürlükte. Yüz binlerce dosya gerektirdiği için bu adımda
 **yok**.
 
@@ -164,6 +169,16 @@ yazıldı (2026-10-01):
    piyango benzeri coinler fazla ödenir (MAX etkisi).
 4. **Rejim:** Rejim, net getiriyi etkiler. Fazla getiriyi daha az etkiler,
    çünkü fazla getiri piyasa hareketini zaten çıkarır.
+5. **Baz (yön önceden varsayılmıyor):** İki rakip hipotez var.
+   - Kullanıcının hipotezi: Perp fiyatının spottan yüksek olması talebin
+     canlı olduğunu gösterir; yüksek bazlı uyarılar daha iyidir.
+   - Karşı hipotez: Yüksek baz, kaldıraçlı long kalabalığıdır; funding gibi
+     ileride zayıf getiriye işaret eder.
+
+   Baz ve funding birbirine bağlıdır: funding, primin ortalamasından
+   hesaplanır. Hangi yönün geçerli olduğuna yalnızca keşif verisi karar
+   verir. Bir filtre olması için etki iki yarıda da aynı yönde olmalıdır
+   (AGENTS.md §6: anlatı makul göründüğü için işaret atanmaz).
 
 Bu yönlerin tersini gösteren bir filtre ancak keşifte iki yarıda da güçlü
 ve tutarlıysa seçilir.

@@ -57,6 +57,8 @@ DAY_BARS = lr.DAY_BARS
 TRACK_BARS = long_alerts.TRACK_HOURS * 3_600 // BAR
 HOURLY_ROWS = 40                  # the live stop plan requests 40 1h klines
 FUNDING_MAX_AGE = 12 * 3_600      # 8h settlements; older than this is stale
+BASIS_RATIO_BOUNDS = (0.8, 1.25)  # outside: the perpetual is not the same asset/unit as the spot pair
+BASIS_MIN_HOURS = 20              # of the last 24 for the 24h average
 LIKIT_COST_PCT = lr.ReplayCosts().round_trip_pct()
 TACTICAL_COST_PCT = tr.ReplayCosts().round_trip_pct()
 
@@ -146,6 +148,57 @@ def funding_at(funding: Mapping[str, tuple[list[int], list[float]]] | None, symb
     }
 
 
+def _basis_summary(ratios: Sequence[tuple[int, float]]) -> dict[str, Any]:
+    """Basis (%) from (hours ago, perp/spot) pairs; the newest must be the last closed hour."""
+
+    if not ratios or ratios[0][0] != 1:
+        return {"basis_status": "STALE", "basis_pct": None, "basis_24h": None}
+    lo, hi = BASIS_RATIO_BOUNDS
+    if not lo <= ratios[0][1] <= hi:
+        return {"basis_status": "MISMATCH", "basis_pct": None, "basis_24h": None}
+    usable = [r for _, r in ratios if lo <= r <= hi]
+    return {
+        "basis_status": "OK",
+        "basis_pct": (ratios[0][1] - 1.0) * 100.0,
+        "basis_24h": (statistics.fmean(usable) - 1.0) * 100.0 if len(usable) >= BASIS_MIN_HOURS else None,
+    }
+
+
+def _perp_close(series: tuple[np.ndarray, np.ndarray], hour_open: int) -> float | None:
+    times, closes = series
+    j = int(np.searchsorted(times, hour_open))
+    return float(closes[j]) if j < len(times) and int(times[j]) == hour_open else None
+
+
+def basis_at(perp: Mapping[str, tuple[np.ndarray, np.ndarray]] | None, market: lr.Market, s: int,
+             i: int) -> dict[str, Any]:
+    """Perpetual close / spot close − 1 for the last closed hour (and its 24h mean), visible after bar ``i``.
+
+    Both sides use the same hour, closed at the alert. No direction is assumed:
+    a high basis may mean live demand or a crowded leveraged long (AGENTS.md §6).
+    """
+
+    if perp is None:
+        return {"basis_status": "NOT_LOADED", "basis_pct": None, "basis_24h": None}
+    series = perp.get(market.symbols[s])
+    if series is None or not len(series[0]):
+        return {"basis_status": "NO_PERP", "basis_pct": None, "basis_24h": None}
+    now = int(market.grid_open[i]) + BAR
+    last_end = now - now % 3_600
+    g0 = int(market.grid_open[0])
+    ratios = []
+    for h in range(1, 25):
+        hour = last_end - h * 3_600
+        k = (hour + 3_600 - BAR - g0) // BAR      # the hour's last 15m bar
+        if k < 0 or k > i:
+            continue
+        spot = market.close[s, k]
+        close = _perp_close(series, hour)
+        if close is not None and np.isfinite(spot) and spot > 0:
+            ratios.append((h, close / float(spot)))
+    return _basis_summary(ratios)
+
+
 def hourly_rows(market: lr.Market, s: int, i: int, *, hours: int = HOURLY_ROWS) -> list[tuple]:
     """Closed 1h candles built from complete groups of four 15m bars, as visible after bar ``i`` closes."""
 
@@ -223,6 +276,7 @@ def likit_rows(
     *,
     params: lr.RadarParams = lr.RadarParams(),
     funding: Mapping[str, tuple[list[int], list[float]]] | None = None,
+    perp: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None,
     window: tuple[int, int] = (DISCOVERY_START, DISCOVERY_END),
 ) -> list[dict[str, Any]]:
     """One row per alert the live rule would send: in the top 3 and ``can_open`` for the symbol."""
@@ -256,6 +310,7 @@ def likit_rows(
             row.update(context)
             row.update(_coin_features(market, step, i, s, params, ranks.get(s), context))
             row.update(funding_at(funding, symbol, now - 1))
+            row.update(basis_at(perp, market, s, i))
             row["stop_pct"] = plan.stop_pct if plan else None
             row["atr1h_pct"] = plan.atr_pct if plan else None
             row["structure_broken"] = (plan.technical_invalidation >= price) if plan else None
@@ -346,10 +401,52 @@ def _daily_trend(series: tr._Series, t: int, days: int = 20) -> dict[str, float 
     return out
 
 
+def tactical_basis(perp: Mapping[str, tuple[np.ndarray, np.ndarray]] | None, h1: tr._Series, symbol: str,
+                   t: int) -> dict[str, Any]:
+    """Basis for BTC/ETH from the spot and perpetual 1h candles closed at ``t``."""
+
+    if perp is None:
+        return {"basis_status": "NOT_LOADED", "basis_pct": None, "basis_24h": None}
+    series = perp.get(symbol)
+    if series is None or not len(series[0]):
+        return {"basis_status": "NO_PERP", "basis_pct": None, "basis_24h": None}
+    last_end = (t + 1) - (t + 1) % 3_600
+    ratios = []
+    for h in range(1, 25):
+        hour = last_end - h * 3_600
+        j = bisect_left(h1.open_time, hour)
+        if j >= len(h1) or h1.open_time[j] != hour or h1.close_time[j] > t:
+            continue
+        close = _perp_close(series, hour)
+        if close is not None:
+            ratios.append((h, close / h1.close[j]))
+    return _basis_summary(ratios)
+
+
+def load_tactical_perp(perp_dir: Path, *, end: int) -> tuple[dict, dict]:
+    """BTC/ETH perpetual 1h closes and funding from ``binance_vision`` parquet files (sealed)."""
+
+    import pandas as pd
+
+    perp, funding = {}, {}
+    for symbol in TACTICAL_SYMBOLS:
+        frame = pd.read_parquet(perp_dir / f"{symbol}_klines_1h.parquet").sort_values("open_time")
+        check_sealed(int(frame["close_time"].max()), end=end)
+        perp[symbol] = (frame["open_time"].to_numpy(dtype=np.int64), frame["close"].to_numpy(dtype=float))
+        path = perp_dir / f"{symbol}_funding.parquet"
+        if path.exists():
+            rows = pd.read_parquet(path).sort_values("funding_time")
+            check_sealed(int(rows["available_at"].max()), end=end)
+            funding[symbol] = ([int(x) for x in rows["available_at"]], [float(x) for x in rows["funding_rate"]])
+    return perp, funding
+
+
 def tactical_rows(
     records: Sequence[Any],
     data: Mapping[str, Mapping[TacticalTimeframe, tr._Series]],
     *,
+    perp: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None,
+    funding: Mapping[str, tuple[list[int], list[float]]] | None = None,
     window: tuple[int, int] = (DISCOVERY_START, DISCOVERY_END),
 ) -> list[dict[str, Any]]:
     """One row per tactical alert (a forward-ledger record), with three exits side by side."""
@@ -398,6 +495,8 @@ def tactical_rows(
         row.update({"sma20d_dist": own["sma20d"], "chg_7d": own["7d"], "chg_30d": own["30d"],
                     "btc_sma20d": btc["sma20d"], "btc_7d": btc["7d"], "btc_30d": btc["30d"]})
         j4 = h4.last_closed_index(t)
+        row.update(tactical_basis(perp, h1, record.symbol, t))
+        row.update(funding_at(funding, record.symbol, t))
         row["h4_sma50_dist"] = (
             (h4.close[j4] / statistics.fmean(h4.close[j4 - 49:j4 + 1]) - 1.0) * 100.0 if j4 >= 49 else None
         )
@@ -465,9 +564,9 @@ LIKIT_FEATURES = (
     "liq_rank", "tech_score", "chg_1h", "chg_4h", "chg_24h", "chg_7d", "ema20_dist", "ema20_slope",
     "rsi14", "atr15_pct", "vol_ratio", "range_pos", "dd_from_high", "sma20d_dist", "log_qv24", "rel_24h",
     "rel_7d", "btc_24h", "btc_7d", "btc_30d", "btc_sma20d", "basket_24h", "basket_7d", "breadth_sma20d",
-    "funding_last", "funding_3d", "stop_pct", "atr1h_pct",
+    "funding_last", "funding_3d", "basis_pct", "basis_24h", "stop_pct", "atr1h_pct",
 )
-LIKIT_CATEGORIES = ("rank", "regime", "funding_status", "structure_broken", "stop72_status")
+LIKIT_CATEGORIES = ("rank", "regime", "funding_status", "basis_status", "structure_broken", "stop72_status")
 
 TACTICAL_OUTCOMES: dict[str, Callable[[Mapping[str, Any]], float | None]] = {
     "ledger_r": lambda r: r.get("ledger_r"),
@@ -478,8 +577,10 @@ TACTICAL_OUTCOMES: dict[str, Callable[[Mapping[str, Any]], float | None]] = {
 TACTICAL_FEATURES = (
     "ledger_risk_pct", "cost_to_risk", "rr1", "entry_gap_pct", "engine_stop_pct", "atr1h_pct", "atr_stop_pct",
     "chg_4h", "chg_24h", "chg_7d", "chg_30d", "sma20d_dist", "h4_sma50_dist", "btc_sma20d", "btc_7d", "btc_30d",
+    "basis_pct", "basis_24h", "funding_last", "funding_3d",
 )
-TACTICAL_CATEGORIES = ("setup", "symbol", "state", "structure_4h", "ledger_status", "radar_log_eligible")
+TACTICAL_CATEGORIES = ("setup", "symbol", "state", "structure_4h", "ledger_status", "radar_log_eligible",
+                       "basis_status", "funding_status")
 
 
 def day_cluster_ci(values: Sequence[float], times: Sequence[int], *, alpha: float = 0.05,
@@ -652,14 +753,16 @@ def build_discovery_data(radar: str, out_dir: Path) -> dict:
 
     if radar == "likit":
         from trading.data.binance_universe import build_universe
-        from trading.data.universe_funding import build_funding
+        from trading.data.universe_funding import build_funding, build_perp_hourly
 
         manifest = build_universe(out_dir, lookback_months=DISCOVERY_MONTHS, decision_at=DISCOVERY_END)
         funding = build_funding(out_dir, out_dir / "funding", decision_at=DISCOVERY_END)
+        perp = build_perp_hourly(out_dir, out_dir / "funding", decision_at=DISCOVERY_END)
         return {
             "window": manifest["window"], "candidates": manifest["candidates"],
             "stopped": len(manifest["stopped_before_window_end"]),
             "funding": {k: funding[k] for k in ("with_perp", "with_rows", "rows", "ambiguous")},
+            "perp_1h": {k: perp[k] for k in ("with_perp", "with_rows", "rows", "ambiguous")},
         }
     from trading.data.binance_perp import Timeframe
     from trading.data.binance_vision import download_symbol
@@ -668,7 +771,10 @@ def build_discovery_data(radar: str, out_dir: Path) -> dict:
     for symbol in tr.SYMBOLS:
         download_symbol(symbol, out_dir=out_dir, decision_at=DISCOVERY_END, timeframes=timeframes,
                         lookback_months=DISCOVERY_MONTHS, market="spot", include_funding=False)
-    return {"symbols": list(tr.SYMBOLS)}
+    for symbol in TACTICAL_SYMBOLS:
+        download_symbol(symbol, out_dir=out_dir / "perp", decision_at=DISCOVERY_END, timeframes=(Timeframe("1h"),),
+                        lookback_months=DISCOVERY_MONTHS, market="futures/um", include_funding=True)
+    return {"symbols": list(tr.SYMBOLS), "perpetuals": list(TACTICAL_SYMBOLS)}
 
 
 def _cli(argv: Iterable[str] | None = None) -> int:
@@ -686,6 +792,7 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     likit.add_argument("--workers", type=int, default=max(1, os.cpu_count() or 1))
     tactical = sub.add_parser("tactical")
     tactical.add_argument("--data-dir", type=Path, default=Path("research/data/sq_binance_spot"))
+    tactical.add_argument("--perp-dir", type=Path, default=None)
     tactical.add_argument("--workers", type=int, default=max(1, os.cpu_count() or 1))
     for p in (likit, tactical):
         p.add_argument("--out-dir", type=Path, default=Path("research/data/signal_quality"))
@@ -699,13 +806,14 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     window = (DISCOVERY_START, DISCOVERY_END)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     if args.radar == "likit":
-        from trading.data.universe_funding import load_funding
+        from trading.data.universe_funding import load_funding, load_perp_hourly
 
         market, _, excluded = load_likit_market(args.data_dir, end=DISCOVERY_END)
         print(f"excluded (history identity): {json.dumps(excluded, sort_keys=True)}")
         funding = load_funding(args.funding_dir) if args.funding_dir else None
+        perp = load_perp_hourly(args.funding_dir) if args.funding_dir else None
         steps = lr.evaluate(market, lr.RadarParams(), workers=args.workers, progress=True)
-        rows = likit_rows(market, steps, funding=funding, window=window)
+        rows = likit_rows(market, steps, funding=funding, perp=perp, window=window)
         report = describe(rows, features=LIKIT_FEATURES, categories=LIKIT_CATEGORIES, outcomes=LIKIT_OUTCOMES)
         outcomes = list(LIKIT_OUTCOMES)
         title = f"Likit-100 alerts, discovery window ({len(rows)} rows, cost {LIKIT_COST_PCT:.2f}% round trip)"
@@ -714,7 +822,8 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         phase1 = tr.evaluate(data, spread_bps=2.0, workers=args.workers, progress=True)
         end_time = tr.decision_times(data)[-1]
         records = tr.record_outcomes(phase1.events, data, end_time=end_time)
-        rows = tactical_rows(records, data, window=window)
+        perp, funding = load_tactical_perp(args.perp_dir, end=DISCOVERY_END) if args.perp_dir else (None, None)
+        rows = tactical_rows(records, data, perp=perp, funding=funding, window=window)
         report = describe(rows, features=TACTICAL_FEATURES, categories=TACTICAL_CATEGORIES,
                           outcomes=TACTICAL_OUTCOMES, q=3)
         outcomes = list(TACTICAL_OUTCOMES)
