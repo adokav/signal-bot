@@ -53,7 +53,7 @@ Baş test kombinasyonu: TSMOM + vol targeting + BTC top-of-book filter.
 - [x] Ölü kod silme birinci dalga (~4400 satır, PR #100).
 - [x] `requirements-trading.txt` (Faz A dev deps).
 
-### Faz A — Kanıt (Hafta 2-3) — v1 NO-GO; düzeltilmiş v2 (run #54) NO-GO
+### Faz A — Kanıt (Hafta 2-3) — v1 NO-GO; düzeltilmiş v2 NO-GO; Faz A3 (saf TSMOM + kontrol) NO-GO
 
 > **Run #54 (2026-09-30):** düzeltilmiş harness ile EV +%0.249/işlem,
 > Sharpe 0.53 (B&H 0.80), DSR 0.642, max DD −%40 → `REJECTED_AT_BACKTEST`.
@@ -198,11 +198,10 @@ Durum: **✅** yapıldı · **◐** kısmi · **✗** bilinçli olarak yapılmad
 
 1. ✅ **Düzeltilmiş v2 yeniden koşusu** — run #54: NO-GO (zayıf pozitif,
    DSR 0.642, Sharpe 0.53 < B&H 0.80).
-2. ◐ **Adil TSMOM testi (Faz A3)** — `--variant signal_exit` ve
-   `always_long` kontrolü eklendi, deneme kaydına ön-kayıt yapıldı (N=4).
-   Protokol ve önceden sabitlenmiş karar kuralları
-   `docs/BACKTEST_REPORT_v1_RESULTS.md` "Faz A3" bölümünde. Bekleyen iş: üç
-   koşu (72 ay).
+2. ✅ **Adil TSMOM testi (Faz A3)** — run #57, 72 ay, N=4 ön-kayıtlı: ladder,
+   saf TSMOM ve kontrolün **üçü de NO-GO**. Saf TSMOM en iyisi (Sharpe 0.62
+   vs B&H 0.59, daha küçük DD) ama walk-forward tutarsız, bootstrap CI sıfırı
+   içeriyor, kârın %43'ü tek işlemden. Ayrıntı: `docs/BACKTEST_REPORT_v1_RESULTS.md`.
 3. **Taktik setup'ların tarihsel replay'i** — `TacticalLongEngine`'i
    Binance vision spot M5–D1 verisiyle geçmişte çalıştırmak. İleri kaydın
    ≥100 örneğe ulaşması aylar sürer; replay en hızlı kanıt yolu. MEXC ile
@@ -226,9 +225,12 @@ Durum: **✅** yapıldı · **◐** kısmi · **✗** bilinçli olarak yapılmad
 
 ## Şu anki durum
 
-Faz 0 tamamlandı. Faz A v1 NO-GO; düzeltilmiş v2 (run #54) NO-GO — zayıf
-pozitif ama anlamlı değil ve B&H'nin gerisinde. Faz Q (quant spec revizyonu) araştırma, risk
+Faz 0 tamamlandı. Faz A ailesinin dört denemesinin (v1, ladder, saf TSMOM,
+kontrol) hepsi NO-GO: tek sembol BTC long-only yönlü stratejiler al-tut'u
+risk-ayarlı olarak anlamlı biçimde geçemedi. Faz Q (quant spec revizyonu) araştırma, risk
 ve dürüst etiketleme katmanlarını ekledi. Canlı radar SHADOW'da ve azami
 statü WATCH. Emir yolu yok; kanıt oluşmadan eklenmeyecek.
 
-**Sonraki iş:** "Faz Q → Sonraki adımlar" listesinin 2. maddesi (adil TSMOM testi + kontrol koşusu).
+**Sonraki iş:** karar kullanıcıda — BTC tek-sembol yönlü araştırmayı kapatmak, farklı bir edge
+sınıfına (taktik setup replay'i, çapraz-kesit, funding/basis) geçmek ya da ileri kayıtla kanıt
+biriktirmek. Her yeni hipotez deneme kaydına önceden girer.
