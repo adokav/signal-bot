@@ -268,6 +268,11 @@ güncellenenler belirtildi.
         doğrulamasının.
 12. ⏳ **Majör coin atlası, 2017-09 → 2024-08** — `docs/ATLAS.md`.
     - Ay ay piyasa, makro (FRED) ve takvim. Sinyal değil, açıklama.
+    - Piyasa katmanı hazır (`research/atlas/market_monthly.csv`). En iyi 5
+      sepet ayının hepsinden önce BTC YÜKSELİŞ'teydi; en kötü 5 ayın
+      hiçbirinden önce YÜKSELİŞ'te değildi. Tipik ayda trend durumu bir şey
+      söylemiyor. Keşiftir, kanıt değil. Makro katman, iş akışı çalışınca
+      eklenecek.
     - Hipotezler kullanıcıyla birlikte çıkarılacak ve önce ön-kayda girecek.
     - Ardından "trend bozulunca çık" döngüsüyle birlikte, mühürlü 2024-09 →
       2026-08 penceresinde bir kez test edilecek.
