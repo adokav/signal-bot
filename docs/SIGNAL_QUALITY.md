@@ -1,9 +1,11 @@
 # Sinyal kalitesi — özellik tablosu ve filtre protokolü
 
-**Durum:** Adım 1 (keşif). Bu belgenin protokol ve karar kuralları bölümleri,
-keşif sonuçlarından **önce** yazıldı (2026-10-01).
+**Durum:** Adım 2 tamam: keşif bitti, iki test ön-kayda alındı. Doğrulama
+(adım 3) bekliyor. Protokol ve karar kuralları keşif sonuçlarından **önce**
+yazıldı (2026-10-01). Keşiften sonra yapılan değişiklikler ayrıca
+işaretlendi.
 **Kod:** `trading/backtest/signal_quality.py`, `trading/data/universe_funding.py`,
-workflow `signal_quality`.
+workflow'lar `signal_quality` (keşif) ve `signal_quality_confirm` (doğrulama).
 
 Araştırma ölçümüdür. Sonucu ne olursa olsun emir yetkisi vermez
 (`can_authorize_trade = false`, AGENTS.md §4, §10).
@@ -125,24 +127,46 @@ ve 5 dakikalık çözünürlükte. Yüz binlerce dosya gerektirdiği için bu ad
   seçilmez.
 - Seçilen filtreler, parametreleri ve aşağıdaki kurallar, doğrulama
   koşulmadan önce kayıt defterine yazılır.
+- **Keşiften sonra eklenen not:** Oynaklık, adlandırılmış dört aileden biri
+  değildi. Ancak tablo görülmeden yazılan beklenen yönlerde (madde 3) vardı.
+  F1'de aşırı uzama ile birlikte kullanılıyor.
 
 ## Doğrulama karar kuralları (ön-kayıtlı, sonuçlardan önce)
 
-`k` ön-kayıtlı filtre sayısıdır (≤ 3). Bonferroni düzeltmesi α = 0.05 / k.
-Güven aralıkları gün-kümeli bootstrap ile hesaplanır.
+Ön-kayıtlı test sayısı `k = 2`'dir (F1, F2). Bonferroni düzeltmesi
+α = 0.05 / 2 = **0.025**. Güven aralıkları gün-kümeli bootstrap ile
+hesaplanır (4000 örnek). Fark güven aralığı, iki grubun günleri birlikte
+yeniden örneklenerek hesaplanır. Doğrulama penceresinin yarıları sabittir:
+2024-09 → 2025-08 ve 2025-09 → 2026-08.
 
 Bir filtre **PASS** olur, ancak ve ancak filtreden geçen uyarılarda:
 
 1. ≥ 100 uyarı;
-2. ortalama net stop72 sonucunun alt sınırı > 0;
-3. ortalama net stop72 fazla getirisinin alt sınırı > 0;
+2. ortalama net sonucun alt sınırı > 0;
+3. fazla getirinin alt sınırı > 0;
 4. stres maliyetiyle (komisyon ×1.5, slippage ×2) ortalama net sonuç > 0;
-5. doğrulama penceresinin iki kronolojik yarısında hem net sonuç hem fazla
-   getiri > 0.
+5. iki yarıda hem net sonuç hem fazla getiri > 0.
 
-PASS değilse ve (geçen − elenen) ortalama net stop72 farkının alt sınırı > 0
-ise **KAYBI_AZALTIR** olur. Bu, filtrenin kötü sinyalleri ayırdığını ama
-kalan sinyallerin para kazandırdığının gösterilmediğini söyler.
+Sonuç ve fazla getiri tanımları:
+
+- **F1 (Likit-100):** Sonuç, canlı stop + 72 saat kuralının net % getirisidir.
+  Fazla getiri, aynı tutma süresinde eşit ağırlıklı ilk 100'e göre
+  ölçülür.
+- **F2 (taktik):** Sonuç, ATR stopu + 72 saat kuralının R'sidir. Fazla getiri,
+  aynı penceredeki **rastgele saat girişlerine** göre ölçülür. Bunlar aynı
+  stop kuralıyla ve aynı filtreyle (perp < spot) her saat başı yapılan
+  girişlerdir. Böylece uyarının, piyasanın kendisinden daha iyi bir an seçip
+  seçmediği test edilir.
+
+PASS değilse, şu iki koşul birlikte sağlanırsa **KAYBI_AZALTIR** olur:
+
+- (geçen − elenen) ortalama net sonuç farkının alt sınırı > 0;
+- bu fark iki yarıda da > 0.
+
+Bu, filtrenin kötü sinyalleri ayırdığını ama kalan sinyallerin para
+kazandırdığının gösterilmediğini söyler. Yarı koşulu keşiften sonra, doğrulama
+verisi görülmeden eklendi; ölçütü sıkılaştırır. Değeri bilinmeyen uyarılar
+(özellik eksik) iki gruba da girmez, ayrıca sayılır.
 
 Diğer durumlar **NO_EFFECT**.
 
@@ -183,6 +207,110 @@ yazıldı (2026-10-01):
 Bu yönlerin tersini gösteren bir filtre ancak keşifte iki yarıda da güçlü
 ve tutarlıysa seçilir.
 
-## Keşif sonuçları
+## Keşif sonuçları (2020-10 → 2024-08, yalnızca keşif penceresi)
 
-Henüz yok.
+Tablolar yerelde, mühürlü veriyle üretildi: 2024-09-01 itibarıyla kurulan
+veride sonrasına ait hiçbir mum yok. Aynı tablo `signal_quality` workflow'u
+ile yeniden üretilebilir.
+
+### BTC/ETH taktik: 4.961 uyarı
+
+| Ölçü | Ortalama |
+|---|---:|
+| Ledger R (limit dolumu, T1 stoptan önce mi) | −0.25R (replay ile tutarlı) |
+| Uyarı fiyatı + motor stopu + 72 saat | −0.13R |
+| Uyarı fiyatı + ATR stopu + 72 saat | −0.03R |
+| **Kontrol:** her saat başı rastgele giriş, aynı ATR stopu | +0.02R |
+
+- **Uyarılar, rastgele bir saatten daha iyi bir giriş anı seçmiyor.**
+- BTC 20 günlük ortalamasının üstündeyken uyarılar +0.05R, rastgele saatler
+  +0.11R. İyileşme sinyalden değil, piyasanın yönünden geliyor (Faz A'da test
+  edilen TSMOM).
+- **Baz:**
+  - Perp ≥ spot iken uyarılar −0.20R, perp < spot iken +0.04R. İki yarıda da
+    aynı yön.
+  - Rastgele saatlerde bu ayrım yok (+0.02 / +0.01).
+  - Kullanıcının hipotezinin **tersi**: perp'in spottan yüksek olması
+    uyarılar için kötü.
+  - Funding'de de aynı tablo var.
+
+### Likit-100: 33.333 uyarı
+
+Canlı uyarı kuralı uygulandı (İlk 3 + `can_open`). Tarihsel kimlik katmanı 7
+sembolü çıkardı: AUD, PAX, UST, PAXG, WBTC, BETH, WBETH.
+
+Tüm uyarılar: stop72 net −0.68%, fazla getiri −0.55%. Her rejimde negatif.
+
+Fazla getiri (stop + 72 saat, maliyet sonrası). Parantez içi: keşfin iki
+yarısı.
+
+| Özellik | En iyi beşte bir | En kötü beşte bir |
+|---|---:|---:|
+| 15 dk ATR | +0.10 (+0.23 / +0.03) | −2.04 (−1.87 / −2.27) |
+| Evrene göre 24 saatlik göreli getiri | +0.11 | −2.13 (−2.04 / −2.23) |
+| Hacim sırası (1–20 / 81–100) | −0.11 | −1.20 |
+| 24 saatlik zirveden uzaklık | +0.09 | −1.86 |
+| Teknik puan (yüksek / düşük) | −0.26 | −1.42 |
+| Funding, baz (perp'i olan coinler) | düz; yarılar tutarsız | |
+
+**Önceden yazılan beklentilerle karşılaştırma:**
+
+- **1 Aşırı uzama, 3 Oynaklık:** doğrulandı (iki yarıda da güçlü).
+- **2 Funding:** perp'i olan altlarda bilgi yok.
+- **4 Rejim:** net getiriyi etkiliyor, fazla getiriyi değil.
+- **5 Baz:** altlarda bilgi yok. BTC/ETH uyarılarında kullanıcının
+  hipotezinin tersi.
+
+**Perp'i olmayan coinler:** Uyarı anında perp'i olmayan coinler −1.76%
+fazla getiri veriyor; olanlar −0.16%. Ancak "hiç perp'i olmayan" grubu
+(−3.1%) kısmen geriye bakış içeriyor: çöken coinler hiç perp almamış. Canlıda
+Binance futures erişimi de belirsiz. Test edilmedi.
+
+**En iyi bileşim yalnızca başa baş:** ATR ≤ %1 ve göreli 24 saat ≤ 5 puan:
+
+| | Uyarıların payı | Fazla getiri | Net |
+|---|---:|---:|---:|
+| Geçen | %28 | +0.12% | −0.10% |
+| Elenen | %72 | −0.82% | −0.91% |
+
+Eşik ±%20–50 değiştiğinde sonuç aynı yönde kalıyor. Filtreler kötü
+uyarıları ayırıyor; kalanların para kazandırdığına dair kanıt yok.
+
+## Ön-kayıtlı testler (adım 2)
+
+| Test | Kural | Neden |
+|---|---|---|
+| **F1** Likit-100 sakin ve kovalamayan | 15 dk ATR(14) ≤ **%1.0** **ve** 24 saatlik değişim − evren medyanı ≤ **5 puan** ise uyarı geçer | Önceden beklenen iki yön (madde 1 ve 3), en güçlü ve tutarlı ayrım |
+| **F2** Taktik, perp < spot | Uyarı anında son kapanmış saatte perp/spot − 1 **< 0** ise geçer | Kullanıcının baz sorusu; keşifte ters yönde, iki yarıda tutarlı |
+
+**Seçilmeyenler:**
+
+- **ATR stopu ile motor stopu karşılaştırması (taktik):** Keşifte 4 yılda
+  bile güven aralığı sıfırı içeriyor (+0.10R [−0.01, +0.21]). 2 yıllık
+  doğrulamada gücü çok düşük olurdu ve diğer testlerin α payını küçültürdü.
+- **Perp'in varlığı:** Geriye bakış kirliliği ve canlı veri belirsizliği
+  (yukarıda).
+- **Rejim kapısı:** Fazla getiriyi değiştirmiyor. Taktikte etkisi rastgele
+  saatlerle aynı.
+
+**Beklenen sonuç (dürüst):**
+
+- **F1:** Keşifte geçen uyarıların net sonucu −0.10%. PASS olası değil.
+  Gerçekçi en iyi sonuç KAYBI_AZALTIR.
+- **F2:** Gücü düşük. Keşifteki fark +0.24R; güven aralığının alt sınırı
+  ancak sıfırın üstündeydi. Doğrulama penceresi yarı uzunlukta olduğu için,
+  etki gerçek olsa bile NO_EFFECT çıkabilir.
+
+**Ön-kayıt:** `signal_quality_filters` ailesi, trial `a2a9af1b364c9ac7`,
+kod parmak izi `140bd27fc1a3cc31` (`research/trials/registry.jsonl`,
+2026-10-01). Kayıt, doğrulama penceresinin verisi indirilmeden ve
+görülmeden yapıldı. Doğrulama workflow'u: `signal_quality_confirm`.
+
+**Değişmezlik:**
+
+- Parmak izi (`logic_fingerprint`) sinyal, özellik ve sonuç üreten bütün
+  dosyaları kapsar.
+- `long_alerts.py`'den yalnızca stop/takip kurallarını ve sabitlerini kapsar.
+  Telegram metni değişirse deneme bozulmaz.
+- Doğrulama komutu, kayıt defterinde bu kodun denemesi yoksa çalışmayı
+  reddeder.

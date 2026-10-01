@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import csv
 import gzip
+import hashlib
+import inspect
 import json
 import math
 import os
@@ -279,7 +281,12 @@ def likit_rows(
     perp: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None,
     window: tuple[int, int] = (DISCOVERY_START, DISCOVERY_END),
 ) -> list[dict[str, Any]]:
-    """One row per alert the live rule would send: in the top 3 and ``can_open`` for the symbol."""
+    """One row per alert the live rule would send: in the top 3 and ``can_open`` for the symbol.
+
+    The rule's state (open entry, 12h cooldown) also runs over the data before
+    ``window`` (the warm-up months), so the first alerts in the window are the
+    ones live would have sent; only alerts inside the window become rows.
+    """
 
     last: dict[int, dict[str, Any]] = {}     # symbol index -> its latest radar entry
     rows: list[dict[str, Any]] = []
@@ -287,8 +294,9 @@ def likit_rows(
         if step is None or not step.top:
             continue
         now = int(market.grid_open[i]) + BAR
-        if not window[0] <= now - 1 < window[1]:
-            continue
+        if now - 1 >= window[1]:
+            break
+        in_window = now - 1 >= window[0]
         context: dict[str, Any] | None = None
         ranks = {s: k for k, s in enumerate(step.universe, 1)}
         for rank, s in enumerate(step.top, 1):
@@ -300,12 +308,21 @@ def likit_rows(
             }]
             if not long_alerts.can_open(view, "LIKIT100", symbol, now=now):
                 continue
-            if context is None:
-                context = market_features(market, step, i)
             price = float(market.close[s, i])
             plan = long_alerts.compute_stop_plan(hourly_rows(market, s, i), price, now=now)
             entry = long_alerts.open_entry(source="LIKIT100", symbol=symbol, now=now, gate_status="REPLAY",
                                            detail="", plan=plan, entry_price=price)
+            if plan is None:
+                outcome = {"status": "NO_PLAN", "result_pct": None, "closed_at": now, "note": ""}
+            else:
+                edge = int(market.grid_open[min(int(market.coverage_end[s]), market.n_grid - 1)]) + BAR
+                outcome = stop_outcome(entry, track_rows(market, s, i), resolvable_until=edge,
+                                       data_continues=int(market.last_index[s]) > i + TRACK_BARS)
+            last[s] = {"opened_at": now, "closed_at": outcome["closed_at"] if outcome["status"] != "UNRESOLVABLE" else math.inf}
+            if not in_window:
+                continue
+            if context is None:
+                context = market_features(market, step, i)
             row: dict[str, Any] = {"symbol": symbol, "decided_at": now - 1, "rank": rank, "liq_rank": ranks.get(s)}
             row.update(context)
             row.update(_coin_features(market, step, i, s, params, ranks.get(s), context))
@@ -314,13 +331,6 @@ def likit_rows(
             row["stop_pct"] = plan.stop_pct if plan else None
             row["atr1h_pct"] = plan.atr_pct if plan else None
             row["structure_broken"] = (plan.technical_invalidation >= price) if plan else None
-            if plan is None:
-                outcome = {"status": "NO_PLAN", "result_pct": None, "closed_at": now, "note": ""}
-            else:
-                edge = int(market.grid_open[min(int(market.coverage_end[s]), market.n_grid - 1)]) + BAR
-                outcome = stop_outcome(entry, track_rows(market, s, i), resolvable_until=edge,
-                                       data_continues=int(market.last_index[s]) > i + TRACK_BARS)
-            last[s] = {"opened_at": now, "closed_at": outcome["closed_at"] if outcome["status"] != "UNRESOLVABLE" else math.inf}
             row.update({f"stop72_{k}": v for k, v in outcome.items() if k != "closed_at"})
             exit_bars = None
             if outcome.get("closed_at") and outcome["status"] in (long_alerts.STOPPED, long_alerts.EXPIRED):
@@ -744,37 +754,347 @@ def _write_json(payload: Mapping[str, Any], path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Step 2: pre-registered tests; step 3: the one-shot confirmation
+# ---------------------------------------------------------------------------
+
+FILTER_FAMILY = "signal_quality_filters"
+CONFIRMATION_MONTHS = 27          # 2024-06 .. 2026-08: warm-up before 2024-09, then the window
+HALF_AT = 1_756_684_800           # 2025-09-01T00:00:00Z: fixed split of the confirmation window
+CONFIRM_MIN_N = 100
+FILTER_TESTS = ("F1_LIKIT_CALM_NOT_CHASING", "F2_TACTICAL_PERP_BELOW_SPOT")
+FILTER_ALPHA = 0.05 / len(FILTER_TESTS)
+LIKIT_ATR15_MAX = 1.0             # % (15m ATR(14) / price), discovery: below the 2nd quintile edge 1.12
+LIKIT_REL24_MAX = 5.0             # percentage points above the universe median 24h change
+TACTICAL_BASIS_MAX = 0.0          # keep only while the perpetual trades below spot
+LIKIT_STRESS_COST_PCT = lr.ReplayCosts().round_trip_pct(fee_mult=1.5, slip_mult=2.0)
+TACTICAL_STRESS_COST_PCT = tr.ReplayCosts().round_trip_pct(fee_mult=1.5, slip_mult=2.0)
+FILTER_DATASET = {
+    "source": "binance_vision_spot_and_um_perpetual",
+    "confirmation_window": "2024-09..2026-08",
+    "built_as_of": CONFIRMATION_END,
+}
+
+# Everything that produces a signal, a feature used by a test, or an outcome.
+FINGERPRINT_FILES = (
+    "trading/backtest/signal_quality.py",
+    "trading/backtest/liquid_replay.py",
+    "trading/backtest/tactical_replay.py",
+    "trading/data/universe_funding.py",
+    "trading/data/binance_universe.py",
+    "trading/data/binance_vision.py",
+    "trading/data/binance_carry_universe.py",
+    "trading/data/binance_history_identity.py",
+    "acce_unified/liquid_long.py",
+    "acce_unified/cex.py",
+    "acce_unified/models.py",
+    "acce_unified/tactical_long.py",
+    "acce_unified/tactical_long_data.py",
+    "acce_unified/tactical_long_engine.py",
+    "acce_unified/forward_ledger.py",
+)
+# long_alerts also formats Telegram text; only its rules are part of the trial.
+LONG_ALERT_LOGIC = ("closed_candles", "StopPlan", "compute_stop_plan", "plan_from_levels", "can_open",
+                    "open_entry", "track_entry")
+LONG_ALERT_CONSTANTS = ("STOP_INTERVAL_SECONDS", "STOP_LOOKBACK", "ATR_PERIOD", "BUFFER_ATR", "MIN_STOP_ATR",
+                        "RISK_PER_TRADE_PCT", "TRACK_INTERVAL_SECONDS", "TRACK_HOURS", "COOLDOWN_HOURS",
+                        "STALE_GRACE_HOURS")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def logic_fingerprint(repo_root: Path = REPO_ROOT) -> str:
+    digest = hashlib.sha256()
+    for name in FINGERPRINT_FILES:
+        digest.update(name.encode())
+        digest.update((repo_root / name).read_bytes())
+    for name in LONG_ALERT_LOGIC:
+        digest.update(inspect.getsource(getattr(long_alerts, name)).encode())
+    for name in LONG_ALERT_CONSTANTS:
+        digest.update(f"{name}={getattr(long_alerts, name)!r}".encode())
+    return digest.hexdigest()[:16]
+
+
+def likit_calm_not_chasing(row: Mapping[str, Any]) -> bool | None:
+    """F1: 15m ATR ≤ 1.0% and a 24h gain at most 5 points above the universe median; None if unknown."""
+
+    atr, rel = row.get("atr15_pct"), row.get("rel_24h")
+    if atr is None or rel is None:
+        return None
+    return atr <= LIKIT_ATR15_MAX and rel <= LIKIT_REL24_MAX
+
+
+def tactical_perp_below_spot(row: Mapping[str, Any]) -> bool | None:
+    """F2: keep a BTC/ETH alert only while the perpetual trades below spot; None if the basis is unknown."""
+
+    basis = row.get("basis_pct")
+    return None if basis is None else basis < TACTICAL_BASIS_MAX
+
+
+def likit_net(row: Mapping[str, Any], cost: float = LIKIT_COST_PCT) -> float | None:
+    result = row.get("stop72_result_pct")
+    return None if result is None else result - cost
+
+
+def likit_excess(row: Mapping[str, Any], cost: float = LIKIT_COST_PCT) -> float | None:
+    result, bench = row.get("stop72_result_pct"), row.get("stop72_bench_pct")
+    return None if result is None or bench is None else result - cost - bench
+
+
+def tactical_r(row: Mapping[str, Any], stop: str, cost: float = TACTICAL_COST_PCT) -> float | None:
+    """R of the stop + 72h exit with stop rule ``stop`` ('engine' or 'atr') at round-trip ``cost``."""
+
+    result, stop_pct = row.get(f"{stop}72_result_pct"), row.get(f"{stop}_stop_pct")
+    if result is None or stop_pct is None:
+        return None
+    return (result - cost) / (stop_pct + cost)
+
+
+Pairs = list[tuple[float, int]]
+
+
+def _pairs(rows: Iterable[Mapping[str, Any]], value: Callable[[Mapping[str, Any]], float | None]) -> Pairs:
+    out = []
+    for row in rows:
+        v = value(row)
+        if v is not None and math.isfinite(v):
+            out.append((float(v), int(row["decided_at"])))
+    return out
+
+
+def _mean(values: Sequence[float]) -> float | None:
+    return statistics.fmean(values) if values else None
+
+
+def group_summary(pairs: Pairs, *, alpha: float = FILTER_ALPHA) -> dict[str, Any]:
+    values = [v for v, _ in pairs]
+    return {
+        "n": len(values),
+        "mean": _mean(values),
+        "ci": lr.day_cluster_ci(values, [t // 86_400 for _, t in pairs], alpha=alpha, n_resamples=4000)
+        if len(values) >= 2 else None,
+        "h1": _mean([v for v, t in pairs if t < HALF_AT]),
+        "h2": _mean([v for v, t in pairs if t >= HALF_AT]),
+    }
+
+
+def diff_ci(a: Pairs, b: Pairs, *, alpha: float = FILTER_ALPHA, n_resamples: int = 4000,
+            seed: int = 0) -> tuple[float, float] | None:
+    """CI of mean(a) − mean(b), resampling whole UTC days of both groups together."""
+
+    if len(a) < 2 or len(b) < 2:
+        return None
+    days = sorted({t // 86_400 for _, t in a} | {t // 86_400 for _, t in b})
+    index = {d: k for k, d in enumerate(days)}
+
+    def sums(pairs: Pairs) -> tuple[np.ndarray, np.ndarray]:
+        labels = np.array([index[t // 86_400] for _, t in pairs])
+        return (np.bincount(labels, weights=[v for v, _ in pairs], minlength=len(days)),
+                np.bincount(labels, minlength=len(days)).astype(float))
+
+    (sa, ca), (sb, cb) = sums(a), sums(b)
+    draws = np.random.default_rng(seed).integers(0, len(days), size=(n_resamples, len(days)))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        diffs = sa[draws].sum(1) / ca[draws].sum(1) - sb[draws].sum(1) / cb[draws].sum(1)
+    diffs = diffs[np.isfinite(diffs)]
+    if len(diffs) < n_resamples // 2:
+        return None
+    return float(np.quantile(diffs, alpha / 2)), float(np.quantile(diffs, 1 - alpha / 2))
+
+
+def difference(a: Pairs, b: Pairs, *, alpha: float = FILTER_ALPHA) -> dict[str, Any]:
+    def half(pairs: Pairs, first: bool) -> list[float]:
+        return [v for v, t in pairs if (t < HALF_AT) == first]
+
+    def gap(x: list[float], y: list[float]) -> float | None:
+        return None if not x or not y else statistics.fmean(x) - statistics.fmean(y)
+
+    return {
+        "mean": gap([v for v, _ in a], [v for v, _ in b]),
+        "ci": diff_ci(a, b, alpha=alpha),
+        "h1": gap(half(a, True), half(b, True)),
+        "h2": gap(half(a, False), half(b, False)),
+    }
+
+
+def _positive(summary: Mapping[str, Any]) -> bool:
+    """Lower bound > 0 and both halves > 0."""
+
+    ci = summary.get("ci")
+    return bool(ci) and ci[0] > 0 and (summary.get("h1") or 0) > 0 and (summary.get("h2") or 0) > 0
+
+
+def filter_verdict(net: Mapping[str, Any], excess: Mapping[str, Any], stress: Mapping[str, Any],
+                   kept_vs_dropped: Mapping[str, Any]) -> str:
+    """PASS: kept alerts make money and beat their benchmark; KAYBI_AZALTIR: only the worse ones are separated."""
+
+    if net["n"] >= CONFIRM_MIN_N and _positive(net) and _positive(excess) and (stress.get("mean") or 0) > 0:
+        return "PASS"
+    if _positive(kept_vs_dropped):
+        return "KAYBI_AZALTIR"
+    return "NO_EFFECT"
+
+
+def evaluate_f1(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    kept = [r for r in rows if likit_calm_not_chasing(r) is True]
+    dropped = [r for r in rows if likit_calm_not_chasing(r) is False]
+    net, excess = group_summary(_pairs(kept, likit_net)), group_summary(_pairs(kept, likit_excess))
+    stress = group_summary(_pairs(kept, lambda r: likit_net(r, LIKIT_STRESS_COST_PCT)))
+    gap = difference(_pairs(kept, likit_net), _pairs(dropped, likit_net))
+    return {
+        "test": FILTER_TESTS[0], "alerts": len(rows), "kept": len(kept), "dropped": len(dropped),
+        "unknown": len(rows) - len(kept) - len(dropped), "kept_net": net, "kept_excess": excess,
+        "kept_stress_net": stress, "dropped_net": group_summary(_pairs(dropped, likit_net)),
+        "kept_minus_dropped_net": gap, "verdict": filter_verdict(net, excess, stress, gap),
+    }
+
+
+def evaluate_f2(rows: Sequence[Mapping[str, Any]], baseline: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    kept = [r for r in rows if tactical_perp_below_spot(r) is True]
+    dropped = [r for r in rows if tactical_perp_below_spot(r) is False]
+    base = [r for r in baseline if tactical_perp_below_spot(r) is True]
+
+    def atr_r(row: Mapping[str, Any]) -> float | None:
+        return tactical_r(row, "atr")
+
+    net = group_summary(_pairs(kept, atr_r))
+    excess = difference(_pairs(kept, atr_r), _pairs(base, atr_r))
+    stress = group_summary(_pairs(kept, lambda r: tactical_r(r, "atr", TACTICAL_STRESS_COST_PCT)))
+    gap = difference(_pairs(kept, atr_r), _pairs(dropped, atr_r))
+    return {
+        "test": FILTER_TESTS[1], "alerts": len(rows), "kept": len(kept), "dropped": len(dropped),
+        "unknown": len(rows) - len(kept) - len(dropped), "baseline_kept": len(base), "kept_r": net,
+        "kept_minus_random_hours_r": excess, "kept_stress_r": stress,
+        "dropped_r": group_summary(_pairs(dropped, atr_r)), "kept_minus_dropped_r": gap,
+        "verdict": filter_verdict(net, excess, stress, gap),
+    }
+
+
+def tactical_baseline_rows(
+    data: Mapping[str, Mapping[TacticalTimeframe, tr._Series]],
+    *,
+    perp: Mapping[str, tuple[np.ndarray, np.ndarray]] | None,
+    window: tuple[int, int],
+    step: int = 3_600,
+) -> list[dict[str, Any]]:
+    """Random-timing control: an entry at every hourly close, with the ATR stop + 72h rule."""
+
+    end = min(max(s.close_time[-1] for s in frames.values() if len(s)) for frames in data.values()) + 1
+    rows = []
+    for symbol in TACTICAL_SYMBOLS:
+        frames = data[symbol]
+        m5, m15, h1 = frames[TacticalTimeframe.M5], frames[TacticalTimeframe.M15], frames[TacticalTimeframe.H1]
+        for t in range(window[0] - 1 + step, window[1], step):
+            price = _close_at(m5, t)
+            if price is None or t - m5.close_time[m5.last_closed_index(t)] > 600:
+                continue
+            now = t + 1
+            plan = long_alerts.compute_stop_plan(_series_rows(h1, now - (HOURLY_ROWS + 1) * 3_600, now), price, now=now)
+            row: dict[str, Any] = {"symbol": symbol, "decided_at": t}
+            row.update(tactical_basis(perp, h1, symbol, t))
+            if plan is None:
+                continue
+            entry = long_alerts.open_entry(source="TAKTIK", symbol=symbol, now=now, gate_status="BASELINE",
+                                           detail="", plan=plan, entry_price=price)
+            result = stop_outcome(entry, _series_rows(m15, now, now + long_alerts.TRACK_HOURS * 3_600 + 1),
+                                  resolvable_until=end)
+            row.update({"atr_stop_pct": plan.stop_pct, "atr72_status": result["status"],
+                        "atr72_result_pct": result["result_pct"], "can_authorize_trade": False})
+            rows.append(row)
+    return rows
+
+
+def filter_trial_params() -> dict[str, Any]:
+    return {
+        "code_fingerprint": logic_fingerprint(),
+        "tests": {
+            FILTER_TESTS[0]: {"keep_if": {"atr15_pct_max": LIKIT_ATR15_MAX, "rel_24h_max": LIKIT_REL24_MAX},
+                              "outcome": "live stop + 72h rule, net and excess vs equal-weight top-100"},
+            FILTER_TESTS[1]: {"keep_if": {"basis_pct_below": TACTICAL_BASIS_MAX},
+                              "outcome": "ATR stop + 72h R; excess vs hourly random entries with the same filter"},
+        },
+        "window": [DISCOVERY_END, CONFIRMATION_END],
+        "half_at": HALF_AT,
+        "family_alpha": FILTER_ALPHA,
+        "min_n": CONFIRM_MIN_N,
+        "costs_pct": {"likit": LIKIT_COST_PCT, "likit_stress": LIKIT_STRESS_COST_PCT,
+                      "tactical": TACTICAL_COST_PCT, "tactical_stress": TACTICAL_STRESS_COST_PCT},
+        "verdicts": "PASS / KAYBI_AZALTIR / NO_EFFECT",
+    }
+
+
+def filter_trial_id() -> str:
+    from trading.research.robustness import trial_id_for
+
+    return trial_id_for(family=FILTER_FAMILY, params=filter_trial_params(), dataset=FILTER_DATASET)
+
+
+def require_registration(registry_path: Path) -> str:
+    """The confirmation runs only for code whose tests were registered before (fail closed)."""
+
+    from trading.research.robustness import TrialRegistry
+
+    trial_id = filter_trial_id()
+    known = {r.trial_id for r in TrialRegistry(registry_path).selection_trials(FILTER_FAMILY)}
+    if trial_id not in known:
+        raise SystemExit(f"trial {trial_id} is not pre-registered for this code; refusing to look at 2024-09+")
+    return trial_id
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 
-def build_discovery_data(radar: str, out_dir: Path) -> dict:
-    """Download the discovery data as of ``DISCOVERY_END``: later candles are never fetched."""
+def build_data(radar: str, out_dir: Path, *, decision_at: int = DISCOVERY_END,
+               months: int = DISCOVERY_MONTHS, perp_data: bool = True) -> dict:
+    """Download data as of ``decision_at``: later candles are never fetched."""
 
     if radar == "likit":
         from trading.data.binance_universe import build_universe
         from trading.data.universe_funding import build_funding, build_perp_hourly
 
-        manifest = build_universe(out_dir, lookback_months=DISCOVERY_MONTHS, decision_at=DISCOVERY_END)
-        funding = build_funding(out_dir, out_dir / "funding", decision_at=DISCOVERY_END)
-        perp = build_perp_hourly(out_dir, out_dir / "funding", decision_at=DISCOVERY_END)
-        return {
+        manifest = build_universe(out_dir, lookback_months=months, decision_at=decision_at)
+        out = {
             "window": manifest["window"], "candidates": manifest["candidates"],
             "stopped": len(manifest["stopped_before_window_end"]),
-            "funding": {k: funding[k] for k in ("with_perp", "with_rows", "rows", "ambiguous")},
-            "perp_1h": {k: perp[k] for k in ("with_perp", "with_rows", "rows", "ambiguous")},
         }
+        if perp_data:
+            funding = build_funding(out_dir, out_dir / "funding", decision_at=decision_at)
+            perp = build_perp_hourly(out_dir, out_dir / "funding", decision_at=decision_at)
+            out["funding"] = {k: funding[k] for k in ("with_perp", "with_rows", "rows", "ambiguous")}
+            out["perp_1h"] = {k: perp[k] for k in ("with_perp", "with_rows", "rows", "ambiguous")}
+        return out
     from trading.data.binance_perp import Timeframe
     from trading.data.binance_vision import download_symbol
 
     timeframes = tuple(Timeframe(tr.FILE_TIMEFRAME[tf]) for tf in tr.REQUIRED_TIMEFRAMES)
     for symbol in tr.SYMBOLS:
-        download_symbol(symbol, out_dir=out_dir, decision_at=DISCOVERY_END, timeframes=timeframes,
-                        lookback_months=DISCOVERY_MONTHS, market="spot", include_funding=False)
+        download_symbol(symbol, out_dir=out_dir, decision_at=decision_at, timeframes=timeframes,
+                        lookback_months=months, market="spot", include_funding=False)
     for symbol in TACTICAL_SYMBOLS:
-        download_symbol(symbol, out_dir=out_dir / "perp", decision_at=DISCOVERY_END, timeframes=(Timeframe("1h"),),
-                        lookback_months=DISCOVERY_MONTHS, market="futures/um", include_funding=True)
+        download_symbol(symbol, out_dir=out_dir / "perp", decision_at=decision_at, timeframes=(Timeframe("1h"),),
+                        lookback_months=months, market="futures/um", include_funding=True)
     return {"symbols": list(tr.SYMBOLS), "perpetuals": list(TACTICAL_SYMBOLS)}
+
+
+def build_discovery_data(radar: str, out_dir: Path) -> dict:
+    return build_data(radar, out_dir)
+
+
+def _fmt_group(name: str, g: Mapping[str, Any]) -> str:
+    ci = g.get("ci")
+    ci_text = "n/a" if not ci else f"[{ci[0]:+.3f},{ci[1]:+.3f}]"
+    n = f" n={g['n']}" if "n" in g else ""
+    return f"  {name:<28}{n} mean={_fmt(g.get('mean'), '+.3f')} ci={ci_text} h1={_fmt(g.get('h1'), '+.3f')} h2={_fmt(g.get('h2'), '+.3f')}"
+
+
+def print_confirmation(results: Sequence[Mapping[str, Any]]) -> None:
+    for result in results:
+        print(f"## {result['test']}: {result['verdict']}")
+        for key, value in result.items():
+            if isinstance(value, Mapping):
+                print(_fmt_group(key, value))
+            elif key not in {"test", "verdict"}:
+                print(f"  {key}: {value}")
 
 
 def _cli(argv: Iterable[str] | None = None) -> int:
@@ -786,6 +1106,17 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     build = sub.add_parser("build", help="download the sealed discovery data")
     build.add_argument("which", choices=("likit", "tactical"))
     build.add_argument("--out", type=Path, required=True)
+    build_confirm = sub.add_parser("build-confirm", help="download the confirmation data (registered trial only)")
+    build_confirm.add_argument("which", choices=("likit", "tactical"))
+    build_confirm.add_argument("--out", type=Path, required=True)
+    build_confirm.add_argument("--trial-registry", type=Path, default=Path("research/trials/registry.jsonl"))
+    confirm = sub.add_parser("confirm", help="run the pre-registered tests once on 2024-09..2026-08")
+    confirm.add_argument("which", choices=("likit", "tactical"))
+    confirm.add_argument("--data-dir", type=Path, required=True)
+    confirm.add_argument("--perp-dir", type=Path, default=None)
+    confirm.add_argument("--workers", type=int, default=max(1, os.cpu_count() or 1))
+    confirm.add_argument("--out-dir", type=Path, default=Path("research/data/signal_quality_confirm"))
+    confirm.add_argument("--trial-registry", type=Path, default=Path("research/trials/registry.jsonl"))
     likit = sub.add_parser("likit")
     likit.add_argument("--data-dir", type=Path, default=Path("research/data/sq_liquid_universe"))
     likit.add_argument("--funding-dir", type=Path, default=None)
@@ -803,6 +1134,15 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
         print(json.dumps(build_discovery_data(args.which, args.out), indent=1))
         return 0
+    if args.radar == "build-confirm":
+        trial = require_registration(args.trial_registry)
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
+        summary = build_data(args.which, args.out, decision_at=CONFIRMATION_END, months=CONFIRMATION_MONTHS,
+                             perp_data=False)
+        print(json.dumps({"trial": trial, **summary}, indent=1))
+        return 0
+    if args.radar == "confirm":
+        return _confirm(args, started)
     window = (DISCOVERY_START, DISCOVERY_END)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     if args.radar == "likit":
@@ -832,6 +1172,38 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     _write_json({"window": list(window), "report": report, "can_authorize_trade": False},
                 args.out_dir / f"{args.radar}_description.json")
     print_description(title, report, outcomes)
+    print(f"wrote {args.out_dir} in {time.time() - started:.0f}s")
+    return 0
+
+
+def _confirm(args: Any, started: float) -> int:
+    trial = require_registration(args.trial_registry)
+    window = (DISCOVERY_END, CONFIRMATION_END)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    if args.which == "likit":
+        market, _, excluded = load_likit_market(args.data_dir, end=CONFIRMATION_END)
+        print(f"excluded (history identity): {json.dumps(excluded, sort_keys=True)}")
+        steps = lr.evaluate(market, lr.RadarParams(), workers=args.workers, progress=True)
+        rows = likit_rows(market, steps, window=window)
+        baseline: list[dict[str, Any]] = []
+        results = [evaluate_f1(rows)]
+    else:
+        if args.perp_dir is None:
+            raise SystemExit("--perp-dir is required: F2 needs the basis")
+        data = load_tactical_data(args.data_dir, end=CONFIRMATION_END)
+        perp, funding = load_tactical_perp(args.perp_dir, end=CONFIRMATION_END)
+        phase1 = tr.evaluate(data, spread_bps=2.0, workers=args.workers, progress=True)
+        records = tr.record_outcomes(phase1.events, data, end_time=tr.decision_times(data)[-1])
+        rows = tactical_rows(records, data, perp=perp, funding=funding, window=window)
+        baseline = tactical_baseline_rows(data, perp=perp, window=window)
+        results = [evaluate_f2(rows, baseline)]
+    write_rows(rows, args.out_dir / f"{args.which}_confirm_rows.csv.gz")
+    if baseline:
+        write_rows(baseline, args.out_dir / "tactical_confirm_baseline.csv.gz")
+    _write_json({"trial": trial, "window": list(window), "results": results, "can_authorize_trade": False},
+                args.out_dir / f"{args.which}_confirmation.json")
+    print(f"trial {trial} (pre-registered) · window 2024-09..2026-08 · alpha {FILTER_ALPHA:.4f}")
+    print_confirmation(results)
     print(f"wrote {args.out_dir} in {time.time() - started:.0f}s")
     return 0
 

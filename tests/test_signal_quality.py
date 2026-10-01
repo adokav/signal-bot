@@ -154,6 +154,14 @@ def test_no_new_alert_while_the_entry_is_open_then_one_after_it_closes():
     assert rows[0]["stop72_status"] == long_alerts.EXPIRED and rows[0]["stop72_bars"] == sq.TRACK_BARS
 
 
+def test_alert_rule_state_warms_up_before_the_window():
+    market = _market()
+    window = (START + (ALERT + 100) * 900, START + BARS * 900)
+    rows = sq.likit_rows(market, _steps(market), params=PARAMS, window=window)
+    # the entry opened before the window is still open at its start: no alert until it expires
+    assert rows[0]["decided_at"] == START + (ALERT + 288) * 900 + 899
+
+
 def test_stopped_entry_allows_a_new_alert_only_after_the_cooldown():
     market = _market({"AAAUSDT": _rows(lambda i: 10.0 if i <= ALERT + 1 else 8.0)})
     rows = sq.likit_rows(market, _steps(market), params=PARAMS, window=WINDOW)
@@ -390,3 +398,91 @@ def test_tactical_basis_uses_spot_and_perp_hours_closed_at_the_alert():
     assert out["basis_status"] == "OK" and out["basis_pct"] == pytest.approx(0.5)
     row = sq.tactical_rows([_record(t)], data, perp=perp, window=WINDOW)[0]
     assert row["basis_pct"] == pytest.approx(0.5) and row["funding_status"] == "NOT_LOADED"
+
+
+# ---------------------------------------------------------------------------
+# Pre-registered tests and the confirmation gate
+# ---------------------------------------------------------------------------
+
+CONF = sq.DISCOVERY_END + 86_400 * 3
+
+
+def _likit_row(day, *, atr, rel, result, bench=0.0):
+    return {"symbol": "A", "decided_at": CONF + day * 86_400, "atr15_pct": atr, "rel_24h": rel,
+            "stop72_result_pct": result, "stop72_bench_pct": bench}
+
+
+def test_filters_use_inclusive_thresholds_and_say_unknown():
+    assert sq.likit_calm_not_chasing({"atr15_pct": 1.0, "rel_24h": 5.0}) is True
+    assert sq.likit_calm_not_chasing({"atr15_pct": 1.01, "rel_24h": 0.0}) is False
+    assert sq.likit_calm_not_chasing({"atr15_pct": None, "rel_24h": 0.0}) is None
+    assert sq.tactical_perp_below_spot({"basis_pct": -0.01}) is True
+    assert sq.tactical_perp_below_spot({"basis_pct": 0.0}) is False
+    assert sq.tactical_perp_below_spot({"basis_pct": None}) is None
+
+
+def test_difference_ci_resamples_days_and_needs_both_groups():
+    a = [(1.0 + (k % 3) * 0.1, CONF + k * 86_400) for k in range(60)]
+    b = [(-1.0 + (k % 3) * 0.1, CONF + k * 86_400) for k in range(60)]
+    lo, hi = sq.diff_ci(a, b)
+    assert 1.8 < lo <= 2.0 <= hi < 2.2
+    assert sq.diff_ci(a[:1], b) is None
+
+
+def test_verdicts_separate_pass_loss_reduction_and_no_effect():
+    late = sq.HALF_AT - sq.DISCOVERY_END
+    days = [k for k in range(0, 700, 2)]
+    good = [_likit_row(d, atr=0.5, rel=1.0, result=1.0 + (d % 5) * 0.1) for d in days]
+    bad = [_likit_row(d + 1, atr=3.0, rel=9.0, result=-2.0 + (d % 5) * 0.1) for d in days]
+    out = sq.evaluate_f1(good + bad)
+    assert out["verdict"] == "PASS" and out["kept"] == len(good) and out["unknown"] == 0
+    assert any(r["decided_at"] >= sq.HALF_AT for r in good) and late > 0
+
+    flat = [_likit_row(d, atr=0.5, rel=1.0, result=0.2 + ((d % 5) - 2) * 0.5) for d in days]
+    out = sq.evaluate_f1(flat + bad)
+    assert out["verdict"] == "KAYBI_AZALTIR"          # kept ≈ 0 after costs, the dropped ones are worse
+    assert sq.evaluate_f1(flat + [dict(r, atr15_pct=3.0) for r in flat])["verdict"] == "NO_EFFECT"
+    unknown = sq.evaluate_f1([dict(good[0], atr15_pct=None)] + good + bad)
+    assert unknown["unknown"] == 1 and unknown["kept"] == len(good)
+
+
+def test_confirmation_refuses_code_that_was_not_registered(tmp_path):
+    with pytest.raises(SystemExit):
+        sq.require_registration(tmp_path / "registry.jsonl")
+    from trading.research.robustness import TrialRecord, TrialRegistry
+
+    registry = TrialRegistry(tmp_path / "registry.jsonl")
+    registry.append(TrialRecord(trial_id=sq.filter_trial_id(), family=sq.FILTER_FAMILY, kind="SELECTION_CANDIDATE",
+                                description="x", params=sq.filter_trial_params(), dataset=sq.FILTER_DATASET,
+                                recorded_at="2026-10-01T00:00:00Z", n_trades=None, sharpe_per_trade=None))
+    assert sq.require_registration(tmp_path / "registry.jsonl") == sq.filter_trial_id()
+    with pytest.raises(SystemExit):
+        sq._cli(["confirm", "likit", "--data-dir", str(tmp_path), "--trial-registry", str(tmp_path / "none.jsonl")])
+
+
+def test_fingerprint_covers_stop_rules_but_not_message_text(monkeypatch):
+    base = sq.logic_fingerprint()
+    monkeypatch.setattr(long_alerts, "alert_text", lambda *a, **k: "changed")
+    assert sq.logic_fingerprint() == base
+    monkeypatch.setattr(long_alerts, "TRACK_HOURS", 48)
+    assert sq.logic_fingerprint() != base
+
+
+def test_signal_quality_filters_are_pre_registered_for_the_current_code():
+    """Tripwire: changing a signal, a feature, an outcome or a threshold is a new trial."""
+
+    from trading.research.robustness import TrialRegistry
+
+    registry = TrialRegistry(sq.REPO_ROOT / "research" / "trials" / "registry.jsonl")
+    assert sq.filter_trial_id() in {r.trial_id for r in registry.selection_trials(sq.FILTER_FAMILY)}
+
+
+def test_random_hour_baseline_uses_the_same_stop_rule_inside_the_window():
+    data = _tactical_data(lambda s: 100.0)
+    window = (START + 38 * 86_400, START + 39 * 86_400)
+    rows = sq.tactical_baseline_rows(data, perp=None, window=window)
+    assert len(rows) == 2 * 24 and all(window[0] <= r["decided_at"] < window[1] for r in rows)
+    assert {r["atr72_status"] for r in rows} == {"UNRESOLVABLE"}      # 72h runs past the data: no result
+    assert all(r["basis_status"] == "NOT_LOADED" and r["can_authorize_trade"] is False for r in rows)
+    early = sq.tactical_baseline_rows(data, perp=None, window=(START + 20 * 86_400, START + 21 * 86_400))
+    assert {r["atr72_status"] for r in early} == {long_alerts.EXPIRED}
