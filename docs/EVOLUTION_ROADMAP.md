@@ -268,6 +268,11 @@ teminatta tasfiye seviyesine ulaştı. Canlı sermaye için yeterli değil.
 −83% düşüşünün kaynağı); (2) kısa vadeli kesitsel geri dönüş hipotezinin
 hiç dokunulmamış 2017-09 → 2020-09 verisinde ön-kayıtlı testi (trial
 `6a2bc19afcf3dd25`, `docs/REVERSAL_REPLAY_REPORT.md`, workflow
-`reversal_replay`). Sonra: haftalık kesitsel momentum ve maker emirli carry.
+`reversal_replay`). Sonra, `docs/EDGE_RESEARCH.md` sırasıyla: (3) yeni
+listeleme kohortu (kayıptan kaçınma; canlı yeni listeleme radarının
+`HOT/BUILDING` etiketleri hiç test edilmedi); (4) zorunlu satış (açık
+pozisyon + fiyat çöküşü) sonrası toparlanma; (5) BTC saat etkisinin yayın
+sonrası testi; (6) haftalık kesitsel momentum. Maker emirli carry ancak
+ileri kayıt funding'in risksiz getirinin üstüne çıktığını gösterirse.
 Her yeni hipotez deneme kaydına önceden girer; deneme sayısı arttıkça çıta
 yükselir.
