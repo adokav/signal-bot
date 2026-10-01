@@ -245,3 +245,93 @@ def test_confirmation_stays_sealed_without_a_registered_loop(tmp_path):
         with pytest.raises(SystemExit):
             tl._cli(argv + ["--trial-registry", str(tmp_path / "none.jsonl")])
     assert not (tmp_path / "data").exists() and not (tmp_path / "o").exists()
+
+
+# ---------------------------------------------------------------------------
+# Pre-history test (docs/TRADE_LOOP_STUDY.md)
+# ---------------------------------------------------------------------------
+
+
+def test_volatility_target_cuts_the_slot_of_a_volatile_coin_and_never_raises_it():
+    calm = _breakout_path([110.0] * 2 + [108.0, 106.0, 104.0, 102.0, 100.0, 99.0, 98.0, 97.0])
+    market = _market({"AUSDT": _rows(calm, wick=0.002)})
+    daily = tl.daily_bars(market)
+    ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
+    rows, _ = tl.run_loop(market, daily, ind, D1, {0: [(d, T0) for d in range(25, daily.n_days)]}, breaks)
+    window = (T0 + DAY_S, T0 + daily.n_days * DAY_S)
+    plain = tl.portfolio(market, daily, rows, {T0: ["AUSDT"]}, window, breaks, half_at=T0 + 40 * DAY_S)
+    wild = [dict(r, vol_30d=1.0) for r in rows]                 # 100% annualised: half the slot
+    tamed = tl.portfolio(market, daily, wild, {T0: ["AUSDT"]}, window, breaks, half_at=T0 + 40 * DAY_S,
+                         vol_target=0.5)
+    assert tamed["time_in_market"] == pytest.approx(plain["time_in_market"] / 2)
+    quiet = [dict(r, vol_30d=0.1) for r in rows]                # calmer than the target: still one full slot
+    same = tl.portfolio(market, daily, quiet, {T0: ["AUSDT"]}, window, breaks, half_at=T0 + 40 * DAY_S,
+                        vol_target=0.5)
+    assert same["time_in_market"] == pytest.approx(plain["time_in_market"])
+    unknown = tl.portfolio(market, daily, [dict(r, vol_30d=None) for r in rows], {T0: ["AUSDT"]}, window, breaks,
+                           half_at=T0 + 40 * DAY_S, vol_target=0.5)
+    assert unknown["unsized_trades"] == len(rows) and unknown["time_in_market"] == 0
+
+
+def test_the_30_day_volatility_uses_closes_up_to_the_decision_only():
+    prices = [100.0 * (1.02 if k % 2 else 0.98) for k in range(60)]
+    _, daily, ind, _ = _one(prices)
+    later = prices[:40] + [p * 3 for p in prices[40:]]
+    _, daily2, ind2, _ = _one(later)
+    assert ind.vol30[0, 39] == pytest.approx(ind2.vol30[0, 39]) and ind.vol30[0, 39] > 0
+
+
+def test_sharpe_difference_ci_brackets_a_known_gap():
+    rng = np.random.default_rng(1)
+    base = rng.normal(0.0, 0.02, 800)
+    better = base + 0.004
+    lo, hi = tl.sharpe_difference_ci(better, base, alpha=0.05)
+    assert 0 < lo < hi
+    assert tl.sharpe_difference_ci(better[:50], base[:50], alpha=0.05) is None
+
+
+def test_the_spot_only_universe_drops_the_perpetual_condition_only():
+    from trading.backtest import majors_signals as ms
+
+    series = {f"C{k:02d}USDT": _rows([100.0] * 130) for k in range(13)}
+    series.update(BTCUSDT=_rows([100.0] * 130), ETHUSDT=_rows([100.0] * 130))
+    market = _market(series)
+    month = T0 + 120 * DAY_S
+    kw = dict(first_trade=ms.first_trade_times(market), breaks=ms.wm.continuity_breaks(market))
+    assert ms.monthly_universe(market, month, perp_of={}, funding_times={}, **kw) == []
+    spot = ms.monthly_universe(market, month, perp_of={}, funding_times={}, require_perp=False, **kw)
+    assert spot[:2] == ["BTCUSDT", "ETHUSDT"] and len(spot) == 12
+
+
+def test_the_pre_history_test_refuses_to_run_unregistered(tmp_path):
+    with pytest.raises(SystemExit):
+        tl._cli(["prehistory", "--spot-dir", str(tmp_path), "--out", str(tmp_path / "o"),
+                 "--trial-registry", str(tmp_path / "none.jsonl")])
+    assert not (tmp_path / "o").exists()
+    assert tl.prehistory_trial_params()["chosen_after_discovery"] is True
+
+
+def test_unsized_trades_count_as_unknown_in_the_completeness_gate():
+    rows = [{"status": "RESOLVED"}] * 19
+    stats = tl.completeness(rows, None, None, {}, {T0: ["BTCUSDT", "ETHUSDT"]}, {}, unsized=2)
+    assert stats["unknown_trade_share"] == pytest.approx(2 / 19)
+    assert "unknown trades 10.5%" in tl.incomplete({**stats, "unknown_day_share": 0.0})
+
+
+def test_the_dataset_manifest_must_be_the_complete_expected_build(tmp_path):
+    import json
+
+    (tmp_path / "15m").mkdir()
+    for s in ("BTCUSDT", "ETHUSDT"):
+        (tmp_path / "15m" / f"{s}.parquet").write_bytes(b"x")
+    good = {"schema": "liquid-universe/v1", "data_end": 1601510399, "window": ["2017-09", "2020-09"],
+            "candidates": 2, "downloaded": 2, "symbols": {"BTCUSDT": {}, "ETHUSDT": {}}}
+    (tmp_path / "manifest.json").write_text(json.dumps(good))
+    assert tl.verify_universe_manifest(tmp_path, end=1601510400, window=tl.PREHISTORY_DATA)["candidates"] == 2
+    assert tl.data_window(tl.sq.DISCOVERY_END, tl.sq.DISCOVERY_MONTHS) == ("2020-10", "2024-08")
+    assert tl.data_window(tl.sq.CONFIRMATION_END, tl.sq.CONFIRMATION_MONTHS) == ("2024-06", "2026-08")
+    for bad in ({"downloaded": 1}, {"data_end": 1601510000}, {"window": ["2018-01", "2020-09"]},
+                {"schema": "other"}, {"symbols": {"BTCUSDT": {}, "XRPUSDT": {}}}):
+        (tmp_path / "manifest.json").write_text(json.dumps({**good, **bad}))
+        with pytest.raises(SystemExit):
+            tl.verify_universe_manifest(tmp_path, end=1601510400, window=tl.PREHISTORY_DATA)

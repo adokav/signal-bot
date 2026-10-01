@@ -63,6 +63,7 @@ class Loop:
     entry_days: int = 0         # channel: close above the previous N-day high close
     exit_days: int = 0          # channel: close below the previous M-day low close
     exit_rule: str = ""         # pullback: "ema50" or "dip"
+    vol_target: float = 0.0     # >0: each trade's slot × min(1, vol_target / 30-day annualised volatility)
 
 
 LOOPS = (
@@ -71,6 +72,14 @@ LOOPS = (
     Loop("D2_EMA50", "D2", "pullback", exit_rule="ema50"),
     Loop("D2_DIP", "D2", "pullback", exit_rule="dip"),
 )
+
+# Pre-history test (docs/TRADE_LOOP_STUDY.md): the post-discovery hypothesis on 2018-09..2020-09.
+D1_VOL = Loop("D1_20_10_VOL", "D1", "channel", entry_days=20, exit_days=10, vol_target=0.50)
+PREHISTORY = (1_535_760_000, sq.DISCOVERY_START)     # 2018-09-01 -> 2020-10-01
+PREHISTORY_HALF_AT = 1_567_296_000                    # 2019-09-01
+PREHISTORY_LOOPS = (LOOPS[0], D1_VOL)
+VOL_DAYS = 30
+SHARPE_BLOCK_DAYS = 30
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +143,7 @@ class Indicators:
     high_close: dict[int, np.ndarray]     # previous N-day highest close
     low_close: dict[int, np.ndarray]      # previous M-day lowest close
     low5: np.ndarray                      # lowest low of the last 5 days, today included
+    vol30: np.ndarray                     # annualised std of the last 30 daily log returns, today included
 
 
 def indicators(daily: Daily) -> Indicators:
@@ -144,13 +154,16 @@ def indicators(daily: Daily) -> Indicators:
     tr = np.where(np.isfinite(daily.high) & np.isfinite(daily.low) & np.isfinite(prev_close), tr, np.nan)
     atr = pd.DataFrame(tr.T).rolling(ATR_DAYS, min_periods=ATR_DAYS).mean().to_numpy().T
     low5 = pd.DataFrame(daily.low.T).rolling(5, min_periods=5).min().to_numpy().T
+    with np.errstate(invalid="ignore", divide="ignore"):
+        log_ret = np.log(daily.close / prev_close)
+    vol30 = pd.DataFrame(log_ret.T).rolling(VOL_DAYS, min_periods=VOL_DAYS).std().to_numpy().T * math.sqrt(365)
     days = {loop.entry_days for loop in LOOPS if loop.entry_days}
     exits = {loop.exit_days for loop in LOOPS if loop.exit_days}
     return Indicators(
         atr=atr, ema20=_ema(daily.close, 20), ema50=_ema(daily.close, 50),
         high_close={n: _rolling(daily.close, n, "max") for n in days},
         low_close={m: _rolling(daily.close, m, "min") for m in exits},
-        low5=low5,
+        low5=low5, vol30=vol30,
     )
 
 
@@ -370,6 +383,7 @@ def run_loop(market: lr.Market, daily: Daily, ind: Indicators, loop: Loop,
                 "days_held": trade.exit_day - trade.entry_day,
                 "random_mean_net_pct": statistics.fmean(random_nets) if len(random_nets) >= MIN_RANDOM_DRAWS else None,
                 "random_draws": len(random_nets),
+                "vol_30d": float(ind.vol30[s, d]) if math.isfinite(ind.vol30[s, d]) else None,
             })
     return rows, skipped
 
@@ -394,12 +408,14 @@ def daily_path(daily: Daily, row: Mapping[str, Any], s: int) -> dict[int, float]
 
 def portfolio(market: lr.Market, daily: Daily, rows: Sequence[Mapping[str, Any]],
               monthly: Mapping[int, Sequence[str]], window: tuple[int, int], breaks: wm.Breaks,
-              *, half_at: int) -> dict[str, Any]:
+              *, half_at: int, vol_target: float = 0.0, alpha: float = 0.05) -> dict[str, Any]:
     """Each trade holds 1/N of capital (N = its month's universe size); vs the equal-weight basket.
 
     Positions kept after their coin left the universe keep their slot, so a
     day's slots can add up to more than 100%. Such a day is scaled down to
-    100% (all positions in proportion): the loop is never levered.
+    100% (all positions in proportion): the loop is never levered. With
+    ``vol_target`` a slot is cut to 1/N × min(1, vol_target / 30-day volatility
+    at the decision); a trade whose volatility is unknown is left out and counted.
     """
 
     first_day = (window[0] - daily.day0) // DAY
@@ -407,11 +423,18 @@ def portfolio(market: lr.Market, daily: Daily, rows: Sequence[Mapping[str, Any]]
     n_days = last_day - first_day + 1
     loop_ret = np.zeros(n_days)
     exposure = np.zeros(n_days)
+    unsized = 0
     for row in rows:
         if row["status"] != "RESOLVED":
             continue
         s = market.index_of[row["symbol"]]
         w = 1.0 / max(1, len(monthly[row["month"]]))
+        if vol_target:
+            vol = row.get("vol_30d")
+            if vol is None or not vol > 0:
+                unsized += 1
+                continue
+            w *= min(1.0, vol_target / vol)
         for e, r in daily_path(daily, row, s).items():
             if first_day <= e <= last_day:
                 loop_ret[e - first_day] += w * r
@@ -445,10 +468,35 @@ def portfolio(market: lr.Market, daily: Daily, rows: Sequence[Mapping[str, Any]]
     return {
         "loop": _curve(loop_ret[ok], times[ok], half_at),
         "buy_and_hold": _curve(basket[ok], times[ok], half_at),
+        "sharpe_difference_ci": sharpe_difference_ci(loop_ret[ok], basket[ok], alpha=alpha),
         "time_in_market": float(exposure[ok].mean()) if ok.any() else None,
         "days": int(ok.sum()),
         "capped_days": int(capped[ok].sum()),
+        "unsized_trades": unsized,
     }
+
+
+def _sharpe(x: np.ndarray) -> np.ndarray:
+    sd = x.std(axis=-1, ddof=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(sd > 0, x.mean(axis=-1) / sd * math.sqrt(365), np.nan)
+
+
+def sharpe_difference_ci(a: np.ndarray, b: np.ndarray, *, alpha: float, block: int = SHARPE_BLOCK_DAYS,
+                         n_resamples: int = 2000, seed: int = 0) -> tuple[float, float] | None:
+    """CI of Sharpe(a) − Sharpe(b) on paired daily returns, circular blocks of ``block`` days (information only)."""
+
+    n = len(a)
+    if n < 4 * block:
+        return None
+    rng = np.random.default_rng(seed)
+    starts = rng.integers(0, n, size=(n_resamples, -(-n // block)))
+    idx = ((starts[:, :, None] + np.arange(block)) % n).reshape(n_resamples, -1)[:, :n]
+    diff = _sharpe(a[idx]) - _sharpe(b[idx])
+    diff = diff[np.isfinite(diff)]
+    if len(diff) < 100:
+        return None
+    return float(np.quantile(diff, alpha / 2)), float(np.quantile(diff, 1 - alpha / 2))
 
 
 def _curve(returns: np.ndarray, times: np.ndarray, half_at: int) -> dict[str, Any]:
@@ -532,7 +580,7 @@ def select_candidates(results: Sequence[Mapping[str, Any]], limit: int = 2) -> l
 
 def completeness(rows: Sequence[Mapping[str, Any]], daily: Daily, market: lr.Market,
                  days: Mapping[int, Sequence[tuple[int, int]]], monthly: Mapping[int, Sequence[str]],
-                 skipped: Mapping[str, int] | None = None) -> dict:
+                 skipped: Mapping[str, int] | None = None, unsized: int = 0) -> dict:
     coin_days = [(s, d) for s, items in days.items() for d, _ in items]
     unknown_days = sum(not math.isfinite(daily.close[s, d]) for s, d in coin_days)
     data_skips = sum(n for reason, n in (skipped or {}).items() if reason in DATA_SKIPS)
@@ -540,7 +588,9 @@ def completeness(rows: Sequence[Mapping[str, Any]], daily: Daily, market: lr.Mar
     return {
         "trades": len(rows),
         "skipped_entries": dict(skipped or {}),
-        "unknown_trade_share": ((sum(r["status"] != "RESOLVED" for r in rows) + data_skips) / attempts
+        "unsized_trades": unsized,
+        # trades left out of a volatility-targeted portfolio count as unknown too: never silently dropped
+        "unknown_trade_share": ((sum(r["status"] != "RESOLVED" for r in rows) + data_skips + unsized) / attempts
                                 if attempts else 1.0),
         "unknown_day_share": unknown_days / len(coin_days) if coin_days else 1.0,
         "months_missing_fixed": sum(not set(ms.FIXED) <= set(m) for m in monthly.values()),
@@ -622,6 +672,46 @@ def trial_id() -> str:
     return trial_id_for(family=FAMILY, params=trial_params(), dataset=DATASET)
 
 
+PREHISTORY_FAMILY = "trade_loop_prehistory"
+PREHISTORY_DATASET = {"source": "binance_vision_spot", "built_as_of": sq.DISCOVERY_START,
+                      "window": "2018-09..2020-09"}
+
+
+def prehistory_trial_params() -> dict[str, Any]:
+    return {
+        "code_fingerprint": code_fingerprint(),
+        "loops": [loop.name for loop in PREHISTORY_LOOPS],
+        "vol_target": D1_VOL.vol_target,
+        "chosen_after_discovery": True,
+        "universe": "majors_signals monthly universe without the perpetual condition (none before 2019-09)",
+        "execution": "decide at the 00:00 UTC daily close, trade at the next 15m open, intraday disaster stop",
+        "costs_pct": {"base": COST_PCT, "stress": STRESS_COST_PCT},
+        "random_control": {"draws": RANDOM_DRAWS, "min_draws": MIN_RANDOM_DRAWS, "same_month": True, "seed": 0},
+        "window": list(PREHISTORY),
+        "half_at": PREHISTORY_HALF_AT,
+        "family_alpha": 0.05 / len(PREHISTORY_LOOPS),
+        "bootstrap": {"trades": {"method": "circular_moving_block_days", "block_days": sq.BLOCK_DAYS},
+                      "sharpe_difference": {"block_days": SHARPE_BLOCK_DAYS, "information_only": True}},
+        "min_trades": MIN_CONFIRM_TRADES,
+        "verdicts": "PASS / ZAMANLAMA_YOK / RISK_AZALTIR / NO_EFFECT; INCOMPLETE_DATA gives no verdict",
+    }
+
+
+def prehistory_trial_id() -> str:
+    from trading.research.robustness import trial_id_for
+
+    return trial_id_for(family=PREHISTORY_FAMILY, params=prehistory_trial_params(), dataset=PREHISTORY_DATASET)
+
+
+def require_prehistory_registration(registry: Path) -> str:
+    from trading.research.robustness import TrialRegistry
+
+    tid = prehistory_trial_id()
+    if tid not in {r.trial_id for r in TrialRegistry(registry).selection_trials(PREHISTORY_FAMILY)}:
+        raise SystemExit(f"pre-history trial {tid} is not pre-registered for this code; refusing to run it")
+    return tid
+
+
 def require_registration(registry: Path) -> str:
     from trading.research.robustness import TrialRegistry
 
@@ -638,10 +728,67 @@ def require_registration(registry: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
+PREHISTORY_DATA = ("2017-09", "2020-09")
+
+
+def data_window(end: int, months: int) -> tuple[str, str]:
+    """First and last month of a dataset built as of ``end`` with ``months`` of lookback."""
+
+    from datetime import datetime, timezone
+
+    last = datetime.fromtimestamp(end - DAY, tz=timezone.utc)
+    year, month = last.year, last.month - (months - 1)
+    while month < 1:
+        year, month = year - 1, month + 12
+    return f"{year:04d}-{month:02d}", f"{last.year:04d}-{last.month:02d}"
+
+
+def verify_universe_manifest(spot_dir: Path, *, end: int, window: tuple[str, str]) -> dict:
+    """The dataset's manifest, if it is the complete build this test expects; otherwise refuse (fail closed)."""
+
+    path = spot_dir / "manifest.json"
+    if not path.exists():
+        raise SystemExit(f"{spot_dir}: no manifest; incomplete or foreign dataset")
+    manifest = json.loads(path.read_text("utf-8"))
+    problems = []
+    if manifest.get("schema") != "liquid-universe/v1":
+        problems.append(f"schema {manifest.get('schema')!r}")
+    if manifest.get("data_end") != end - 1:
+        problems.append(f"data_end {manifest.get('data_end')} != {end - 1}")
+    if list(manifest.get("window") or []) != list(window):
+        problems.append(f"window {manifest.get('window')} != {list(window)}")
+    symbols = manifest.get("symbols") or {}
+    if not symbols or manifest.get("downloaded") != manifest.get("candidates") or len(symbols) != manifest.get("candidates"):
+        problems.append(f"downloaded {manifest.get('downloaded')} of {manifest.get('candidates')} candidates")
+    missing = [s for s in symbols if not (spot_dir / "15m" / f"{s}.parquet").exists()]
+    if missing:
+        problems.append(f"{len(missing)} candidate files missing")
+    if problems:
+        raise SystemExit(f"{spot_dir}: not the expected complete dataset: " + "; ".join(problems))
+    return manifest
+
+
 def run(spot_dir: Path, *, window: tuple[int, int], end: int, alpha: float, half_at: int,
-        loops: Sequence[Loop] = LOOPS) -> dict[str, Any]:
+        loops: Sequence[Loop] = LOOPS, months: int | None = None) -> dict[str, Any]:
+    if months is not None:
+        verify_universe_manifest(spot_dir, end=end, window=data_window(end, months))
     market, excluded, _, perp_of, funding_times = ms.load_inputs(spot_dir, end=end)
     monthly = ms.universes(market, window, perp_of=perp_of, funding_times=funding_times)
+    return evaluate_loops(market, excluded, monthly, window=window, alpha=alpha, half_at=half_at, loops=loops)
+
+
+def run_prehistory(spot_dir: Path, *, alpha: float) -> dict[str, Any]:
+    """The pre-registered pre-history test: spot-only majors universe (no perpetuals before 2019-09)."""
+
+    verify_universe_manifest(spot_dir, end=PREHISTORY[1], window=PREHISTORY_DATA)
+    market, _, excluded = sq.load_likit_market(spot_dir, end=PREHISTORY[1])
+    monthly = ms.universes(market, PREHISTORY, perp_of={}, funding_times={}, require_perp=False)
+    return evaluate_loops(market, excluded, monthly, window=PREHISTORY, alpha=alpha, half_at=PREHISTORY_HALF_AT,
+                          loops=PREHISTORY_LOOPS)
+
+
+def evaluate_loops(market: lr.Market, excluded: Mapping[str, str], monthly: Mapping[int, Sequence[str]], *,
+                   window: tuple[int, int], alpha: float, half_at: int, loops: Sequence[Loop]) -> dict[str, Any]:
     daily = daily_bars(market)
     ind = indicators(daily)
     breaks, halts = wm.continuity_breaks(market), halt_bars(market)
@@ -649,8 +796,9 @@ def run(spot_dir: Path, *, window: tuple[int, int], end: int, alpha: float, half
     results, all_rows = [], []
     for loop in loops:
         rows, skipped = run_loop(market, daily, ind, loop, days, breaks, halts=halts)
-        book = portfolio(market, daily, rows, monthly, window, breaks, half_at=half_at)
-        stats = completeness(rows, daily, market, days, monthly, skipped)
+        book = portfolio(market, daily, rows, monthly, window, breaks, half_at=half_at,
+                         vol_target=loop.vol_target, alpha=alpha)
+        stats = completeness(rows, daily, market, days, monthly, skipped, unsized=book["unsized_trades"])
         result = {"loop": loop.name, "family": loop.family, **evaluate(rows, book, alpha=alpha, half_at=half_at),
                   "completeness": stats, "incomplete": incomplete(stats)}
         results.append(result)
@@ -682,9 +830,12 @@ def print_report(report: Mapping[str, Any]) -> None:
             c = book[side]
             print(f"    {side:<18} total {c['total_return_pct']:+.1f}%  maxDD {c['max_drawdown_pct']:+.1f}%  "
                   f"sharpe {_fmt(c['sharpe'], '.2f')} (h1 {_fmt(c['sharpe_h1'], '.2f')}, h2 {_fmt(c['sharpe_h2'], '.2f')})")
+        ci = book.get("sharpe_difference_ci")
+        print(f"    sharpe difference (loop - buy_and_hold) ci "
+              + ("n/a" if not ci else f"[{ci[0]:+.2f},{ci[1]:+.2f}]") + " (information only)")
         print(f"    time in market {_fmt(book['time_in_market'], '.0%')} over {book['days']} days, "
-              f"exposure capped at 100% on {book['capped_days']} days; skipped entries "
-              f"{json.dumps(r['completeness']['skipped_entries'], sort_keys=True)}")
+              f"exposure capped at 100% on {book['capped_days']} days, unsized trades {book['unsized_trades']}; "
+              f"skipped entries {json.dumps(r['completeness']['skipped_entries'], sort_keys=True)}")
 
 
 def _cli(argv: Iterable[str] | None = None) -> int:
@@ -696,11 +847,12 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     disc = sub.add_parser("discover", help="all four loops on the sealed discovery window")
     build = sub.add_parser("build-confirm", help="confirmation data as of 2026-09-01 (registered trial only)")
     conf = sub.add_parser("confirm", help="the registered loops, once, on 2024-09..2026-08")
-    for p in (disc, conf):
+    pre = sub.add_parser("prehistory", help="the registered pre-history test, once, on 2018-09..2020-09")
+    for p in (disc, conf, pre):
         p.add_argument("--spot-dir", type=Path, required=True)
         p.add_argument("--out", type=Path, required=True)
     build.add_argument("--out", type=Path, required=True)
-    for p in (build, conf):
+    for p in (build, conf, pre):
         p.add_argument("--trial-registry", type=Path, default=Path("research/trials/registry.jsonl"))
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -717,13 +869,19 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         return 0
     if args.mode == "discover":
         trial = None
-        report = run(args.spot_dir, window=DISCOVERY, end=sq.DISCOVERY_END, alpha=0.05, half_at=DISCOVERY_HALF_AT)
+        report = run(args.spot_dir, window=DISCOVERY, end=sq.DISCOVERY_END, alpha=0.05, half_at=DISCOVERY_HALF_AT,
+                     months=sq.DISCOVERY_MONTHS)
         report["candidates"] = select_candidates([r for r in report["results"] if not r["incomplete"]])
+    elif args.mode == "prehistory":
+        trial = require_prehistory_registration(args.trial_registry)
+        report = run_prehistory(args.spot_dir, alpha=0.05 / len(PREHISTORY_LOOPS))
+        for r in report["results"]:
+            r["verdict"] = verdict(r, r["incomplete"])
     else:
         trial = require_registration(args.trial_registry)
         loops = [loop for loop in LOOPS if loop.name in REGISTERED]
         report = run(args.spot_dir, window=CONFIRMATION, end=sq.CONFIRMATION_END, alpha=0.05 / len(loops),
-                     half_at=HALF_AT, loops=loops)
+                     half_at=HALF_AT, loops=loops, months=sq.CONFIRMATION_MONTHS)
         for r in report["results"]:
             r["verdict"] = verdict(r, r["incomplete"])
     rows = report.pop("rows")

@@ -144,8 +144,12 @@ def perp_live(times: np.ndarray | None, start: int) -> bool:
 
 def monthly_universe(market: lr.Market, start: int, *, perp_of: Mapping[str, str],
                      funding_times: Mapping[str, np.ndarray], first_trade: np.ndarray,
-                     breaks: wm.Breaks) -> list[str]:
-    """Members for the month opening at ``start`` (docs/MAJORS_STUDY.md), from data visible then."""
+                     breaks: wm.Breaks, require_perp: bool = True) -> list[str]:
+    """Members for the month opening at ``start`` (docs/MAJORS_STUDY.md), from data visible then.
+
+    ``require_perp=False`` drops the live-perpetual condition: before 2019-09
+    Binance had no USDⓈ-M perpetuals (docs/TRADE_LOOP_STUDY.md, pre-history test).
+    """
 
     i = decision_bar(market, start)
     lo = None if i is None else i - VOLUME_DAYS * lr.DAY_BARS + 1
@@ -161,7 +165,7 @@ def monthly_universe(market: lr.Market, start: int, *, perp_of: Mapping[str, str
             continue
         listed = listed_since(market, s, start, first_trade, breaks)
         seasoned = listed <= data_start + DAY or listed <= start - SEASON_DAYS * DAY
-        perp_ok = symbol in perp_of and perp_live(funding_times.get(symbol), start)
+        perp_ok = not require_perp or (symbol in perp_of and perp_live(funding_times.get(symbol), start))
         if seasoned and perp_ok:
             eligible.append((float(volume[s]), symbol))
     eligible.sort(key=lambda row: (-row[0], row[1]))
@@ -178,10 +182,10 @@ def monthly_universe(market: lr.Market, start: int, *, perp_of: Mapping[str, str
 
 
 def universes(market: lr.Market, window: tuple[int, int], *, perp_of: Mapping[str, str],
-              funding_times: Mapping[str, np.ndarray]) -> dict[int, list[str]]:
+              funding_times: Mapping[str, np.ndarray], require_perp: bool = True) -> dict[int, list[str]]:
     first_trade, breaks = first_trade_times(market), wm.continuity_breaks(market)
     return {m: monthly_universe(market, m, perp_of=perp_of, funding_times=funding_times, first_trade=first_trade,
-                                breaks=breaks) for m in month_starts(window)}
+                                breaks=breaks, require_perp=require_perp) for m in month_starts(window)}
 
 
 # ---------------------------------------------------------------------------

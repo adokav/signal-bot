@@ -307,3 +307,125 @@ D2_EMA50 %94. Bu üç işlem çıkarılınca işlem başına ortalama +7.1 / +2.
 - Bu, protokolün RİSK_AZALTIR sorusu.
 - Keşif sonucu görüldükten sonra seçilecek olursa, bu açıkça yazılarak ayrı
   bir ön-kayıtla ve kullanıcının onayıyla test edilmeli.
+
+## Ön-tarih testi: 2018-09 → 2020-09 (ek, 2026-10-01, sonuçtan önce)
+
+**Neden:**
+
+- Keşif, "trend bozulunca çık" kuralının (D1_20_10) asıl değeri taşıdığını
+  gösterdi, ama aday kuralı sağlanmadı (yukarıda).
+- Kullanıcı, bu hipotezin el değmemiş verilerde test edilmesini onayladı
+  (2026-10-01).
+- Hipotez **keşif sonucu görüldükten sonra** seçildi; bu açıkça kayıtlıdır.
+- Test penceresi, bu döngü için hiç kullanılmamış eski bir dönemdir. 2017–2020
+  verisi daha önce yalnızca kısa vadeli dönüş testinde (#26) kullanıldı.
+- Planlanan 2017–2024 atlası bu dönemi de görecek. Bu yüzden test,
+  **atlastan önce** yapılır.
+
+**Test edilenler (k = 2, α = 0.025):**
+
+| Döngü | Tanım |
+|---|---|
+| D1_20_10 | Keşifteki kural, değişmeden |
+| D1_20_10_VOL | Aynı işlemler; her işlemin payı 1/N × min(1, %50 / coinin son 30 günlük yıllık oynaklığı) |
+
+D1_20_10_VOL'un oynaklık hedefi literatürden gelir, keşifte hiç
+denenmedi. Oynaklığı bilinmeyen işlem bu portföye girmez ve sayılır.
+
+**Evren:**
+
+- Majör evreni, **perp şartı olmadan**: Binance'te 2019-09'dan önce perp
+  yoktu.
+- Diğer kurallar aynı: BTC ve ETH, 30 günlük hacme göre ilk 10, en büyük meme
+  coin, olgunluk ve süreklilik.
+- 2018-09'dan önce 12 üyeli ay yok. Şubat 2018'deki uzun borsa kesintisi
+  süreklilik kuralı gereği bütün çiftleri "yeniden listelenmiş" sayar. Bu
+  yüzden pencere 2018-09'da başlar.
+
+**Pencere ve veri:**
+
+- Pencere 2018-09-01 → 2020-10-01. Yarılar 2019-09-01'de ayrılır.
+- Veri 2020-10-01 itibarıyla mühürlü. Bu, keşif penceresinin başlangıcıdır;
+  iki pencere örtüşmez.
+
+**Karar:**
+
+- "Doğrulama karar kuralları" bölümündeki kurallar aynen uygulanır: PASS /
+  ZAMANLAMA_YOK / RİSK_AZALTIR / NO_EFFECT / INCOMPLETE_DATA.
+- Asıl soru **RİSK_AZALTIR**: Döngü bir bütün olarak, risk-ayarlı al-tut'tan
+  iyi mi? Ölçüler: Sharpe hem tüm dönemde hem iki yarıda ≥ al-tut, en büyük
+  düşüş al-tut'unkinin en fazla yarısı.
+- Sharpe farkının güven aralığı da raporlanır: 30 günlük bloklarla
+  bootstrap. Bu yalnızca bilgi içindir, kararı değiştirmez.
+
+**Sonucun etkisi:**
+
+- **İki pencerede de geçerse:** Bu dönem ve keşif, hipotezi destekler. Son söz
+  yine 2024-09 → 2026-08 doğrulamasınındır; o pencere atlastan çıkan
+  hipotezlerle birlikte, bir kez açılır.
+- **Burada kalırsa:** "Trend bozulunca çık" kuralının keşifteki başarısı
+  2021–2022'ye özgü sayılır.
+- **Her durumda:** Emir yetkisi yoktur.
+
+### Ön-tarih testi sonucu (trial `83c3e26b5ea98c95`, bir kez koşuldu)
+
+**Koşu bilgileri:**
+
+- Komut: `python -m trading.backtest.trade_loop prehistory`.
+- Kod parmak izi `fdb566a67b26e79e`. Ön-kayıt `3a00484`, koşudan önce gönderildi.
+- Veri 2020-10-01 itibarıyla mühürlü.
+- Kapsam: 25 ay, 200 işlem. Bilinmeyen işlem yok, atlanan giriş yok.
+
+| | D1_20_10 | D1_20_10_VOL | Al-tut sepeti |
+|---|---:|---:|---:|
+| Toplam getiri | **+%64** | +%49 | −%19 |
+| En büyük düşüş | −%30 | **−%21** | −%75 |
+| Sharpe (1. / 2. yarı) | 0.79 (0.58 / 1.00) | **0.88** (0.81 / 0.96) | 0.33 (0.03 / 0.60) |
+| Piyasada kalma | %37 | %23 | %100 |
+| 2018 (Eylül–Aralık) | −%20 | −%10 | −%50 |
+| 2019 | +%31 | +%22 | +%6 |
+| 2020 (Ocak–Eylül) | +%57 | +%36 | +%51 |
+| **Karar** | **RİSK_AZALTIR** | **RİSK_AZALTIR** | |
+
+**Okuma:**
+
+- **Keşifteki desen bağımsız bir dönemde tekrarlandı.** Trend bozulunca
+  çıkmak:
+  - düşüşü yarının altına indirdi;
+  - Sharpe'ı iki yarıda da al-tut'un üstüne taşıdı;
+  - 2018 ayısında kaybı −%50'den −%20'ye (oynaklık ayarıyla −%10'a)
+    indirdi.
+- **Giriş zamanı yine rastgeleden iyi değil:** Fark +0.2 puan, [−3.0, +3.2].
+  Değeri çıkış kuralı taşıyor; giriş anı değil.
+- **Oynaklık ayarı:**
+  - Düşüşü −%30'dan −%21'e indirdi ve Sharpe'ı biraz artırdı (0.79 → 0.88).
+  - Karşılığında güçlü yükselişlerde daha az kazandırdı (2020: +%36 / +%57).
+  - Bu bir risk tercihi.
+- **Dürüst sınırlar:**
+  - Sharpe farkının güven aralığı sıfırı içeriyor: [−0.64, +1.47] ve
+    [−0.60, +1.59]. Tek başına 2 yıl, istatistiksel kesinlik için kısa.
+  - İşlem başına net getirinin güven aralığı da sıfırı içeriyor:
+    [−1.6, +10.0].
+  - Güçlü olan, iki bağımsız dönemde aynı yönde ve aynı büyüklükte sonuç
+    çıkması.
+  - Son söz, 2024-09 → 2026-08 doğrulamasının.
+- Emir yetkisi yok.
+
+**İnceleme (Codex) sonrası eklenen iki koruma:**
+
+- **Payı hesaplanamayan işlem:** Oynaklığı bilinmediği için oynaklık ayarlı
+  portföye giremeyen işlem artık "bilinmez" payına sayılıyor.
+- **Veri seti doğrulaması:** Her koşudan önce manifest kontrol ediliyor. Şema,
+  son tarih, ay penceresi, bütün adayların indirilmiş olması ve dosyaların
+  varlığı bakılıyor; eksik ya da yabancı bir veri seti reddediliyor.
+
+Koşu bu korumalardan önce, kayıtlı kodla (`fdb566a67b26e79e`) yapıldı.
+Korumalar sonradan aynı veride denetlendi; sonuç değişmiyor:
+
+- payı hesaplanamayan işlem 0;
+- bilinmeyen işlem payı 0;
+- manifest geçerli;
+- kararlar ve rakamlar aynı.
+
+Kod değiştiği için kayıtlı deneme bu kodla yeniden koşulamaz (`prehistory`
+reddeder). Bu istenen davranış: test bir kez yapıldı.

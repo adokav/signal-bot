@@ -259,6 +259,13 @@ güncellenenler belirtildi.
       −%88 yerine −%30.
     - Ama 2. yarıda Sharpe al-tut'un altında. Aday kuralı sağlanmadı;
       doğrulama açılmadı.
+    - **Ön-tarih testi (2018-09 → 2020-09, ön-kayıtlı, bir kez):**
+      RİSK_AZALTIR.
+      - D1_20_10: +%64, al-tut −%19; düşüş −%30, al-tut −%75; Sharpe 0.79,
+        al-tut 0.33. Oynaklık ayarlısı: düşüş −%21, Sharpe 0.88.
+      - Giriş zamanı yine rastgeleden iyi değil.
+      - Sharpe farkının güven aralığı sıfırı içeriyor. Son söz 2024–26
+        doğrulamasının.
 
 ## Kesin çizgiler
 
