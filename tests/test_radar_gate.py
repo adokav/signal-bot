@@ -65,3 +65,182 @@ def test_liquid_long_missing_spread_and_neutral_regime_stay_unknown():
     assert statuses["liquid_enough"] == "UNKNOWN"
     assert statuses["regime_compatible"] == "UNKNOWN"
     assert statuses["stop_at_invalidation"] == "UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
+# Tactical replay evidence (docs/TACTICAL_REPLAY_REPORT.md)
+# ---------------------------------------------------------------------------
+
+import json
+import time
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+
+import bot
+from acce_unified.forward_ledger import record_from_assessment
+from acce_unified.radar_gate import (
+    REPLAY_EVIDENCE_FILE,
+    default_replay_evidence,
+    evidence_line,
+    evidence_status_text,
+    family_disqualified,
+    live_vs_replay_text,
+    load_replay_evidence,
+)
+
+FP = "f" * 16
+
+
+def _evidence_file(tmp_path, mutate=None, fingerprint=FP):
+    payload = json.loads(REPLAY_EVIDENCE_FILE.read_text("utf-8"))
+    payload["engine_fingerprint"] = fingerprint
+    if mutate is not None:
+        mutate(payload)
+    path = tmp_path / "evidence.json"
+    path.write_text(json.dumps(payload), "utf-8")
+    return path
+
+
+def _setup_item(setup, *, decided_at=NOW - 60):
+    return {"symbol": "BTCUSDT", "decision_at": decided_at, "structure_4h": "BULLISH",
+            "setup": setup, "state": "READY", "plan": _plan()}
+
+
+def test_committed_evidence_matches_the_running_engine():
+    """Tripwire: changing the engine, ledger or replay code makes the evidence stale.
+
+    Re-run the replay (a new, pre-registered trial) and update
+    research/evidence/tactical_replay.json before relying on it again.
+    """
+
+    evidence = default_replay_evidence()
+    assert evidence.status == "OK", evidence.detail
+    assert evidence.trial_id == "cff97d5d6f5b5c5d"
+
+
+def test_negative_family_is_rejected_with_its_evidence(tmp_path):
+    evidence = load_replay_evidence(_evidence_file(tmp_path), current_fingerprint=FP)
+    decision = tactical_gate(_setup_item("BREAKOUT_RETEST"), now=NOW, max_age_seconds=900, evidence=evidence)
+    assert decision.status == "REJECT" and decision.no_trade and decision.can_authorize_trade is False
+    by_key = {c.key: c.status.value for c in decision.checks}
+    assert by_key["oos_expectancy_positive"] == "FAIL"
+    assert by_key["net_ev_positive"] == "FAIL"
+    assert by_key["probabilities_calibrated"] == "UNKNOWN"  # a family base rate is not a calibrated probability
+    line = status_line(decision)
+    assert "REJECT" in line and "geçmiş test NEGATIVE" in line and "kanıt yok" not in line
+    assert family_disqualified("BREAKOUT_RETEST", evidence)
+    assert "NEGATIVE" in evidence_line("BREAKOUT_RETEST", evidence)
+
+
+def test_insufficient_and_unknown_families_stay_watch(tmp_path):
+    evidence = load_replay_evidence(_evidence_file(tmp_path), current_fingerprint=FP)
+    thin = tactical_gate(_setup_item("RANGE_RECLAIM"), now=NOW, max_age_seconds=900, evidence=evidence)
+    assert thin.status == "WATCH"
+    assert any("yetersiz" in c.detail for c in thin.checks if c.key == "oos_expectancy_positive")
+    new_family = tactical_gate(_setup_item("SOMETHING_NEW"), now=NOW, max_age_seconds=900, evidence=evidence)
+    assert new_family.status == "WATCH"
+    assert not family_disqualified("RANGE_RECLAIM", evidence)
+    assert evidence_line("SOMETHING_NEW", evidence).startswith("Geçmiş test: YOK")
+
+
+def test_evidence_for_another_engine_is_not_applied(tmp_path):
+    evidence = load_replay_evidence(_evidence_file(tmp_path), current_fingerprint="0" * 16)
+    assert evidence.status == "STALE"
+    decision = tactical_gate(_setup_item("BREAKOUT_RETEST"), now=NOW, max_age_seconds=900, evidence=evidence)
+    assert decision.status == "WATCH"
+    assert not family_disqualified("BREAKOUT_RETEST", evidence)
+    assert "uygulanamıyor" in evidence_status_text(evidence)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda p: p["families"]["BREAKOUT_RETEST"].update(mean_r_ci_family=[-0.3, 0.1]),  # verdict contradicts numbers
+    lambda p: p["families"]["BREAKOUT_RETEST"].update(verdict="GREAT"),
+    lambda p: p["families"]["BREAKOUT_RETEST"].update(mean_r=float("nan")),
+    lambda p: p["families"]["BREAKOUT_RETEST"].update(resolved=True),
+    lambda p: p["families"]["BREAKOUT_RETEST"].update(hit_rate_ci=[0.3, 0.2]),
+    lambda p: p["families"]["RANGE_RECLAIM"].update(verdict="PASS_CANDIDATE"),  # 26 outcomes, CI spans zero
+    lambda p: p.update(can_authorize_trade=True),
+    lambda p: p.update(schema="something-else"),
+    lambda p: p.pop("families"),
+])
+def test_corrupt_or_inconsistent_evidence_fails_closed(tmp_path, mutate):
+    evidence = load_replay_evidence(_evidence_file(tmp_path, mutate), current_fingerprint=FP)
+    assert evidence.status == "INVALID"
+    decision = tactical_gate(_setup_item("BREAKOUT_RETEST"), now=NOW, max_age_seconds=900, evidence=evidence)
+    assert decision.status == "WATCH"  # unknown, never guessed into PASS or FAIL
+
+
+def test_missing_or_unreadable_evidence_fails_closed(tmp_path):
+    assert load_replay_evidence(tmp_path / "nope.json", current_fingerprint=FP).status == "MISSING"
+    (tmp_path / "bad.json").write_text("{not json")
+    assert load_replay_evidence(tmp_path / "bad.json", current_fingerprint=FP).status == "INVALID"
+
+
+def test_no_plan_items_ignore_the_evidence(tmp_path):
+    evidence = load_replay_evidence(_evidence_file(tmp_path), current_fingerprint=FP)
+    item = {"symbol": "BTCUSDT", "decision_at": NOW, "structure_4h": "BULLISH",
+            "setup": "BREAKOUT_RETEST", "reasons": ["INSUFFICIENT_REWARD_RISK"]}
+    decision = tactical_gate(item, now=NOW, max_age_seconds=900, evidence=evidence)
+    assert {c.key: c.status.value for c in decision.checks}["oos_expectancy_positive"] == "UNKNOWN"
+
+
+def test_live_vs_replay_is_descriptive(tmp_path):
+    evidence = load_replay_evidence(_evidence_file(tmp_path), current_fingerprint=FP)
+    assert "henüz" in live_vs_replay_text([], evidence)
+    base = record_from_assessment({**_setup_item("BREAKOUT_RETEST"), "plan": {
+        **_plan(), "estimated_round_trip_cost_pct": 0.1, "expires_at": NOW + 3600}})
+    rows = [replace(base, record_id="a", status="LOSS_STOP", r_multiple=-1.0),
+            replace(base, record_id="b", status="WIN_T1", r_multiple=1.5)]
+    text = live_vs_replay_text(rows, evidence)
+    assert "BREAKOUT_RETEST canlı +0.25R (n=2) vs replay -0.28R" in text
+    assert "anlamlı değil" in text
+
+
+# ---------------------------------------------------------------------------
+# Bot alerts follow the gate
+# ---------------------------------------------------------------------------
+
+
+def _scan(monkeypatch, tmp_path, setup, *, rejected_alerts=False):
+    from acce_unified.forward_ledger import ForwardLedger
+    from acce_unified.tactical_long_data import TacticalTimeframe
+
+    item = {**_setup_item(setup, decided_at=int(time.time()) - 5),
+            "plan": {**_plan(), "estimated_round_trip_cost_pct": 0.1, "expires_at": int(time.time()) + 3600}}
+    report = {"generated_at": item["decision_at"], "assessments": [item], "errors": [], "can_authorize_trade": False}
+    frames = {tf: () for tf in TacticalTimeframe}
+    market = SimpleNamespace(candles={"BTCUSDT": dict(frames), "ETHUSDT": dict(frames)})
+    sent: list[str] = []
+    monkeypatch.setattr(bot, "FORWARD_LEDGER", ForwardLedger(tmp_path / "ledger.json"))
+    monkeypatch.setattr(bot.TACTICAL_DATA, "snapshot", lambda: market)
+    monkeypatch.setattr(bot.TACTICAL_ENGINE, "analyze", lambda m: SimpleNamespace(to_dict=lambda: report))
+    monkeypatch.setattr(bot, "send", lambda text, **kwargs: sent.append(text))
+    monkeypatch.setattr(bot, "TACTICAL_ALERTS", True)
+    monkeypatch.setattr(bot, "TACTICAL_REJECTED_ALERTS", rejected_alerts)
+    monkeypatch.setattr(bot, "_save_state", lambda: None)
+    for key in ("tactical_snapshot", "tactical_last_error", "forward_ledger_status",
+                "forward_vs_replay", "forward_ledger_error"):
+        monkeypatch.setitem(bot.STATE, key, bot.STATE.get(key))
+    monkeypatch.setitem(bot.STATE, "tactical_last_states", {})
+    bot.tactical_scan_once()
+    return sent, bot.FORWARD_LEDGER.load()
+
+
+def test_rejected_setup_is_recorded_but_not_pushed(monkeypatch, tmp_path):
+    sent, records = _scan(monkeypatch, tmp_path, "BREAKOUT_RETEST")
+    assert sent == []
+    assert len(records) == 1 and records[0].setup == "BREAKOUT_RETEST"
+
+
+def test_rejected_alerts_can_be_re_enabled_and_say_reject(monkeypatch, tmp_path):
+    sent, _ = _scan(monkeypatch, tmp_path, "BREAKOUT_RETEST", rejected_alerts=True)
+    assert len(sent) == 1 and sent[0].startswith("⛔") and "REJECT" in sent[0]
+    assert "geçmiş test NEGATIVE" in sent[0]
+
+
+def test_watch_setup_is_still_pushed(monkeypatch, tmp_path):
+    sent, _ = _scan(monkeypatch, tmp_path, "RANGE_RECLAIM")
+    assert len(sent) == 1 and sent[0].startswith("👀") and "WATCH" in sent[0]
+    assert "INSUFFICIENT" in sent[0] and "Sinyal bazında kalibre olasılık: YOK" in sent[0]

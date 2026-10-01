@@ -165,13 +165,13 @@ def test_safe_error_redacts_urls_and_token():
     assert "<url>" in text
 
 
-def test_tactical_plan_is_labelled_watch_with_missing_evidence():
-    text = bot.format_tactical({
+def _tactical_text(setup):
+    return bot.format_tactical({
         "assessments": [{
             "symbol": "ETHUSDT",
             "decision_at": int(bot.time.time()) - 30,
             "state": "TRIGGERED",
-            "setup": "BREAKOUT_RETEST",
+            "setup": setup,
             "structure_4h": "BULLISH",
             "plan": {
                 "entry_low": 100, "entry_high": 101, "technical_invalidation": 98,
@@ -181,8 +181,20 @@ def test_tactical_plan_is_labelled_watch_with_missing_evidence():
             "reasons": [], "evidence": [], "risk_flags": [],
         }]
     })
+
+
+def test_tactical_plan_with_negative_replay_is_rejected_with_evidence():
+    text = _tactical_text("BREAKOUT_RETEST")
+    assert "Durum: REJECT — geçmiş test NEGATIVE" in text
+    assert "hedef-önce-stop %18" in text and "başabaş %35" in text
+    assert "Sinyal bazında kalibre olasılık: YOK" in text
+    assert "EXECUTION_READY" not in text and "QUALIFIED" not in text
+
+
+def test_tactical_plan_without_enough_evidence_stays_watch():
+    text = _tactical_text("RANGE_RECLAIM")
     assert "Durum: WATCH — kanıt yok: OOS test, kalibrasyon, EV" in text
-    assert "Kalibre başarı olasılığı: YOK" in text
+    assert "INSUFFICIENT" in text
     assert "EXECUTION_READY" not in text and "QUALIFIED" not in text
 
 
