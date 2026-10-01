@@ -202,3 +202,10 @@ def _sample_benchmark() -> BuyHoldMetrics:
         max_drawdown_pct=-30.0,
         holding_days=364.0,
     )
+
+
+def test_buy_and_hold_drawdown_is_simple_percent_not_log_points():
+    # 200 -> 50 is a -75% drawdown; summed log returns would report -138.6.
+    metrics = compute_buy_and_hold(daily=_daily([100.0, 200.0, 50.0, 60.0]))
+    assert metrics.max_drawdown_pct == pytest.approx(-75.0)
+    assert metrics.max_drawdown_pct >= -100.0
