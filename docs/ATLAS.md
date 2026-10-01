@@ -200,7 +200,7 @@ Bu bölüm hindsight içermez. Önceki ayın sonundaki durum, ay başında bilin
      - DÜŞÜŞ'ten sonra gelenler: 2022-05 −%38, 2018-11 −%36, 2022-01 −%33.
      - GEÇİŞ'ten sonra gelenler: 2020-03 −%33, 2022-04 −%31.
    - Bu, "trend bozulunca çık" döngüsünün keşif ve ön-tarih testlerindeki sonucuyla uyumlu. Girişin zamanlaması rastgeleden iyi değildi; değer, büyük çöküşlerin dışında kalmaktan geliyordu.
-2. **Düşüşte çeşitlendirme çalışmıyor.** Majörler arasındaki ortalama korelasyon YÜKSELİŞ'te 0.60, DÜŞÜŞ'te 0.76; COVID ayında 0.97'ye çıktı. Çöküşte her şey birlikte düşüyor.
+2. **Düşüşte çeşitlendirme çalışmıyor.** Ay başındaki duruma göre, o ayın majörler arası ortalama korelasyonu: YÜKSELİŞ'ten sonra 0.61 (39 ay), GEÇİŞ'ten sonra 0.71 (7 ay), DÜŞÜŞ'ten sonra 0.74 (27 ay). Aynı ayın etiketine göre bakıldığında bu değerler 0.60 ve 0.76 olur; ama o etiket ayın kendi hareketini içerdiği için yalnızca açıklama içindir. COVID ayında korelasyon 0.97'ye çıktı. Çöküşte her şey birlikte düşüyor.
 3. **Altcoin sezonu nadir ve kısa.** Altcoinlerin BTC'yi 15 puandan fazla geçtiği ay sayısı 8:
    - 2021'de 4 ay: 2021-01, 2021-02, 2021-04, 2021-08;
    - 2019-02 ve 2019-03;
