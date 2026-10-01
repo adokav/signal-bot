@@ -65,12 +65,19 @@ def _stdev(values: Sequence[float]) -> float:
     return math.sqrt(sum((v - mean) ** 2 for v in values) / (len(values) - 1))
 
 
-def _max_drawdown_pct(cumulative_pct: Sequence[float]) -> float:
-    peak = 0.0
+def _price_drawdown_pct(closes: Sequence[float]) -> float:
+    """Worst peak-to-trough decline of the held price, in simple percent.
+
+    Summed log returns must not be used here: a fall from 200 to 50 is a
+    -75% drawdown but -139 log points, and the GO/NO-GO drawdown checks
+    compare this number against strategy drawdowns in simple percent.
+    """
+
+    peak = closes[0]
     worst = 0.0
-    for value in cumulative_pct:
-        peak = max(peak, value)
-        worst = min(worst, value - peak)
+    for price in closes:
+        peak = max(peak, price)
+        worst = min(worst, (price / peak - 1.0) * 100.0)
     return worst
 
 
@@ -113,12 +120,7 @@ def compute_buy_and_hold(
     stdev = _stdev(daily_pct)
     mean = sum(daily_pct) / len(daily_pct) if daily_pct else 0.0
     sharpe = (mean / stdev) * math.sqrt(TRADING_DAYS_PER_YEAR) if stdev > 0 else 0.0
-    cumulative = []
-    running = 0.0
-    for r in daily_pct:
-        running += r
-        cumulative.append(running)
-    max_dd = _max_drawdown_pct(cumulative)
+    max_dd = _price_drawdown_pct(closes)
     holding_days = (exit_time - entry_time) / 86400.0
     return BuyHoldMetrics(
         n_daily_bars=len(daily),

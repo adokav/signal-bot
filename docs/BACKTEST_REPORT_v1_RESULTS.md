@@ -227,6 +227,37 @@ Sharpe her koşuda N=4 ile hesaplanır.
 4. Sonuçları gördükten sonra yapılan her parametre veya kural değişikliği yeni
    bir deneme olarak kayda girer (N artar).
 
+### Ara koşular (protokol tamamlanmadan)
+
+| Run | variant | Pencere | n | EV/işlem | PF | Sharpe | B&H Sharpe | DSR (N=4) | Aşama |
+|---|---|---|---:|---:|---:|---:|---:|---:|---|
+| #55 | ladder | 36 ay | 136 | +0.227% | 1.17 | 0.48 | 0.75 | 0.401 | REJECTED |
+| #56 | always_long | 72 ay | 459 | +0.031% | 1.02 | 0.08 | 0.59 | 0.192 | REJECTED |
+
+- **#55 ladder (36 ay).** Out-of-sample, walk-forward (2/4 fold),
+  pertürbasyon (FRAGILE; en kötü komşu +0.039%), bootstrap (CI
+  [−0.30, +0.79]), Monte Carlo ve DSR **FAIL**; maliyet ve gecikme stresi
+  PASS. Decay: sinyalin koşulsuz getiriye göre fazlası 12–72 saatte
+  +0.04/+0.10%, 168 saatte −0.18%. Sinyal betanın ötesinde bir şey
+  eklemiyor. Pencere bir ay kısalınca (#54 → #55) Sharpe 0.53'ten 0.48'e
+  düştü.
+- **#56 always_long (72 ay).** Pratikte sıfır edge (CI [−0.29, +0.36]).
+  Maliyet ve gecikme stresinde de kırılgan. Yıllara göre: 2021 −0.20%,
+  2022 −0.50%, 2023 +0.81%, 2025 −0.07%, 2026 −0.34%.
+- Protokol kuralı 1 (filtrenin katkısı) için `ladder` da 72 ayla koşulmalı.
+  #55 36 aylık olduğu için doğrudan karşılaştırılamaz.
+
+### Ölçüm düzeltmesi (2026-10-01)
+
+Al-tut max düşüşü günlük log-getirilerin toplamı üzerinden hesaplanıyordu.
+Bu bir log-puandır: 200 → 50 düşüşü −%75 yerine −138.6 olarak raporlanıyordu
+(#56'daki "B&H max DD −145%" bu yüzden). Strateji düşüşü ise basit yüzde.
+Sonuç olarak "DD < B&H'nin %60'ı" ve Monte Carlo limiti **stratejinin
+lehine** gevşek kalıyordu. Artık fiyat yolundan basit yüzde hesaplanıyor.
+#54–#56'daki ilgili kontroller zaten FAIL olduğu için kararlar değişmiyor.
+Protokolün nihai karşılaştırması, düzeltilmiş kodla tek bir `variant=all`
+koşusundan alınacak (aynı pencere, aynı kod).
+
 ## Chassis geleceği
 
 `trading/` paketi silinmez — Faz A altyapısı gelecekteki hipotez denemeleri

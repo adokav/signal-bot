@@ -45,16 +45,17 @@ on:
         default: true
         type: boolean
       lookback_months:
-        description: "Months of history (36 = ~3y; 72 = ~6y, the pre-declared variant comparison window)"
+        description: "Months of history (72 = ~6y, the pre-declared Faz A3 comparison window; 36 = ~3y)"
         required: false
-        default: "36"
+        default: "72"
         type: string
       variant:
-        description: "ladder = TSMOM + ATR ladder (Faz A2a) · signal_exit = pure TSMOM · always_long = control"
+        description: "all = the three Faz A3 runs in one job · ladder = TSMOM + ATR ladder · signal_exit = pure TSMOM · always_long = control"
         required: true
-        default: ladder
+        default: all
         type: choice
         options:
+          - all
           - ladder
           - signal_exit
           - always_long
@@ -89,24 +90,36 @@ jobs:
           python -m trading.data.binance_vision "${{ github.event.inputs.symbol }}" \
               --out research/data/binance_perp \
               --lookback-months "${{ github.event.inputs.lookback_months }}"
+      - name: Resolve variants
+        # "all" runs the three pre-registered Faz A3 variants on the same
+        # downloaded window and the same code, so they cannot drift apart.
+        run: |
+          if [ "${{ github.event.inputs.variant }}" = "all" ]; then
+            echo "VARIANTS=ladder signal_exit always_long" >> "$GITHUB_ENV"
+          else
+            echo "VARIANTS=${{ github.event.inputs.variant }}" >> "$GITHUB_ENV"
+          fi
       - name: Run walk-forward backtest
         run: |
           set -euo pipefail
-          python -m trading.backtest.walk_forward "${{ github.event.inputs.symbol }}" \
-              --data-dir research/data/binance_perp \
-              --out "research/data/backtest_${{ github.event.inputs.symbol }}_${{ github.event.inputs.variant }}.json" \
-              --variant "${{ github.event.inputs.variant }}" \
-              --folds "${{ github.event.inputs.folds }}" \
-              --embargo-days "${{ github.event.inputs.embargo_days }}" \
-              --horizon-hours "${{ github.event.inputs.horizon_hours }}" \
-              --trial-registry research/trials/registry.jsonl \
-              --record-trial \
-              ${{ github.event.inputs.perturb == 'true' && '--perturb' || '' }}
+          for variant in $VARIANTS; do
+            echo "===== variant: ${variant} ====="
+            python -m trading.backtest.walk_forward "${{ github.event.inputs.symbol }}" \
+                --data-dir research/data/binance_perp \
+                --out "research/data/backtest_${{ github.event.inputs.symbol }}_${variant}.json" \
+                --variant "${variant}" \
+                --folds "${{ github.event.inputs.folds }}" \
+                --embargo-days "${{ github.event.inputs.embargo_days }}" \
+                --horizon-hours "${{ github.event.inputs.horizon_hours }}" \
+                --trial-registry research/trials/registry.jsonl \
+                --record-trial \
+                ${{ github.event.inputs.perturb == 'true' && '--perturb' || '' }}
+          done
       - name: Emit run summary
         run: |
           set -euo pipefail
           symbol="${{ github.event.inputs.symbol }}"
-          variant="${{ github.event.inputs.variant }}"
+          for variant in $VARIANTS; do
           json="research/data/backtest_${symbol}_${variant}.json"
           {
             echo "## Backtest — ${symbol} · ${variant}"
@@ -146,7 +159,9 @@ jobs:
             cat "research/data/backtest_${symbol}_${variant}.md"
             echo ""
             echo "</details>"
+            echo ""
           } >> "$GITHUB_STEP_SUMMARY"
+          done
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
