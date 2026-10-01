@@ -241,6 +241,14 @@ güncellenenler belirtildi.
    - Yan bulgu: Aynı sembolle yapılan token değişimleri (COCOS, SUN, LUNA 2.0)
      1000 katlık sahte getiri üretiyordu. Haftalık çalışmaya süreklilik kuralı
      eklendi. F1 kararı etkilenmiyor; 7/14/30 günlük tanılama düzeltildi.
+10. ✅ **Majör coinler: funding, agresif akış, OI** — `docs/MAJORS_STUDY.md`.
+    - Evren her ay o günkü veriyle kuruldu: BTC, ETH, hacimce ilk 10 ve bir
+      meme coin.
+    - Mühürlü keşifte 3 aile, 10 grup, 2 ufuk incelendi: **hiçbiri sepeti
+      yenmedi**, kaçın adayı da çıkmadı.
+    - Ön-kayıt yapılmadı; doğrulama penceresi açılmadı.
+    - Not edilen hipotez: Uç funding (negatif ya da yüksek) sonrası majörler
+      sepetten kötü. Önceden tanımlı aday olmadığı için test edilmedi.
 
 ## Kesin çizgiler
 

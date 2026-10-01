@@ -62,6 +62,7 @@ jobs:
             tests/test_signal_quality.py \
             tests/test_signal_quality_live.py \
             tests/test_weekly_momentum.py \
+            tests/test_majors_signals.py \
             tests/test_observation_archive_cadence.py \
             tests/test_macro_data.py \
             tests/test_macro_treasury.py \
