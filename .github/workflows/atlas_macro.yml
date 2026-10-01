@@ -1,0 +1,46 @@
+name: atlas_macro
+
+# Manual-trigger research job for docs/ATLAS.md: downloads public FRED series
+# (rates, real rate, Fed funds target, Fed balance sheet, Treasury account,
+# reverse repo, dollar, VIX, equities, M2) for 2016..2024-08 and writes the
+# monthly macro table. Nothing after 2024-08-31 is requested (the
+# 2024-09..2026-08 confirmation window stays sealed). No API key, no secrets.
+#
+# Research only: no order authority, does not touch the production bot.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements.txt
+          -r requirements-dev.txt
+          -r requirements-trading.txt
+      - name: Monthly macro table (FRED, 2017-09..2024-08)
+        run: |
+          set -euo pipefail
+          python -m trading.research.atlas macro --out research/data/atlas_macro.csv
+          echo "ATLAS_MACRO_BEGIN"
+          cat research/data/atlas_macro.csv
+          echo "ATLAS_MACRO_END"
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-macro
+          path: research/data/atlas_macro.csv
+          retention-days: 30
