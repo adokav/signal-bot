@@ -14,6 +14,7 @@ import requests
 from flask import Flask, jsonify
 
 from acce_unified import UnifiedConfig, UnifiedRadarEngine, build_trade_universe
+from acce_unified import long_alerts
 from acce_unified.listing_fundamentals import ListingFundamentalMetricsProvider
 from acce_unified.forward_ledger import ForwardLedger, status_text, update_records
 from acce_unified.radar_gate import (
@@ -33,6 +34,7 @@ from acce_unified.tactical_long_data import (
     TacticalTimeframe,
 )
 from acce_unified.tactical_long_engine import TacticalLongEngine
+from acce_unified.providers import MexcPublicProvider
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -49,9 +51,12 @@ STARTUP_MESSAGE = os.getenv("CORE_SEND_STARTUP_MESSAGE", "1") == "1"
 TACTICAL_SCAN_SECONDS = max(60, int(os.getenv("TACTICAL_SCAN_INTERVAL_SECONDS", "300")))
 TACTICAL_ALERTS = os.getenv("TACTICAL_LONG_ALERTS_ENABLED", "1") == "1"
 # Setups whose family failed the historical replay are REJECT (spec §3, §38,
-# §40). They are still recorded in the forward ledger, shown in /tactical and
-# counted, but not pushed as alerts unless explicitly re-enabled.
-TACTICAL_REJECTED_ALERTS = os.getenv("TACTICAL_REJECTED_ALERTS_ENABLED", "0") == "1"
+# §40). User policy (2026-10-01): every long signal is pushed with its
+# evidence label, stop levels and position share; set to 0 to silence REJECT
+# setups. They are recorded in the forward ledger and the radar log either way.
+TACTICAL_REJECTED_ALERTS = os.getenv("TACTICAL_REJECTED_ALERTS_ENABLED", "1") == "1"
+# Likit-100 top 3: push a labelled alert with stop levels when a coin enters the list.
+LIQUID_LONG_ALERTS = os.getenv("LIQUID_LONG_ALERTS_ENABLED", "1") == "1"
 
 CONFIG = UnifiedConfig.from_env()
 # A snapshot older than three scan cycles is stale evidence, not a current view.
@@ -72,6 +77,8 @@ TRADE_UNIVERSE = build_trade_universe()
 ENGINE = UnifiedRadarEngine(CONFIG, TRADE_UNIVERSE, fundamental_provider=FUNDAMENTAL_PROVIDER)
 TACTICAL_DATA = MexcTacticalMarketData(timeout_seconds=CONFIG.request_timeout_seconds)
 TACTICAL_ENGINE = TacticalLongEngine()
+# Klines for stop levels and stop tracking (closed candles only; research use).
+KLINES = MexcPublicProvider(timeout=CONFIG.request_timeout_seconds)
 FORWARD_LEDGER = ForwardLedger(Path(os.getenv(
     "FORWARD_LEDGER_FILE", str(STATE_FILE.parent / "tactical_forward_ledger.json")
 )))
@@ -88,6 +95,7 @@ STATE: dict[str, Any] = {
     "forward_ledger_status": None,
     "forward_vs_replay": None,
     "forward_ledger_error": None,
+    "radar_log": [],
 }
 
 COMMANDS = [
@@ -95,6 +103,7 @@ COMMANDS = [
     {"command": "tactical", "description": "BTC ve ETH giriş/stop radarı"},
     {"command": "longs", "description": "MEXC Likit 100 Long İlk 3"},
     {"command": "new", "description": "Doğrulanmış MEXC yeni listeleri"},
+    {"command": "radar", "description": "Radara giren long sinyalleri ve stop durumu"},
     {"command": "status", "description": "Tarama sağlığı ve veri durumu"},
     {"command": "scan", "description": "Şimdi yeniden tara"},
 ]
@@ -189,6 +198,7 @@ def panel_keyboard() -> dict[str, Any]:
     return {"inline_keyboard": [
         [{"text": "₿ BTC / Ξ ETH Long", "callback_data": "TACTICAL"}],
         [{"text": "💧 Long İlk 3", "callback_data": "LONGS"}],
+        [{"text": "📋 Radar kaydı", "callback_data": "RADAR"}],
         [{"text": "🆕 Yeni Listeler", "callback_data": "NEW"}],
         [
             {"text": "📊 Durum", "callback_data": "STATUS"},
@@ -386,6 +396,7 @@ def format_status(snapshot: dict[str, Any] | None) -> str:
         evidence_status_text(),
         str(STATE.get("forward_ledger_status") or "İleriye dönük kayıt: henüz yok"),
         str(STATE.get("forward_vs_replay") or ""),
+        _radar_status_line(),
         f"Kayıt hatası: {STATE.get('forward_ledger_error')}" if STATE.get("forward_ledger_error") else "",
         "Emir yetkisi: YOK",
     ] if line)
@@ -412,6 +423,104 @@ def _update_forward_ledger(snapshot: Any, new_items: list[dict[str, Any]]) -> No
         STATE["forward_ledger_error"] = error
 
 
+# ---------------------------------------------------------------------------
+# Long alerts, stop levels and the radar log (acce_unified.long_alerts)
+# ---------------------------------------------------------------------------
+
+
+def _stop_plan_for(symbol: str, price: float, now: int) -> long_alerts.StopPlan | None:
+    try:
+        rows = KLINES.fetch_klines(symbol, long_alerts.STOP_INTERVAL_SECONDS, 40)
+    except Exception as exc:
+        log.warning("Stop için kline alınamadı (%s): %s", symbol, _safe_error(exc))
+        return None
+    return long_alerts.compute_stop_plan(rows, price, now=now)
+
+
+def _track_radar(rows: list[dict[str, Any]], now: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Advance open entries with closed 15m candles; returns (updated entries, entries that hit the stop)."""
+
+    updated, stopped = [], []
+    for entry in rows:
+        if entry.get("status") != long_alerts.OPEN:
+            continue
+        candles: list[Any] = []
+        if now >= long_alerts.next_check_due(entry):
+            try:
+                candles = KLINES.fetch_klines(entry["symbol"], long_alerts.TRACK_INTERVAL_SECONDS,
+                                              long_alerts.candles_needed(entry, now=now))
+            except Exception as exc:
+                log.warning("Radar takibi için kline alınamadı (%s): %s", entry["symbol"], _safe_error(exc))
+        new, event = long_alerts.track_entry(entry, candles, now=now)
+        if new != entry:
+            updated.append(new)
+        if event == long_alerts.STOPPED:
+            stopped.append(new)
+    return updated, stopped
+
+
+def _merge_radar(fresh: list[dict[str, Any]], updated: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply tracking updates and append new entries under the lock; returns the entries appended."""
+
+    with LOCK:
+        rows = [dict(e) for e in STATE.get("radar_log") or []]
+        by_id = {e["id"]: e for e in updated}
+        rows = [by_id.get(e.get("id"), e) for e in rows]
+        opened = []
+        for entry in fresh:
+            if long_alerts.can_open(rows, entry["source"], entry["symbol"], now=int(entry["opened_at"])):
+                rows.append(entry)
+                opened.append(entry)
+        STATE["radar_log"] = long_alerts.trim(rows)
+        _save_state()
+    return opened
+
+
+def _liquid_radar(snapshot: dict[str, Any]) -> None:
+    now = int(time.time())
+    with LOCK:
+        rows = [dict(e) for e in STATE.get("radar_log") or []]
+    context = snapshot.get("liquid_market_context") or {}
+    fresh: list[dict[str, Any]] = []
+    for index, item in enumerate((snapshot.get("liquid_long_candidates") or [])[:3], 1):
+        symbol = str(item.get("symbol") or "").upper()
+        if not symbol or not long_alerts.can_open(rows + fresh, "LIKIT100", symbol, now=now):
+            continue
+        price = float((item.get("metadata") or {}).get("last_price") or 0)
+        decision = liquid_long_gate(item, market_regime=context.get("regime"), generated_at=snapshot.get("generated_at"),
+                                    now=now, max_age_seconds=MAIN_MAX_AGE_SECONDS)
+        entry = long_alerts.open_entry(source="LIKIT100", symbol=symbol, now=now, gate_status=decision.status,
+                                       detail=status_line(decision), plan=_stop_plan_for(symbol, price, now),
+                                       entry_price=price or None)
+        entry.update(rank=index, radar_score=int(item.get("score") or 0))
+        fresh.append(entry)
+    updated, stopped = _track_radar(rows, now)
+    opened = _merge_radar(fresh, updated)
+    messages = []
+    if LIQUID_LONG_ALERTS:
+        for entry in opened:
+            icon = "⛔" if entry["gate_status"] == "REJECT" else "👀"
+            messages.append(long_alerts.alert_text(
+                entry, headline=f"{icon} LONG SİNYALİ — Likit-100 İlk 3 (#{entry['rank']}, radar puanı "
+                                f"{entry['radar_score']}/100)", evidence=liquid_evidence_line(),
+            ))
+    for entry in stopped:
+        if (LIQUID_LONG_ALERTS if entry["source"] == "LIKIT100" else TACTICAL_ALERTS):
+            messages.append(long_alerts.stop_alert_text(entry))
+    for message in messages:
+        try:
+            send(message, keyboard=panel_keyboard())
+        except Exception:
+            log.warning("Long uyarısı gönderilemedi", exc_info=True)
+
+
+def _radar_status_line() -> str:
+    with LOCK:
+        rows = [dict(e) for e in STATE.get("radar_log") or []]
+    open_count = sum(e.get("status") == long_alerts.OPEN for e in rows)
+    return f"Radar kaydı: {open_count} açık · " + long_alerts.summary_line(rows, now=int(time.time()))
+
+
 def scan_once() -> dict[str, Any] | None:
     try:
         snapshot = ENGINE.scan_once().to_dict()
@@ -426,7 +535,34 @@ def scan_once() -> dict[str, Any] | None:
         STATE["snapshot"] = snapshot
         STATE["last_error"] = None
         _save_state()
+    try:
+        _liquid_radar(snapshot)
+    except Exception as exc:  # the radar log must never break the scan
+        log.warning("Radar kaydı güncellenemedi: %s", _safe_error(exc))
     return snapshot
+
+
+def _tactical_radar_entry(market: Any, item: dict[str, Any], decision: Any, now: int) -> long_alerts.StopPlan | None:
+    """Record a tactical setup in the radar log with the engine's own levels (call under LOCK)."""
+
+    symbol = str(item.get("symbol") or "").upper()
+    levels = item.get("plan") or {}
+    try:
+        m5 = market.candles[symbol][TacticalTimeframe.M5]
+        last = m5[-1]
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None
+    plan = long_alerts.plan_from_levels(
+        float(last.close), float(levels.get("technical_invalidation") or 0), float(levels.get("hard_stop") or 0),
+        last_candle_open=int(last.open_time),
+    )
+    rows = [dict(e) for e in STATE.get("radar_log") or []]
+    if long_alerts.can_open(rows, "TAKTIK", symbol, now=now):
+        entry = long_alerts.open_entry(source="TAKTIK", symbol=symbol, now=now, gate_status=decision.status,
+                                       detail=status_line(decision), plan=plan, entry_price=float(last.close))
+        entry["setup"] = str(item.get("setup") or "-")
+        STATE["radar_log"] = long_alerts.trim(rows + [entry])
+    return plan
 
 
 def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
@@ -455,12 +591,18 @@ def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
             if old != current[symbol] and state in {"READY", "TRIGGERED"}:
                 new_setups.append(item)  # the ledger records REJECT setups too: live check of the replay
                 decision = tactical_gate(item, now=now, max_age_seconds=TACTICAL_MAX_AGE_SECONDS)
+                plan = _tactical_radar_entry(market, item, decision, now)
                 if decision.status == "REJECT" and not TACTICAL_REJECTED_ALERTS:
                     continue
                 icon = "⛔" if decision.status == "REJECT" else "👀"
+                sizing = (
+                    f"\nUyarı fiyatı {plan.entry_price:g} · %{long_alerts.RISK_PER_TRADE_PCT:g} hesap riski için "
+                    f"pozisyon payı: sermayenin %{plan.position_pct:.0f} kadarı (hard stop'a göre)"
+                    if plan else "\nPozisyon payı hesaplanamadı (fiyat stop'un altında ya da veri yok)"
+                )
                 alerts.append(
                     f"{icon} {symbol} setup {state} — {decision.status}\nSetup: {setup}\n"
-                    + format_tactical({"assessments": [item]})
+                    + format_tactical({"assessments": [item]}) + sizing
                 )
             elif old and old.split(":", 1)[0] in {"READY", "TRIGGERED"} and state == "NO_LONG":
                 if family_disqualified(old.split(":", 1)[1]) and not TACTICAL_REJECTED_ALERTS:
@@ -497,7 +639,7 @@ def _command(text: str) -> str:
     return {
         "/start": "PANEL", "/panel": "PANEL", "/tactical": "TACTICAL",
         "/btceth": "TACTICAL", "/longs": "LONGS", "/new": "NEW",
-        "/listings": "NEW", "/status": "STATUS", "/scan": "SCAN",
+        "/listings": "NEW", "/status": "STATUS", "/scan": "SCAN", "/radar": "RADAR",
     }.get(token, token.lstrip("/").upper())
 
 
@@ -510,6 +652,10 @@ def handle(action: str) -> None:
         send(format_longs(snapshot), keyboard=panel_keyboard())
     elif action == "NEW":
         send(format_new(snapshot), keyboard=panel_keyboard())
+    elif action == "RADAR":
+        with LOCK:
+            rows = [dict(e) for e in STATE.get("radar_log") or []]
+        send(long_alerts.format_radar(rows, now=int(time.time())), keyboard=panel_keyboard())
     elif action == "STATUS":
         send(format_status(snapshot), keyboard=panel_keyboard())
     elif action == "SCAN":

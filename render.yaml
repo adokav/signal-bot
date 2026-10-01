@@ -26,6 +26,13 @@ services:
       - key: TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS
         value: "5"
 
+      # Long alerts with stop levels (docs/LONG_ALERTS.md). User policy: every
+      # long signal is pushed with its evidence label; set to "0" to silence.
+      - key: LIQUID_LONG_ALERTS_ENABLED
+        value: "1"
+      - key: TACTICAL_REJECTED_ALERTS_ENABLED
+        value: "1"
+
       # Exactly two MEXC opportunity engines
       - key: UNIFIED_ENGINE_ENABLED
         value: "1"

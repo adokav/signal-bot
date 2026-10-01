@@ -177,6 +177,24 @@ class MexcPublicProvider:
             raise RuntimeError("kline yanıtı liste değil")
         return calculate_long_metrics(payload)
 
+    def fetch_klines(self, symbol: str, interval_seconds: int, limit: int) -> list[Any]:
+        """Raw klines from the venue that served the last ticker scan (MEXC names 1h "60m")."""
+
+        base = self._active_market_base_url
+        names = {900: "15m", 3_600: "60m" if "mexc" in base else "1h"}
+        if interval_seconds not in names:
+            raise ValueError("unsupported kline interval")
+        response = self.session.get(
+            f"{base}/api/v3/klines",
+            params={"symbol": str(symbol).upper(), "interval": names[interval_seconds], "limit": int(limit)},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise RuntimeError("kline yanıtı liste değil")
+        return payload
+
     def fetch_long_metrics(
         self,
         symbols: Any,
