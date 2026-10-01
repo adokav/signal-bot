@@ -64,6 +64,7 @@ jobs:
             tests/test_weekly_momentum.py \
             tests/test_majors_signals.py \
             tests/test_trade_loop.py \
+            tests/test_atlas.py \
             tests/test_observation_archive_cadence.py \
             tests/test_macro_data.py \
             tests/test_macro_treasury.py \

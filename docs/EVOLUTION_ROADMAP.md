@@ -266,6 +266,11 @@ güncellenenler belirtildi.
       - Giriş zamanı yine rastgeleden iyi değil.
       - Sharpe farkının güven aralığı sıfırı içeriyor. Son söz 2024–26
         doğrulamasının.
+12. ⏳ **Majör coin atlası, 2017-09 → 2024-08** — `docs/ATLAS.md`.
+    - Ay ay piyasa, makro (FRED) ve takvim. Sinyal değil, açıklama.
+    - Hipotezler kullanıcıyla birlikte çıkarılacak ve önce ön-kayda girecek.
+    - Ardından "trend bozulunca çık" döngüsüyle birlikte, mühürlü 2024-09 →
+      2026-08 penceresinde bir kez test edilecek.
 
 ## Kesin çizgiler
 
