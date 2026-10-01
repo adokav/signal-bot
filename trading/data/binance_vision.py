@@ -51,6 +51,7 @@ from trading.data.binance_perp import (
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://data.binance.vision"
+MARKETS = ("futures/um", "spot")
 
 
 # ---------------------------------------------------------------------------
@@ -58,9 +59,18 @@ BASE_URL = "https://data.binance.vision"
 # ---------------------------------------------------------------------------
 
 
-def monthly_kline_url(symbol: str, timeframe: Timeframe, year: int, month: int) -> str:
+def monthly_kline_url(
+    symbol: str,
+    timeframe: Timeframe,
+    year: int,
+    month: int,
+    *,
+    market: str = "futures/um",
+) -> str:
+    if market not in MARKETS:
+        raise ValueError(f"unknown market {market!r}")
     return (
-        f"{BASE_URL}/data/futures/um/monthly/klines/"
+        f"{BASE_URL}/data/{market}/monthly/klines/"
         f"{symbol.upper()}/{timeframe.value}/"
         f"{symbol.upper()}-{timeframe.value}-{year:04d}-{month:02d}.zip"
     )
@@ -170,12 +180,33 @@ def _is_kline_header(row: list[str]) -> bool:
     return not first.lstrip("-").isdigit()
 
 
+def epoch_seconds(raw: str) -> int:
+    """Normalize a vision timestamp to UTC seconds.
+
+    Futures dumps use milliseconds (13 digits). Spot dumps switched to
+    microseconds (16 digits) from 2025-01-01; parsing those as milliseconds
+    would push every 2025+ candle into the far future, where the
+    ``decision_at`` filter would silently drop it. Any other width is
+    rejected rather than guessed (AGENTS.md §5).
+    """
+
+    value = int(raw)
+    digits = len(str(abs(value)))
+    if digits == 16:
+        return value // 1_000_000
+    if digits == 13:
+        return value // 1_000
+    raise DataQualityError(f"unrecognised timestamp unit ({digits} digits)")
+
+
 def parse_kline_csv(csv_text: str, *, decision_at: int) -> list[Candle]:
     """Parse a Binance-vision monthly klines CSV into ``Candle`` rows.
 
     Columns (no header in older dumps, header in newer):
         open_time, open, high, low, close, volume, close_time,
         quote_volume, count, taker_buy_volume, taker_buy_quote_volume, ignore
+
+    Timestamps may be milliseconds or (spot, 2025+) microseconds.
     """
 
     lines = [ln for ln in csv_text.splitlines() if ln.strip()]
@@ -189,12 +220,12 @@ def parse_kline_csv(csv_text: str, *, decision_at: int) -> list[Candle]:
         if len(row) < 8:
             continue
         try:
-            open_time_ms = int(row[0])
-            close_time_ms = int(row[6])
+            open_time = epoch_seconds(row[0])
+            close_time = epoch_seconds(row[6])
             candle = Candle(
-                open_time=open_time_ms // 1000,
-                close_time=close_time_ms // 1000,
-                available_at=close_time_ms // 1000,
+                open_time=open_time,
+                close_time=close_time,
+                available_at=close_time,
                 open=float(row[1]),
                 high=float(row[2]),
                 low=float(row[3]),
@@ -306,6 +337,7 @@ def fetch_klines_months(
     decision_at: int,
     session: requests.Session | None = None,
     max_workers: int = 8,
+    market: str = "futures/um",
 ) -> tuple[Candle, ...]:
     """Fetch klines across a set of (year, month) pairs concurrently.
 
@@ -316,7 +348,7 @@ def fetch_klines_months(
 
     session = session or _session(timeout=30)
     urls = [
-        (year, month, monthly_kline_url(symbol, timeframe, year, month))
+        (year, month, monthly_kline_url(symbol, timeframe, year, month, market=market))
         for year, month in months
     ]
     all_candles: list[Candle] = []
@@ -416,6 +448,8 @@ def download_symbol(
     timeframes: Sequence[Timeframe] = DEFAULT_TIMEFRAMES,
     lookback_months: int = DEFAULT_LOOKBACK_MONTHS,
     session: requests.Session | None = None,
+    market: str = "futures/um",
+    include_funding: bool = True,
 ) -> dict[str, Path]:
     """Fetch klines + funding for ``symbol`` and persist parquet files.
 
@@ -440,6 +474,7 @@ def download_symbol(
             months,
             decision_at=decision_at,
             session=session,
+            market=market,
         )
         if not candles:
             raise DataQualityError(
@@ -456,6 +491,8 @@ def download_symbol(
             path,
             candles[-1].close_time,
         )
+    if not include_funding:
+        return written
     funding = fetch_funding_months(
         symbol,
         months,
@@ -503,13 +540,24 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         default=None,
         help="UTC seconds; defaults to current time",
     )
+    parser.add_argument("--market", choices=MARKETS, default="futures/um")
+    parser.add_argument(
+        "--timeframes",
+        default=",".join(tf.value for tf in DEFAULT_TIMEFRAMES),
+        help="comma-separated, e.g. 5m,15m,1h,4h,1d",
+    )
+    parser.add_argument("--no-funding", action="store_true", help="skip funding (spot has none)")
     args = parser.parse_args(list(argv) if argv is not None else None)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    timeframes = tuple(Timeframe(value.strip()) for value in args.timeframes.split(",") if value.strip())
     paths = download_symbol(
         args.symbol,
         out_dir=args.out,
         decision_at=args.decision_at,
         lookback_months=args.lookback_months,
+        timeframes=timeframes,
+        market=args.market,
+        include_funding=not args.no_funding and args.market == "futures/um",
     )
     for name, path in paths.items():
         print(f"{name}\t{path}")

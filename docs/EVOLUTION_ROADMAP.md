@@ -202,10 +202,11 @@ Durum: **✅** yapıldı · **◐** kısmi · **✗** bilinçli olarak yapılmad
    saf TSMOM ve kontrolün **üçü de NO-GO**. Saf TSMOM en iyisi (Sharpe 0.62
    vs B&H 0.59, daha küçük DD) ama walk-forward tutarsız, bootstrap CI sıfırı
    içeriyor, kârın %43'ü tek işlemden. Ayrıntı: `docs/BACKTEST_REPORT_v1_RESULTS.md`.
-3. **Taktik setup'ların tarihsel replay'i** — `TacticalLongEngine`'i
-   Binance vision spot M5–D1 verisiyle geçmişte çalıştırmak. İleri kaydın
-   ≥100 örneğe ulaşması aylar sürer; replay en hızlı kanıt yolu. MEXC ile
-   Binance spot mikro yapı farkı raporda belirtilmeli.
+3. ⏳ **Taktik setup'ların tarihsel replay'i** — `TacticalLongEngine`
+   Binance vision spot M5–D1 verisiyle, canlı tarama ve ileri kayıt
+   kurallarıyla geçmişte çalıştırılıyor. Protokol ve karar kuralları
+   sonuçtan önce kayda girdi (trial `cff97d5d6f5b5c5d`):
+   `docs/TACTICAL_REPLAY_REPORT.md`, workflow `tactical_replay`.
 4. **Order-flow proxy** — vision kline'larındaki taker-buy hacmi ile CVD
    yaklaşığı ve OI metrics dump'ları (§4, §21, §22).
 5. **Kapı entegrasyonu** — ileri kayıt veya replay ≥100 çözümlenmiş
@@ -231,6 +232,5 @@ risk-ayarlı olarak anlamlı biçimde geçemedi. Faz Q (quant spec revizyonu) ar
 ve dürüst etiketleme katmanlarını ekledi. Canlı radar SHADOW'da ve azami
 statü WATCH. Emir yolu yok; kanıt oluşmadan eklenmeyecek.
 
-**Sonraki iş:** karar kullanıcıda — BTC tek-sembol yönlü araştırmayı kapatmak, farklı bir edge
-sınıfına (taktik setup replay'i, çapraz-kesit, funding/basis) geçmek ya da ileri kayıtla kanıt
-biriktirmek. Her yeni hipotez deneme kaydına önceden girer.
+**Sonraki iş:** taktik setup replay'i (ön-kayıtlı, `docs/TACTICAL_REPLAY_REPORT.md`) koşulup
+önceden ilan edilen kurallara göre değerlendirilecek. Her yeni hipotez deneme kaydına önceden girer.

@@ -1,0 +1,101 @@
+name: tactical_replay
+
+# Manual-trigger research job: replays the live BTC/ETH tactical Long radar
+# (TacticalLongEngine + forward-ledger resolution) over 72 months of Binance
+# spot history and scores it against the decision rules pre-registered in
+# docs/TACTICAL_REPLAY_REPORT.md.
+#
+# No inputs on purpose: the protocol (window, costs, spread, cadence) is
+# fixed before any result. A different setting is a different trial and
+# must be pre-registered first.
+#
+# Research only: no order authority, does not touch the production bot.
+#
+# How to run:
+#   GitHub → Actions → tactical_replay → Run workflow
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements.txt
+          -r requirements-dev.txt
+          -r requirements-trading.txt
+      - name: Download Binance spot data (via data.binance.vision)
+        run: |
+          set -euo pipefail
+          for symbol in BTCUSDT ETHUSDT ETHBTC; do
+            python -m trading.data.binance_vision "${symbol}" \
+                --market spot \
+                --timeframes 5m,15m,1h,4h,1d \
+                --no-funding \
+                --lookback-months 72 \
+                --out research/data/binance_spot
+          done
+          ls -la research/data/binance_spot
+      - name: Run tactical replay
+        run: |
+          set -euo pipefail
+          echo "cpus: $(nproc)"
+          python -m trading.backtest.tactical_replay \
+              --data-dir research/data/binance_spot \
+              --out research/data/tactical_replay.json \
+              --workers "$(nproc)" \
+              --trial-registry research/trials/registry.jsonl \
+              --record-trial
+      - name: Emit run summary
+        run: |
+          set -euo pipefail
+          {
+            echo "## Taktik radar replay"
+            echo ""
+            echo '```json'
+            python -c "
+          import json, pathlib
+          data = json.loads(pathlib.Path('research/data/tactical_replay.json').read_text())
+          keys = ('recorded', 'not_filled', 'unresolvable', 'resolved', 'hit_rate', 'breakeven_hit_rate',
+                  'mean_r', 'mean_r_ci_family', 'stressed_mean_r', 'first_half_mean_r', 'second_half_mean_r', 'verdict')
+          summary = {
+              'window': [data['start_time'], data['end_time']],
+              'steps': {k: data[k] for k in ('decision_steps', 'evaluated', 'skipped_warmup', 'skipped_data', 'engine_errors', 'rejected_rows')},
+              'engine_fingerprint': data['engine_fingerprint'],
+              'overall': {k: data['overall'][k] for k in keys},
+              'by_setup': {name: {k: g[k] for k in keys} for name, g in data['by_setup'].items()},
+              'notes': data['notes'],
+              'can_authorize_trade': data['can_authorize_trade'],
+          }
+          print(json.dumps(summary, indent=2, ensure_ascii=False))
+          "
+            echo '```'
+            echo ""
+            echo "<details><summary>Strateji raporu (hipotez, kırılganlık, WHAT COULD BLOW UP THIS ACCOUNT?)</summary>"
+            echo ""
+            cat research/data/tactical_replay.md
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tactical-replay
+          path: |
+            research/data/tactical_replay.json
+            research/data/tactical_replay.md
+            research/trials/registry.jsonl
+          retention-days: 30
