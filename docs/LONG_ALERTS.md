@@ -31,15 +31,18 @@ Uyarı, stop uyarısı ve `/radar` kaydı tablo halinde gelir. Telegram'da
 eş aralıklı (`<pre>`) blok kullanılır. Satırlar telefonda kaymasın diye
 ≤ 32 karakterdir. Uyarı tablosunun bölümleri:
 
-1. **Kanıt durumu:** REJECT (zararda) / WATCH (kanıt yok). Likit-100'de radar
-   puanı; taktikte kurulum ve 4 saatlik yapı.
+1. **Kapı durumu:** REJECT / WATCH. Likit-100'de radar puanı; taktikte
+   kurulum ve 4 saatlik yapı. Tablonun hemen altında kapının **kendi
+   nedeni** yazar (`status_line`): bayat veri, rejim, stop geometrisi ya da
+   negatif geçmiş. Her REJECT'e tek bir anlam yüklenmez.
 2. **Seviyeler:** fiyat, (taktikte giriş bölgesi), geçersizlik, hard stop ve
    mesafesi, (taktikte hedefler ve R/R), ATR, pozisyon payı.
 3. **Arz ve ATH/ATL:** dolaşan/toplam/max arz, ATH/ATL fiyatı, uzaklığı ve
    tarihi.
 
-Tablonun altında, tek satırlık açıklama, geçmiş test sonucu ve "emir yetkisi
-yok" notu yer alır. Sağlayıcıdan gelen bütün metinler HTML olarak kaçışlanır.
+Tablonun altında kapı nedeni, tek satırlık açıklama, geçmiş test sonucu ve
+"emir yetkisi yok" notu yer alır. `/radar` kaydında her satır, uyarı anındaki
+kapı durumunu da gösterir. Sağlayıcıdan gelen bütün metinler HTML olarak kaçışlanır.
 Telegram biçimlendirmeyi reddederse aynı mesaj düz metin olarak yeniden
 gönderilir. Bağlantı hatası ise biçim hatası sayılmaz.
 

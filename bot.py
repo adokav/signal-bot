@@ -674,7 +674,7 @@ def _tactical_alert(item: dict[str, Any], decision: Any, plan: long_alerts.StopP
     levels = item.get("plan") or {}
     icon = "⛔" if decision.status == "REJECT" else "👀"
     entry = {"symbol": symbol, "source": "TAKTIK", "opened_at": now, "gate_status": decision.status,
-             "plan": plan.to_dict() if plan else None}
+             "detail": status_line(decision), "plan": plan.to_dict() if plan else None}
     zone = ("Giriş", f"{long_alerts._num(levels['entry_low'])} – {long_alerts._num(levels['entry_high'])}") \
         if levels.get("entry_low") and levels.get("entry_high") else None
     targets = [

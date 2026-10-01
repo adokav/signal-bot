@@ -258,7 +258,6 @@ def _num(value: float) -> str:
 # Telegram shows a <pre> block in a monospace font; rows stay within ~32
 # characters so a phone screen does not wrap them.
 LABEL_WIDTH = 12
-GATE_MEANING = {"REJECT": "zararda", "WATCH": "kanıt yok"}
 RULE = "─" * 24
 FOOTER = "Stop zararı sınırlar; geçmişi negatif bir sinyali kârlı yapmaz. Emir yetkisi yok, karar senin."
 
@@ -308,6 +307,21 @@ def plan_notes(plan: Mapping[str, Any] | None, *, invalidation: str = "son 12 sa
     return notes + [f"⚠️ {w}" for w in plan.get("warnings") or ()]
 
 
+def gate_reason(entry: Mapping[str, Any]) -> str:
+    """The gate's own reason (``status_line``: failing checks or missing evidence), never a paraphrase.
+
+    A REJECT can come from stale data, the regime, the stop geometry or a
+    negative history; showing one fixed meaning for all of them would be false.
+    """
+
+    detail = str(entry.get("detail") or "")
+    status = str(entry.get("gate_status") or "")
+    prefix = f"Durum: {status}"
+    if detail.startswith(prefix):
+        detail = detail[len(prefix):].lstrip(" —-")
+    return detail.strip()
+
+
 def alert_text(entry: Mapping[str, Any], *, icon: str, title: str, evidence: str, head_rows: Sequence[Row] = (),
                zone: Row = None, targets: Sequence[Row] = (), fact_rows: Sequence[Row] = (),
                notes: Sequence[str] = (), invalidation: str = "son 12 saatin dibi") -> str:
@@ -315,9 +329,7 @@ def alert_text(entry: Mapping[str, Any], *, icon: str, title: str, evidence: str
 
     source = SOURCE_LABELS.get(str(entry.get("source")), str(entry.get("source")))
     plan = entry.get("plan")
-    status = str(entry.get("gate_status") or "?")
-    rows: list[Row] = [("Kanıt", f"{status} ({GATE_MEANING[status]})" if status in GATE_MEANING else status),
-                       *head_rows, None,
+    rows: list[Row] = [("Kapı", str(entry.get("gate_status") or "?")), *head_rows, None,
                        *plan_rows(plan, zone=zone, targets=targets)]
     if fact_rows:
         rows += [None, *fact_rows]
@@ -325,6 +337,7 @@ def alert_text(entry: Mapping[str, Any], *, icon: str, title: str, evidence: str
         f"{esc(icon)} <b>{esc(title)}</b>",
         f"<b>{esc(entry['symbol'])}</b> · {esc(source)} · {esc(_clock(int(entry['opened_at'])))} TSİ",
         table(rows),
+        *([f"<b>Kapı nedeni:</b> {esc(reason)}"] if (reason := gate_reason(entry)) else []),
         *(esc(n) for n in (*plan_notes(plan, invalidation=invalidation), *notes) if n),
         f"<i>{esc(evidence)}</i>",
         esc(FOOTER),
@@ -376,7 +389,7 @@ def summary_line(log: Sequence[Mapping[str, Any]], *, now: int, days: int = 30) 
     )
 
 
-RADAR_ROWS = 40   # two lines each; keeps /radar well under Telegram's 4096 characters
+RADAR_ROWS = 30   # three lines each; keeps /radar well under Telegram's 4096 characters
 
 
 def format_radar(log: Sequence[Mapping[str, Any]], *, now: int, hours: int = TRACK_HOURS) -> str:
@@ -395,12 +408,14 @@ def format_radar(log: Sequence[Mapping[str, Any]], *, now: int, hours: int = TRA
             plan = e.get("plan") or {}
             price = _num(e["entry_price"]) if e.get("entry_price") else "?"
             stop = _num(plan["hard_stop"]) if plan else "yok"
-            lines.append(f"{_clock(int(e['opened_at']))} {source} {coin:<8} {_status_label(e)}")
+            lines.append(f"{_clock(int(e['opened_at']))} {source} {coin:<8} {e.get('gate_status') or '?'}")
             lines.append(f"  giriş {price} · stop {stop}")
+            lines.append(f"  {_status_label(e)}")
         if len(newest) > RADAR_ROWS:
             lines.append(f"+{len(newest) - RADAR_ROWS} eski kayıt daha")
         parts.append("<pre>" + esc("\n".join(lines)) + "</pre>")
-        parts.append(esc("L: Likit-100, T: taktik (BTC/ETH). 72s: 72 saat doldu; * takip verisi eksikti."))
+        parts.append(esc("L: Likit-100, T: taktik (BTC/ETH). Sağdaki: uyarı anındaki kapı durumu. "
+                         "72s: 72 saat doldu; * takip verisi eksikti."))
     parts += [esc(summary_line(log, now=now)),
               esc("Stop kontrolü kapanmış 15 dk mumlarının dibiyle yapılır. Emir yetkisi yok.")]
     return "\n".join(parts)
