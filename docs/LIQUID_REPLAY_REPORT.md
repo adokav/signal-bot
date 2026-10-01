@@ -144,6 +144,29 @@ kötüsü RISK_OFF'ta İlk 3, 24 saat: −0.53.
 2020–2021'de (boğa) güven aralığı sıfırı içeriyor ama hiçbir yıl pozitif
 değil.
 
+### Bilinen veri sınırı (2026-10-01'de eklendi, sonuçtan sonra)
+
+Geri dönüş testinin veri kontrolünde, canlı kimlik kurallarının
+(`acce_unified/cex.py`) bazı Binance-geçmişi sembollerini tanımadığı
+görüldü. Bu pencerede işlem görenler [S3 listelemesi]:
+
+- `PAXUSDT`: dolar stabil coini, 2021-09'a kadar;
+- `USTUSDT`: 2021-12 → 2022-05;
+- `AUDUSDT`: 2020-08 → 2023-06.
+
+Hacim eşiğini geçtikleri günlerde evrene girmiş olabilirler; bu
+doğrulanmadı.
+
+**Muhtemel etki:** Fiyatı ≈ sabit bir sembol en çok sepeti sıfıra doğru
+seyreltir. Radarın "en iyi 3" seçimine girmesi olası değil.
+
+**Sonuca etkisi:** Karar 2022–2026'nın her yılında ve her grupta sıfırın
+altında, dar güven aralıklarıyla negatif. Bu yüzden bu sınırın kararı
+değiştirmesi beklenmiyor.
+
+Yeniden koşulmadı. Likit-100 yeniden test edilirse, ayrı bir Binance-geçmişi
+kimlik katmanıyla yeni bir deneme olarak yapılır.
+
 ### Ön-kayıtlı kurallara göre değerlendirme
 
 - Dört karar grubunun **dördü de NEGATIVE**: %98.75 güven aralığının üst

@@ -77,7 +77,7 @@ yapılan 2024–2026 çalışmaları da benzer bir tablo çiziyor:
 | Taktik long kurulumları | NEGATIVE | Uyumlu. Teknik kurulumlar maliyetten sonra boğa dışı dönemlerde sönüyor. |
 | Likit-100 long radarı | NEGATIVE. En çok yükselenler 12–72 saatte sepetin gerisinde kaldı. | Kısmen. MAX ("piyango") literatürü karışık: bir kısmı negatif MAX etkisi, bir kısmı "MAX momentum" buluyor [özet]. Bizim 2020–2026 likit verimiz negatif tarafı destekliyor. |
 | Funding carry (SIGNED) | PASS_CANDIDATE ama canlıya yetersiz. Son 20 ay negatif. | Uyumlu. Funding yıllık ≈ %11 (2024) → %4.9 (2025) → %2.2 (2026, Ağustos'a kadar) [özet]. Carry, çöküş riskiyle bağlantılı (BIS WP 1087) [özet]. |
-| Kısa vadeli geri dönüş (2017–2020) | **Koşuyor** | Önceden yazılan beklenti aşağıda. |
+| Kısa vadeli geri dönüş (etkin dönem 2019-04 → 2020-09) | LOSERS@1g **NEGATIVE** (−0.67%/gün, [−1.05, −0.29]); LOSERS@3g INSUFFICIENT | Uyumlu. Aşağıdaki beklenti sonuçtan önce yazıldı; likit coin'lerde düşenler düşmeye devam etti. |
 
 **Geri dönüş testi için beklenti (sonuç görülmeden yazıldı):**
 
@@ -267,6 +267,23 @@ Her aday için şu sorular soruldu:
 | 3 | BTC saat etkisi, yayın sonrası (C1) | Ucuz, temiz örneklem dışı pencere | Maliyetten sonra büyük olasılıkla NO_EDGE |
 | 4 | Haftalık momentum (B5) | Ucuz | Zayıf |
 | — | Hisse perp carry, unlock filtresi, saat başı emir dengesizliği | Veri veya tam metin gerekiyor | İzle |
+
+### Veri katmanı şartı (geri dönüş testinden çıkan ders)
+
+Binance geçmişinde canlı kimlik kurallarının yakalamadığı semboller var:
+
+- `BULL`/`BEAR`: BTC kaldıraçlı tokenları (2020-01 → 2020-03);
+- `PAX`: dolar stabil coini, sonradan adı USDP oldu (2018-10 → 2021-09);
+- `UST`: Terra'nın dolar stabil coini (2021-12 → 2022-05);
+- `AUD`: Avustralya doları (2020-08 → 2023-06);
+- `BKRW`: Kore wonuna sabitli coin (2020-07 → 2020-08).
+
+Tarih aralıkları Binance S3 listelemesinden alındı [doğrulandı].
+
+Bundan sonraki her deneme bu istisnaları ayrı ve kendi parmak izi olan bir
+Binance-geçmişi kimlik katmanında uygular. Canlı `acce_unified/cex.py`
+değişmez: değişirse Likit-100 kanıt parmak izi bozulur, ayrıca MEXC'de bu
+adlarla gerçek coin'ler olabilir.
 
 ### Ön-kayıt taslağı 1: Yeni listeleme kohortu (kayıptan kaçınma)
 
