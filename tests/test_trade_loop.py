@@ -96,6 +96,42 @@ def test_the_disaster_stop_fills_at_the_stop_or_at_a_gapped_open():
     assert trade.r < -1.0
 
 
+def test_a_pair_specific_gap_inside_a_trade_is_unknown_but_an_exchange_halt_is_not():
+    prices = _breakout_path([110.0] * 8)
+    rows = _rows(prices)
+    hole = {T0 + (34 * 96 + k) * BAR for k in range(10, 14)}                  # one hour missing on day 34
+    gapped = [r for r in rows if r[0] not in hole]
+    market = _market({"AUSDT": gapped})
+    daily = tl.daily_bars(market)
+    ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
+    assert tl.simulate(market, daily, ind, D1, 0, 30, breaks).status == "UNKNOWN"   # no halt map: fail closed
+    other = {f"B{k}USDT": [r for r in _rows(prices) if r[0] not in hole] for k in range(5)}
+    market = _market({"AUSDT": gapped, **other})                              # every pair is missing: a halt
+    daily = tl.daily_bars(market)
+    ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
+    halts = tl.halt_bars(market)
+    assert halts[34 * 96 + 11] and not halts[34 * 96 + 20]
+    assert tl.simulate(market, daily, ind, D1, 0, 30, breaks, halts).status == "RESOLVED"
+    alone = _market({"AUSDT": gapped, **{f"B{k}USDT": _rows(prices) for k in range(5)}})
+    daily = tl.daily_bars(alone)
+    trade = tl.simulate(alone, daily, tl.indicators(daily), D1, 0, 30, tl.wm.continuity_breaks(alone),
+                        tl.halt_bars(alone))
+    assert trade.status == "UNKNOWN"                                          # only this pair is missing
+
+
+def test_entry_signals_that_cannot_trade_are_counted_not_dropped():
+    prices = _breakout_path([110.0] * 5)
+    rows = [r for r in _rows(prices) if r[0] != T0 + 31 * 96 * BAR]          # the execution open is missing
+    market = _market({"AUSDT": rows})
+    daily = tl.daily_bars(market)
+    ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
+    assert tl.simulate(market, daily, ind, D1, 0, 30, breaks) == tl.Skip("no_open")
+    trades, skipped = tl.run_loop(market, daily, ind, D1, {0: [(30, T0)]}, breaks)
+    assert trades == [] and skipped == {"no_open": 1}
+    stats = tl.completeness(trades, daily, market, {0: [(30, T0)]}, {T0: ["BTCUSDT", "ETHUSDT"]}, skipped)
+    assert stats["unknown_trade_share"] == 1.0 and "unknown trades 100.0%" in tl.incomplete(stats)
+
+
 def test_a_token_swap_during_the_trade_is_unknown_not_a_return():
     prices = _breakout_path([110.0] * 3) + [None, None, None] + [110_000.0] * 5 + [50_000.0] * 12
     market, daily, ind, breaks = _one(prices)
@@ -110,10 +146,10 @@ def test_the_loop_repeats_and_the_random_control_is_reproducible():
     daily = tl.daily_bars(market)
     ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
     days = {0: [(d, T0) for d in range(25, daily.n_days)]}
-    rows = tl.run_loop(market, daily, ind, D1, days, breaks, seed=7)
+    rows, _ = tl.run_loop(market, daily, ind, D1, days, breaks, seed=7)
     assert len(rows) == 2 and rows[1]["entry_day"] > rows[0]["exit_day"]          # one position at a time, then again
     assert all(r["random_draws"] <= tl.RANDOM_DRAWS for r in rows)
-    again = tl.run_loop(market, daily, ind, D1, days, breaks, seed=7)
+    again, _ = tl.run_loop(market, daily, ind, D1, days, breaks, seed=7)
     assert [r["random_mean_net_pct"] for r in rows] == [r["random_mean_net_pct"] for r in again]
 
 
@@ -123,12 +159,26 @@ def test_portfolio_charges_costs_and_compares_with_buy_and_hold():
     daily = tl.daily_bars(market)
     ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
     days = {0: [(d, T0) for d in range(25, daily.n_days)]}
-    rows = tl.run_loop(market, daily, ind, D1, days, breaks)
+    rows, _ = tl.run_loop(market, daily, ind, D1, days, breaks)
     assert len(rows) == 1
     window = (T0 + DAY_S, T0 + daily.n_days * DAY_S)
     book = tl.portfolio(market, daily, rows, {T0: ["AUSDT"]}, window, breaks, half_at=T0 + 40 * DAY_S)
     assert book["loop"]["total_return_pct"] == pytest.approx(rows[0]["net_pct"], abs=0.05)
-    assert 0 < book["time_in_market"] < 1
+    assert 0 < book["time_in_market"] < 1 and book["capped_days"] == 0
+
+
+def test_positions_kept_after_a_universe_rotation_never_lever_the_portfolio():
+    prices = _breakout_path([110.0 + k for k in range(20)])
+    market = _market({"AUSDT": _rows(prices, wick=0.002), "BUSDT": _rows(prices, wick=0.002)})
+    daily = tl.daily_bars(market)
+    ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
+    month2 = T0 + 33 * DAY_S
+    rows_a, _ = tl.run_loop(market, daily, ind, D1, {0: [(30, T0)]}, breaks)     # A entered in a 1-coin month
+    rows_b, _ = tl.run_loop(market, daily, ind, D1, {1: [(34, month2)]}, breaks)  # B in a later 1-coin month
+    monthly = {T0: ["AUSDT"], month2: ["BUSDT"]}
+    window = (T0 + DAY_S, T0 + daily.n_days * DAY_S)
+    book = tl.portfolio(market, daily, rows_a + rows_b, monthly, window, breaks, half_at=T0 + 40 * DAY_S)
+    assert book["capped_days"] > 0 and book["time_in_market"] <= 1.0 + 1e-9
     assert book["buy_and_hold"]["total_return_pct"] == pytest.approx((prices[-1] / prices[0] - 1) * 100, abs=0.5)
 
 

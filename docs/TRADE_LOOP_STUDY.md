@@ -210,7 +210,18 @@ Bir döngü, keşifte **hepsini** sağlarsa adaydır:
 **Koşu:** `python -m trading.backtest.trade_loop discover`.
 
 - **Veri:** 2024-09-01 itibarıyla mühürlü.
-- **Kapsam:** 46 ay, 873 işlem. Bilinmeyen işlem yok.
+- **Kapsam:** 46 ay, 873 işlem. Bilinmeyen işlem yok. Verisi eksik olduğu için
+  işleme dönüşemeyen giriş sinyali yok.
+- **İnceleme (Codex) üzerine iki koruma eklendi ve keşif yeniden koşuldu:**
+  - Evren değişince eski pozisyonlar paylarını koruyordu; bazı günler toplam
+    pozisyon %100'ü aşabiliyordu. Artık o gün bütün pozisyonlar orantılı
+    olarak %100'e indiriliyor; döngü hiçbir zaman kaldıraçlı değil.
+  - Yalnızca o coine ait eksik 15 dakikalık mum, stopun gizlice geçilmiş
+    olabileceği anlamına gelir. Böyle bir boşluğu kapsayan işlem bilinmez
+    sayılır. Borsa genelindeki duruşlar bundan ayrılır; o sırada zaten işlem
+    yoktur.
+  - İşlem başına sonuçlar değişmedi. Portföy rakamları aşağıdaki son
+    hâlidir.
 - **Yarılar:** 2022-09-01'de ayrılır. α = 0.05, 7 günlük blok bootstrap.
 
 ### İşlem bazında (net %, maliyet sonrası)
@@ -238,19 +249,19 @@ D2_EMA50 %94. Bu üç işlem çıkarılınca işlem başına ortalama +7.1 / +2.
 | Döngü | Toplam getiri | En büyük düşüş | Sharpe (1. / 2. yarı) | Piyasada kalma |
 |---|---:|---:|---|---:|
 | **Al-tut sepeti** | +%113 | −%92 | 0.67 (0.85 / 0.45) | %100 |
-| D1_20_10 | **+%432** | **−%45** | **1.27** (2.02 / **0.32**) | %37 |
-| D1_55_20 | +%118 | −%48 | 0.74 (0.89 / 0.57) | %28 |
-| D2_EMA50 | +%200 | −%56 | 0.93 (1.58 / −0.23) | %27 |
-| D2_DIP | −%25 | −%94 | 0.36 (0.65 / −0.11) | %88 |
+| D1_20_10 | **+%415** | **−%44** | **1.26** (2.01 / **0.29**) | %37 |
+| D1_55_20 | +%116 | −%47 | 0.73 (0.91 / 0.53) | %27 |
+| D2_EMA50 | +%201 | −%55 | 0.93 (1.59 / −0.23) | %27 |
+| D2_DIP | +%44 | −%88 | 0.50 (0.87 / −0.06) | %81 |
 
 **Yıl yıl, D1_20_10 ve al-tut:**
 
 | Yıl | Döngü | Al-tut |
 |---|---:|---:|
 | 2020 (Kasım–Aralık) | +%29 | +%64 |
-| 2021 | +%313 | +%485 |
-| 2022 | **−%31** | **−%88** |
-| 2023 | +%55 | +%93 |
+| 2021 | +%306 | +%485 |
+| 2022 | **−%30** | **−%88** |
+| 2023 | +%50 | +%93 |
 | 2024 (Ağustos'a kadar) | −%6 | −%7 |
 
 ### Okuma
@@ -267,7 +278,7 @@ D2_EMA50 %94. Bu üç işlem çıkarılınca işlem başına ortalama +7.1 / +2.
 
 - Trend bozulunca çıkmak (kapanış son 10 günün dibinin altında), boğa
   yıllarında yükselişin yaklaşık %60'ını tuttu.
-- Aynı kural, 2022 ayı piyasasında kaybı −%88'den −%31'e indirdi.
+- Aynı kural, 2022 ayı piyasasında kaybı −%88'den −%30'a indirdi.
 - 4 yıl boyunca toplam getiri al-tut'un yaklaşık 4 katı, en büyük düşüş
   yarısı.
 - Bu, Faz A'da BTC'de görülen trend takibi profiliyle aynı: alfa değil, risk
@@ -275,7 +286,7 @@ D2_EMA50 %94. Bu üç işlem çıkarılınca işlem başına ortalama +7.1 / +2.
 
 **Ama 2. yarı zayıf:**
 
-- 2022-09 → 2024-08'de D1_20_10'un Sharpe'ı (0.32) al-tut'unkinden (0.45)
+- 2022-09 → 2024-08'de D1_20_10'un Sharpe'ı (0.29) al-tut'unkinden (0.45)
   düşük.
 - Avantajın büyük kısmı 2021'in dev trendlerinden ve 2022'nin çöküşünden
   kaçmaktan geliyor.

@@ -201,6 +201,31 @@ def exit_signal(loop: Loop, daily: Daily, ind: Indicators, s: int, e: int, dip: 
 
 
 @dataclass(frozen=True)
+class Skip:
+    """An entry signal that could not become a trade, and why."""
+
+    reason: str                 # window_end / no_close / no_open / break_at_entry / no_atr / gap_below_stop
+
+
+DATA_SKIPS = frozenset({"no_open", "break_at_entry", "no_atr"})      # missing data, counted as unknown
+
+
+def halt_bars(market: lr.Market) -> np.ndarray:
+    """True for 15m bars where most pairs that traded the day before have no candle: an exchange halt.
+
+    No trade happens during a halt, so no stop can be crossed inside it. A
+    pair-specific missing candle is different: the price may have moved
+    without us seeing it (``simulate`` then marks the trade unknown).
+    """
+
+    import pandas as pd
+
+    counts = np.isfinite(market.close).sum(axis=0).astype(float)
+    reference = pd.Series(counts).rolling(BARS, min_periods=1).median().shift(1).to_numpy()
+    return np.where(np.isfinite(reference) & (reference > 0), counts < 0.5 * reference, False)
+
+
+@dataclass(frozen=True)
 class Trade:
     symbol: str
     decided_at: int             # the daily close the entry was decided at
@@ -229,26 +254,39 @@ class Trade:
 
 
 def simulate(market: lr.Market, daily: Daily, ind: Indicators, loop: Loop, s: int, d: int,
-             breaks: wm.Breaks) -> Trade | None:
-    """Enter at the open after day ``d``'s close and follow the loop's exit; None if the entry is not tradable."""
+             breaks: wm.Breaks, halts: np.ndarray | None = None) -> Trade | Skip:
+    """Enter at the open after day ``d``'s close and follow the loop's exit, or say why that was not possible.
+
+    ``halts`` (``halt_bars``) marks exchange-wide halts; without it every
+    missing candle inside a trade makes the trade unknown.
+    """
 
     first = (d + 1) * BARS
-    if d + 1 >= daily.n_days or not math.isfinite(market.open[s, first]) or not math.isfinite(daily.close[s, d]):
-        return None
+    if d + 1 >= daily.n_days:
+        return Skip("window_end")
+    if not math.isfinite(daily.close[s, d]):
+        return Skip("no_close")
+    if not math.isfinite(market.open[s, first]):
+        return Skip("no_open")
     if not wm.continuous(breaks, s, first - 1, first):
-        return None                                        # resumes on the entry bar: not tradable at the decision
+        return Skip("break_at_entry")                       # resumes on the entry bar: not tradable at the decision
     entry = float(market.open[s, first])
     levels = stop_levels(loop, ind, s, d, entry)
-    if levels is None or levels[0] >= entry:
-        return None
+    if levels is None:
+        return Skip("no_atr")
+    if levels[0] >= entry:
+        return Skip("gap_below_stop")                       # opened at or below its own stop: no entry by rule
     stop, dip = levels
     decided_at = daily.day0 + (d + 1) * DAY
     last = int(market.last_index[s])
     delisted = last < int(market.coverage_end[s]) - BARS
 
     def done(day: int, price: float, reason: str, bar: int) -> Trade:
-        status = "RESOLVED" if wm.continuous(breaks, s, first - 1, bar) else "UNKNOWN"
-        return Trade(market.symbols[s], decided_at, d + 1, entry, stop, day, float(price), reason, status)
+        missing = first + np.nonzero(~np.isfinite(market.low[s, first:bar + 1]))[0]
+        unseen = len(missing) and (halts is None or not bool(halts[missing].all()))
+        ok = wm.continuous(breaks, s, first - 1, bar) and not unseen    # a pair-specific gap could hide the stop
+        return Trade(market.symbols[s], decided_at, d + 1, entry, stop, day, float(price), reason,
+                     "RESOLVED" if ok else "UNKNOWN")
 
     for e in range(d + 1, daily.n_days):
         lo, hi = e * BARS, (e + 1) * BARS
@@ -300,12 +338,14 @@ def decision_days(daily: Daily, monthly: Mapping[int, Sequence[str]], window: tu
 
 
 def run_loop(market: lr.Market, daily: Daily, ind: Indicators, loop: Loop,
-             days: Mapping[int, Sequence[tuple[int, int]]], breaks: wm.Breaks, *, seed: int = 0) -> list[dict]:
-    """Trades of one loop with their random-entry control (mean net of up to 20 random entries)."""
+             days: Mapping[int, Sequence[tuple[int, int]]], breaks: wm.Breaks, *, seed: int = 0,
+             halts: np.ndarray | None = None) -> tuple[list[dict], dict[str, int]]:
+    """Trades of one loop with their random-entry control, and the entry signals that could not trade."""
 
     signals = entry_signals(loop, daily, ind)
     rng = np.random.default_rng(seed)
-    rows = []
+    rows: list[dict] = []
+    skipped: dict[str, int] = {}
     for s in sorted(days):
         by_month: dict[int, list[int]] = {}
         for d, month in days[s]:
@@ -314,14 +354,15 @@ def run_loop(market: lr.Market, daily: Daily, ind: Indicators, loop: Loop,
         for d, month in days[s]:
             if d < free_from or not signals[s, d]:
                 continue
-            trade = simulate(market, daily, ind, loop, s, d, breaks)
-            if trade is None:
+            trade = simulate(market, daily, ind, loop, s, d, breaks, halts)
+            if isinstance(trade, Skip):
+                skipped[trade.reason] = skipped.get(trade.reason, 0) + 1
                 continue
             free_from = trade.exit_day                      # one position per coin; re-enter after the exit
             pool = by_month[month]
             draws = [int(x) for x in rng.choice(pool, size=min(RANDOM_DRAWS, len(pool)), replace=False)]
             random_nets = [t.net_pct() for x in draws
-                           if (t := simulate(market, daily, ind, loop, s, x, breaks)) is not None
+                           if isinstance(t := simulate(market, daily, ind, loop, s, x, breaks, halts), Trade)
                            and t.status == "RESOLVED"]
             rows.append({
                 **asdict(trade), "family": loop.family, "loop": loop.name, "month": month,
@@ -330,7 +371,7 @@ def run_loop(market: lr.Market, daily: Daily, ind: Indicators, loop: Loop,
                 "random_mean_net_pct": statistics.fmean(random_nets) if len(random_nets) >= MIN_RANDOM_DRAWS else None,
                 "random_draws": len(random_nets),
             })
-    return rows
+    return rows, skipped
 
 
 def daily_path(daily: Daily, row: Mapping[str, Any], s: int) -> dict[int, float]:
@@ -354,7 +395,12 @@ def daily_path(daily: Daily, row: Mapping[str, Any], s: int) -> dict[int, float]
 def portfolio(market: lr.Market, daily: Daily, rows: Sequence[Mapping[str, Any]],
               monthly: Mapping[int, Sequence[str]], window: tuple[int, int], breaks: wm.Breaks,
               *, half_at: int) -> dict[str, Any]:
-    """Each trade holds 1/N of capital (N = its month's universe size); vs the equal-weight basket."""
+    """Each trade holds 1/N of capital (N = its month's universe size); vs the equal-weight basket.
+
+    Positions kept after their coin left the universe keep their slot, so a
+    day's slots can add up to more than 100%. Such a day is scaled down to
+    100% (all positions in proportion): the loop is never levered.
+    """
 
     first_day = (window[0] - daily.day0) // DAY
     last_day = min(daily.n_days, (window[1] - daily.day0) // DAY + 1) - 1
@@ -391,6 +437,9 @@ def portfolio(market: lr.Market, daily: Daily, rows: Sequence[Mapping[str, Any]]
                 rets.append(c1 / c0 - 1.0)
         if rets:
             basket[k] = statistics.fmean(rets)
+    scale = np.where(exposure > 1.0, 1.0 / np.maximum(exposure, 1e-12), 1.0)
+    loop_ret, capped = loop_ret * scale, exposure > 1.0
+    exposure = exposure * scale
     times = daily.day0 + (first_day + np.arange(n_days)) * DAY
     ok = np.isfinite(basket)
     return {
@@ -398,6 +447,7 @@ def portfolio(market: lr.Market, daily: Daily, rows: Sequence[Mapping[str, Any]]
         "buy_and_hold": _curve(basket[ok], times[ok], half_at),
         "time_in_market": float(exposure[ok].mean()) if ok.any() else None,
         "days": int(ok.sum()),
+        "capped_days": int(capped[ok].sum()),
     }
 
 
@@ -481,12 +531,17 @@ def select_candidates(results: Sequence[Mapping[str, Any]], limit: int = 2) -> l
 
 
 def completeness(rows: Sequence[Mapping[str, Any]], daily: Daily, market: lr.Market,
-                 days: Mapping[int, Sequence[tuple[int, int]]], monthly: Mapping[int, Sequence[str]]) -> dict:
+                 days: Mapping[int, Sequence[tuple[int, int]]], monthly: Mapping[int, Sequence[str]],
+                 skipped: Mapping[str, int] | None = None) -> dict:
     coin_days = [(s, d) for s, items in days.items() for d, _ in items]
     unknown_days = sum(not math.isfinite(daily.close[s, d]) for s, d in coin_days)
+    data_skips = sum(n for reason, n in (skipped or {}).items() if reason in DATA_SKIPS)
+    attempts = len(rows) + data_skips
     return {
         "trades": len(rows),
-        "unknown_trade_share": (sum(r["status"] != "RESOLVED" for r in rows) / len(rows)) if rows else 1.0,
+        "skipped_entries": dict(skipped or {}),
+        "unknown_trade_share": ((sum(r["status"] != "RESOLVED" for r in rows) + data_skips) / attempts
+                                if attempts else 1.0),
         "unknown_day_share": unknown_days / len(coin_days) if coin_days else 1.0,
         "months_missing_fixed": sum(not set(ms.FIXED) <= set(m) for m in monthly.values()),
     }
@@ -589,13 +644,13 @@ def run(spot_dir: Path, *, window: tuple[int, int], end: int, alpha: float, half
     monthly = ms.universes(market, window, perp_of=perp_of, funding_times=funding_times)
     daily = daily_bars(market)
     ind = indicators(daily)
-    breaks = wm.continuity_breaks(market)
+    breaks, halts = wm.continuity_breaks(market), halt_bars(market)
     days = decision_days(daily, monthly, window, market)
     results, all_rows = [], []
     for loop in loops:
-        rows = run_loop(market, daily, ind, loop, days, breaks)
+        rows, skipped = run_loop(market, daily, ind, loop, days, breaks, halts=halts)
         book = portfolio(market, daily, rows, monthly, window, breaks, half_at=half_at)
-        stats = completeness(rows, daily, market, days, monthly)
+        stats = completeness(rows, daily, market, days, monthly, skipped)
         result = {"loop": loop.name, "family": loop.family, **evaluate(rows, book, alpha=alpha, half_at=half_at),
                   "completeness": stats, "incomplete": incomplete(stats)}
         results.append(result)
@@ -627,7 +682,9 @@ def print_report(report: Mapping[str, Any]) -> None:
             c = book[side]
             print(f"    {side:<18} total {c['total_return_pct']:+.1f}%  maxDD {c['max_drawdown_pct']:+.1f}%  "
                   f"sharpe {_fmt(c['sharpe'], '.2f')} (h1 {_fmt(c['sharpe_h1'], '.2f')}, h2 {_fmt(c['sharpe_h2'], '.2f')})")
-        print(f"    time in market {_fmt(book['time_in_market'], '.0%')} over {book['days']} days")
+        print(f"    time in market {_fmt(book['time_in_market'], '.0%')} over {book['days']} days, "
+              f"exposure capped at 100% on {book['capped_days']} days; skipped entries "
+              f"{json.dumps(r['completeness']['skipped_entries'], sort_keys=True)}")
 
 
 def _cli(argv: Iterable[str] | None = None) -> int:

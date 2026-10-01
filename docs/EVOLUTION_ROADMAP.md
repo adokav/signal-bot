@@ -255,8 +255,8 @@ güncellenenler belirtildi.
       geri çekilme.
     - **Giriş zamanı rastgeleden iyi değil.**
     - **Çıkış kuralı asıl değeri taşıyor:** D1_20_10 portföyü al-tut'a göre
-      +%432 / +%113 getiri, −%45 / −%92 düşüş, Sharpe 1.27 / 0.67. 2022 kaybı
-      −%88 yerine −%31.
+      +%415 / +%113 getiri, −%44 / −%92 düşüş, Sharpe 1.26 / 0.67. 2022 kaybı
+      −%88 yerine −%30.
     - Ama 2. yarıda Sharpe al-tut'un altında. Aday kuralı sağlanmadı;
       doğrulama açılmadı.
 
