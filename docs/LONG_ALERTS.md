@@ -59,6 +59,16 @@ dışında doğrulanmış filtreden gelir (`docs/SIGNAL_QUALITY.md`, KAYBI_AZALT
 
 Kanıt dosyası mevcut kodla eşleşmezse etiket uygulanmaz.
 
+**KAÇIN uyarıları susturuldu (kullanıcı kararı, 2026-10-01):**
+
+- KAÇIN etiketli Likit-100 uyarıları Telegram'a gönderilmez.
+- Radar kaydına yine girer ve takip edilir. `/radar`'da "sessiz" diye
+  işaretlenir ve son 30 günün F1 karşılaştırmasına girer. Böylece filtre
+  canlıda denetlenmeye devam eder.
+- Açılış uyarısı gönderilmediği için stop uyarısı da gönderilmez.
+- "bilinmiyor" etiketi KAÇIN değildir; gönderilir.
+- Yeniden açmak için Render'da `LIQUID_AVOID_ALERTS_ENABLED=1`.
+
 Kapatmak için Render ortam değişkenleri:
 - `LIQUID_LONG_ALERTS_ENABLED=0`
 - `TACTICAL_REJECTED_ALERTS_ENABLED=0`
