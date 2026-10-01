@@ -1,7 +1,10 @@
 # İşlem döngüsü — doğru zamanda gir, doğru zamanda çık, tekrarla
 
-**Durum:** Protokol. Bu belge herhangi bir sonuçtan **önce** yazıldı
-(2026-10-01).
+**Durum:** Keşif tamamlandı. **Aday seçme kuralını hiçbir döngü sağlamadı.**
+Ön-kayıt yapılmadı; doğrulama penceresi açılmadı. Ayrıntı: "Keşif sonuçları".
+
+Protokol herhangi bir sonuçtan **önce** yazıldı (2026-10-01, commit
+`59a9314`); kod ve testler de sonuçtan önce commit edildi (`6468bbe`).
 
 **Kullanıcının hedefi:** "Amaç; doğru zamanda pozisyon alıp, yine doğru
 zamanda pozisyonu kapatmak. Sonrasında da bunu tekrarlamak."
@@ -204,4 +207,92 @@ Bir döngü, keşifte **hepsini** sağlarsa adaydır:
 
 ## Keşif sonuçları
 
-Henüz yok.
+**Koşu:** `python -m trading.backtest.trade_loop discover`.
+
+- **Veri:** 2024-09-01 itibarıyla mühürlü.
+- **Kapsam:** 46 ay, 873 işlem. Bilinmeyen işlem yok.
+- **Yarılar:** 2022-09-01'de ayrılır. α = 0.05, 7 günlük blok bootstrap.
+
+### İşlem bazında (net %, maliyet sonrası)
+
+| Döngü | İşlem | Ortanca gün | Kazanan | İşlem başına net (%95 güven) | Rastgele girişe göre fark (%95 güven) | Fark 1. / 2. yarı |
+|---|---:|---:|---:|---|---|---|
+| D1_20_10 | 340 | 13 | %40 | +12.0 [+3.3, +22.5] | +4.4 [−0.8, +11.2] | +11.4 / −0.9 |
+| D1_55_20 | 161 | 22 | %35 | +17.7 [+1.2, +40.7] | −0.1 [−8.0, +8.9] | +1.9 / −1.9 |
+| D2_EMA50 | 243 | 9 | %22 | +52.7 [+0.2, +146.1] | +10.6 [−47.4, +74.5] | +21.3 / +1.0 |
+| D2_DIP | 129 | 15 | %9 | +28.5 [−16.1, +84.0] | −7.4 [−46.0, +23.9] | −16.0 / −1.0 |
+
+**Ortalamalar birkaç dev işleme dayanıyor.** Hepsi gerçek 2021 boğa
+hareketleri; veri hatası yok:
+
+- BNB 33 → 512 dolar;
+- DOGE 0.003 → 0.33 dolar;
+- ADA, UNI, SOL.
+
+En iyi 3 işlemin net toplamdaki payı: D1_20_10 %41, D1_55_20 %85,
+D2_EMA50 %94. Bu üç işlem çıkarılınca işlem başına ortalama +7.1 / +2.7 /
++3.3.
+
+### Portföy (döngü bir bütün olarak) ve al-tut
+
+| Döngü | Toplam getiri | En büyük düşüş | Sharpe (1. / 2. yarı) | Piyasada kalma |
+|---|---:|---:|---|---:|
+| **Al-tut sepeti** | +%113 | −%92 | 0.67 (0.85 / 0.45) | %100 |
+| D1_20_10 | **+%432** | **−%45** | **1.27** (2.02 / **0.32**) | %37 |
+| D1_55_20 | +%118 | −%48 | 0.74 (0.89 / 0.57) | %28 |
+| D2_EMA50 | +%200 | −%56 | 0.93 (1.58 / −0.23) | %27 |
+| D2_DIP | −%25 | −%94 | 0.36 (0.65 / −0.11) | %88 |
+
+**Yıl yıl, D1_20_10 ve al-tut:**
+
+| Yıl | Döngü | Al-tut |
+|---|---:|---:|
+| 2020 (Kasım–Aralık) | +%29 | +%64 |
+| 2021 | +%313 | +%485 |
+| 2022 | **−%31** | **−%88** |
+| 2023 | +%55 | +%93 |
+| 2024 (Ağustos'a kadar) | −%6 | −%7 |
+
+### Okuma
+
+**"Doğru zamanda gir" kanıtlanmadı:**
+
+- Hiçbir döngünün girişi, aynı çıkış kuralıyla rastgele günlerde girmekten
+  anlamlı biçimde iyi değil.
+- En iyisinde (D1_20_10) bile fark +4.4 puan. Güven aralığı sıfırı içeriyor
+  ve 2. yarıda negatif.
+- Rastgele girişler de aynı çıkışla kârlı: D1_20_10'da işlem başına +7.6.
+
+**"Doğru zamanda çık" asıl değeri taşıyor:**
+
+- Trend bozulunca çıkmak (kapanış son 10 günün dibinin altında), boğa
+  yıllarında yükselişin yaklaşık %60'ını tuttu.
+- Aynı kural, 2022 ayı piyasasında kaybı −%88'den −%31'e indirdi.
+- 4 yıl boyunca toplam getiri al-tut'un yaklaşık 4 katı, en büyük düşüş
+  yarısı.
+- Bu, Faz A'da BTC'de görülen trend takibi profiliyle aynı: alfa değil, risk
+  yönetimi.
+
+**Ama 2. yarı zayıf:**
+
+- 2022-09 → 2024-08'de D1_20_10'un Sharpe'ı (0.32) al-tut'unkinden (0.45)
+  düşük.
+- Avantajın büyük kısmı 2021'in dev trendlerinden ve 2022'nin çöküşünden
+  kaçmaktan geliyor.
+
+### Karar: önceden yazılmış kurala göre aday yok
+
+- D1_20_10 beş koşulun üçünü sağladı (≥ 150 işlem, net alt sınır > 0,
+  Sharpe ≥ al-tut).
+- Rastgele girişe göre fark koşulunu ve iki yarı koşulunu sağlamadı.
+- Diğer döngüler daha fazla koşulda kaldı.
+- **Ön-kayıt yapılmadı; doğrulama penceresi açılmadı.** `REGISTERED` boş;
+  `confirm` ve `build-confirm` kayıt olmadan çalışmayı reddediyor.
+- **Canlıya etkisi:** Yok. Emir yetkisi yok.
+
+**Not edilen hipotez (test edilmedi):** "Trend bozulunca çık" kuralı
+(D1_20_10), majör sepetini risk-ayarlı olarak iyileştiriyor.
+
+- Bu, protokolün RİSK_AZALTIR sorusu.
+- Keşif sonucu görüldükten sonra seçilecek olursa, bu açıkça yazılarak ayrı
+  bir ön-kayıtla ve kullanıcının onayıyla test edilmeli.
