@@ -477,3 +477,53 @@ reddeder). Bu istenen davranış: test bir kez yapıldı.
 **Canlıya etkisi:** "Canlıya etkisi" bölümündeki kurallar geçerlidir.
 - PASS ya da RİSK_AZALTIR çıkarsa, kanıt etiketiyle bir bildirim tasarlanır. Bu bildirim ayrı bir PR'la ve kullanıcının onayıyla eklenir.
 - Emir yetkisi yoktur.
+
+### Doğrulama sonucu (trial `1fcc8f2ef5d92516`, bir kez koşuldu, 2026-10-02)
+
+- **Koşu:** `trade_loop_confirm` iş akışı, run 36996487069, main `ad24f4d`.
+- **Veri:** 2026-09-01 itibarıyla kurulan evren; 24 ay, 168 işlem.
+- **Bilinmeyen işlem:** 0. Çözümlenen: 168. Dönem sonunda açık: 9. Acil durum stopu: 15.
+- **Kimlik katmanının dışarıda bıraktıkları:** BNSOL, WBETH, WBTC (bağlı tokenlar), PAXG, XAUT (emtia), KGST, U (stabil).
+- Rakamlar aşağıda, rapordaki gibi verilmiştir.
+
+**İşlem bazında (iki döngüde de aynı işlemler):**
+
+| Ölçü | Ortalama | Güven aralığı (α = 0.025) | 1. yarı | 2. yarı |
+|---|---:|---|---:|---:|
+| Net % | +4.76 | [−1.77, +12.99] | +9.99 | −1.29 |
+| Stres maliyetiyle net % | +4.61 | [−1.92, +12.84] | +9.84 | −1.44 |
+| Rastgele giriş, net % | +4.69 | [+0.38, +9.63] | +8.37 | +0.43 |
+| Rastgeleye göre fark | +0.07 | [−3.42, +4.41] | +1.62 | −1.72 |
+
+- Kazanma oranı %40. Medyan tutma süresi 12 gün.
+- En iyi işlem +%302.6, en kötü −%30.1.
+
+**Portföy:**
+
+| | D1_20_10 | D1_20_10_VOL | Al-tut |
+|---|---:|---:|---:|
+| Toplam getiri | +%53.9 | +%49.7 | −%23.6 |
+| En büyük düşüş | −%25.7 | −%18.3 | −%73.8 |
+| Sharpe | 0.93 | 1.19 | 0.13 |
+| Sharpe, 1. yarı / 2. yarı | 1.65 / −0.25 | 2.09 / −0.03 | 1.08 / −1.03 |
+| Piyasada kalma süresi | %32 | %24 | %100 |
+| Sharpe farkı güven aralığı (yalnızca bilgi) | [−0.33, +1.90] | [−0.13, +2.10] | |
+| **Karar** | **RİSK_AZALTIR** | **RİSK_AZALTIR** | |
+
+**Okuma:**
+
+- **Üçüncü bağımsız dönemde de aynı desen.**
+  - Keşif (2020–24): düşüş −%44, al-tut −%92.
+  - Ön-tarih (2018–20): düşüş −%30, al-tut −%75.
+  - Doğrulama (2024–26): düşüş −%26, al-tut −%74. Oynaklık ayarlısında −%18.
+  - Döngü, düşüşü üç dönemde de al-tut'un yarısının altında tuttu. Sharpe iki yarıda da al-tut'un üstünde kaldı.
+- **Giriş zamanı yine rastgeleden iyi değil.** Fark +0.07 puan, güven aralığı [−3.4, +4.4]. Değer girişten değil, düşüşte dışarıda kalmaktan geliyor. Döngü zamanın yalnızca %24–32'sinde piyasadaydı.
+- **Getiri kanıtı yok.** İşlem başına net güven aralığı sıfırı içeriyor. Sharpe farkının güven aralığı da sıfırı içeriyor.
+- **2. yarı (2025-09 → 2026-08) zayıf.** Döngünün Sharpe'ı negatif (−0.25), ama al-tut'unki çok daha kötü (−1.03). Bu dönemde döngü para kazanmadı; daha az kaybetti.
+- **Dürüst sınır.** Pencere veri olarak mühürlüydü ama bilgi olarak değil. Kural daha önce sabitlendi ve hiçbir parametre değişmedi. Asıl temiz test, 2026-10'dan itibaren tutulacak canlı gölge kayıt.
+
+**Canlıya etkisi (önceden yazılmış kural):**
+
+- RİSK_AZALTIR, "getiri kanıtı yok, risk azaltır" etiketli bir bildirim tasarlanmasına izin veriyor.
+- Bildirim ayrı bir PR'la ve kullanıcının onayıyla eklenir.
+- Emir yetkisi yok.
