@@ -266,10 +266,16 @@ güncellenenler belirtildi.
       - Giriş zamanı yine rastgeleden iyi değil.
       - Sharpe farkının güven aralığı sıfırı içeriyor. Son söz 2024–26
         doğrulamasının.
-    - **Doğrulama (2024-09 → 2026-08):** D1_20_10 ve D1_20_10_VOL ön-kayda
-      alındı. Kullanıcı `trade_loop_confirm` iş akışını bir kez çalıştıracak.
-      Pencere veri olarak mühürlü ama bilgi olarak değil; asıl temiz test
-      2026-10'dan itibaren canlı gölge kayıt.
+    - **Doğrulama (2024-09 → 2026-08, trial `1fcc8f2ef5d92516`, bir kez):**
+      İkisi de RİSK_AZALTIR.
+      - D1_20_10: +%54, al-tut −%24; düşüş −%26, al-tut −%74.
+      - D1_20_10_VOL: +%50, düşüş −%18.
+      - Keşifte bulunan desen iki bağımsız testte (ön-tarih ve doğrulama)
+        tekrarlandı: düşüş al-tut'un yarısının altında kaldı. Keşif dönemi
+        örneklem içidir, bağımsız kanıt sayılmaz.
+      - Giriş zamanı yine rastgeleden iyi değil. Getiri kanıtı yok; 2. yarıda
+        döngü para kaybetti ama al-tut'tan çok daha az.
+      - Asıl temiz test 2026-10'dan itibaren canlı gölge kayıt.
 12. ⏳ **Majör coin atlası, 2017-09 → 2024-08** — `docs/ATLAS.md`.
     - Ay ay piyasa, makro (FRED) ve takvim. Sinyal değil, açıklama.
     - Piyasa katmanı hazır (`research/atlas/market_monthly.csv`). En iyi 5
