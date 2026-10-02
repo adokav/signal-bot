@@ -512,11 +512,11 @@ reddeder). Bu istenen davranış: test bir kez yapıldı.
 
 **Okuma:**
 
-- **Üçüncü bağımsız dönemde de aynı desen.**
-  - Keşif (2020–24): düşüş −%44, al-tut −%92.
-  - Ön-tarih (2018–20): düşüş −%30, al-tut −%75.
-  - Doğrulama (2024–26): düşüş −%26, al-tut −%74. Oynaklık ayarlısında −%18.
-  - Döngü, düşüşü üç dönemde de al-tut'un yarısının altında tuttu. Sharpe iki yarıda da al-tut'un üstünde kaldı.
+- **Keşifte bulunan desen, iki bağımsız testte tekrarlandı.**
+  - Keşif (2020–24, örneklem içi): düşüş −%44, al-tut −%92. Kural bu sonuca bakılarak seçildi. Bu yüzden bağımsız kanıt sayılmaz.
+  - Ön-tarih (2018–20, 1. bağımsız test): düşüş −%30, al-tut −%75.
+  - Doğrulama (2024–26, 2. bağımsız test): düşüş −%26, al-tut −%74. Oynaklık ayarlısında −%18.
+  - Bağımsız iki testte de döngü, düşüşü al-tut'un yarısının altında tuttu ve Sharpe iki yarıda da al-tut'un üstünde kaldı.
 - **Giriş zamanı yine rastgeleden iyi değil.** Fark +0.07 puan, güven aralığı [−3.4, +4.4]. Değer girişten değil, düşüşte dışarıda kalmaktan geliyor. Döngü zamanın yalnızca %24–32'sinde piyasadaydı.
 - **Getiri kanıtı yok.** İşlem başına net güven aralığı sıfırı içeriyor. Sharpe farkının güven aralığı da sıfırı içeriyor.
 - **2. yarı (2025-09 → 2026-08) zayıf.** Döngünün Sharpe'ı negatif (−0.25), ama al-tut'unki çok daha kötü (−1.03). Bu dönemde döngü para kazanmadı; daha az kaybetti.

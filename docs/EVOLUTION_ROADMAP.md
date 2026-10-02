@@ -270,7 +270,9 @@ güncellenenler belirtildi.
       İkisi de RİSK_AZALTIR.
       - D1_20_10: +%54, al-tut −%24; düşüş −%26, al-tut −%74.
       - D1_20_10_VOL: +%50, düşüş −%18.
-      - Üç bağımsız dönemde de düşüş al-tut'un yarısının altında kaldı.
+      - Keşifte bulunan desen iki bağımsız testte (ön-tarih ve doğrulama)
+        tekrarlandı: düşüş al-tut'un yarısının altında kaldı. Keşif dönemi
+        örneklem içidir, bağımsız kanıt sayılmaz.
       - Giriş zamanı yine rastgeleden iyi değil. Getiri kanıtı yok; 2. yarıda
         döngü para kaybetti ama al-tut'tan çok daha az.
       - Asıl temiz test 2026-10'dan itibaren canlı gölge kayıt.
