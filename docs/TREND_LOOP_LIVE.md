@@ -87,8 +87,8 @@ testle eşit tutulur.
 
 1. **Veri kaynağı: MEXC spot.** Araştırmada Binance kullanıldı.
    - Günlük mumlar MEXC'nin kapanmış saatlik mumlarından kurulur.
-   - 23:00 UTC saatlik mumu olmayan günün kapanışı bilinmez. O gün hiçbir
-     karara girmez.
+   - 24 saatlik mumun hepsi yoksa gün bilinmez (yüksek, düşük ya da kapanış
+     eksik kalır). O gün hiçbir karara girmez.
    - MEXC yoksa başka bir borsaya geçilmez; veri eksik sayılır.
 2. **Evren MEXC hacmiyle kurulur; vadeli (perp) şartı yoktur.**
    - 2018–20 ön-tarih testinde de perp şartı yoktu ve desen tekrarlandı.
@@ -115,7 +115,10 @@ testle eşit tutulur.
    - Bot kapalıyken kaçırılan kapanışlar için DECISION_GAP kaydı yazılır.
    - Açık pozisyonlar "takipte boşluk" ile işaretlenir; bunlar o günlerde
      kaçmış olabilecek bir çıkışı bildirir.
-   - Stop kontrolü, en son kontrol edilen mumdan devam eder.
+   - Stop kontrolü, en son kontrol edilen mumdan devam eder ve aradaki bütün
+     15 dakikalık mumları parça parça okur.
+   - Birikim bitmeden günlük karar gelirse o pozisyon için o gün çıkış
+     kararı verilmez (BİLİNMİYOR). Stop önce gelmiş olabilir.
 
 ## Kayıt ve dayanıklılık
 
@@ -139,6 +142,10 @@ testle eşit tutulur.
     de yeniden açılmaz.
   - Son karar günü, `DAY` kaydından geri alınır. Aynı gün iki kez karara
     bağlanmaz.
+  - Ayın evreni, `UNIVERSE` kaydından geri alınır. Sonraki verilerle yeniden
+    kurulmaz.
+- **Önce kayıt, sonra durum:** Giriş ve kapanış önce deftere yazılır.
+  Yazılamazsa pozisyon hafızada açılmaz ya da kapanmaz; takip sürer.
 - **Bozuk kayıt:** Çökme sırasında yarım kalan son satır silinir. Ortadaki
   bozuk bir satır döngüyü durdurur (fail closed). Hata `/status` ekranında ve
   sağlık ucunda görünür.

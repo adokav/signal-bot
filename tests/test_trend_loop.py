@@ -45,6 +45,11 @@ def test_a_day_without_its_last_hour_has_no_close():
     assert days[T0].close == pytest.approx(10.23) and days[T0].quote_volume == 120
 
 
+def test_a_day_missing_any_hour_is_unknown_not_a_partial_day():
+    hours = [tl.Bar(T0 + k * HOUR, 10, 11 if k != 5 else 30, 9, 10, 5) for k in range(48) if k != 5]
+    assert set(tl.daily_bars(hours)) == {T0 + DAY}                     # day 1 lost 05:00 (and its high)
+
+
 # ---------------------------------------------------------------------------
 # The rule equals the research implementation
 # ---------------------------------------------------------------------------
@@ -436,3 +441,96 @@ def test_a_late_decision_says_its_entry_reference_is_not_a_buy_now_price(tmp_pat
     _decide(on_time, market2, b - 1)
     _decide(on_time, market2, b)
     assert "Geç karar" not in on_time.outbox()[0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: durable-first state changes, the full stop backlog, the recorded universe
+# ---------------------------------------------------------------------------
+
+
+def test_a_failed_ledger_write_keeps_the_position_open_and_tracked(tmp_path, monkeypatch):
+    b = 130
+    loop, market = _setup(tmp_path, breakout_day=b)
+    for d in (b - 1, b):
+        _decide(loop, market, d)
+    dip_at = T0 + (b + 2) * DAY + 9 * HOUR
+    market.dips[("C0USDT", dip_at)] = loop.state["positions"]["C0USDT"]["stop"] * 0.98
+    market.now = dip_at + 600
+
+    def disk_full(event, *, text=None):
+        raise OSError("no space left on device")
+    monkeypatch.setattr(loop.ledger, "append", disk_full)
+    with pytest.raises(OSError):
+        loop.check_stops(market.now)
+    assert "C0USDT" in loop.state["positions"]                          # still open, still tracked
+    monkeypatch.undo()
+    loop.check_stops(market.now)
+    assert "C0USDT" not in loop.state["positions"]
+    assert [e["event"] for e in _events(tmp_path)].count("STOP") == 1
+
+
+def test_a_failed_entry_write_opens_no_position(tmp_path, monkeypatch):
+    b = 130
+    loop, market = _setup(tmp_path, breakout_day=b)
+    _decide(loop, market, b - 1)
+    real = loop.ledger.append
+
+    def no_entries(event, *, text=None):
+        if event["event"] == "ENTRY":
+            raise OSError("disk")
+        return real(event, text=text)
+    monkeypatch.setattr(loop.ledger, "append", no_entries)
+    with pytest.raises(OSError):
+        _decide(loop, market, b)
+    assert loop.state["positions"] == {} and loop.state["last_decision_day"] == T0 + (b - 1) * DAY
+
+
+def test_a_stop_backlog_longer_than_one_request_is_read_to_the_end(tmp_path):
+    b = 130
+    loop, market = _setup(tmp_path, breakout_day=b)
+    for d in (b - 1, b):
+        _decide(loop, market, d)
+    dip_at = T0 + (b + 13) * DAY + 5 * HOUR                             # past the first 1000 15m bars
+    market.dips[("C0USDT", dip_at)] = loop.state["positions"]["C0USDT"]["stop"] * 0.98
+    market.now = T0 + (b + 15) * DAY
+    assert loop.check_stops(market.now) == []
+    stop = [e for e in _events(tmp_path) if e["event"] == "STOP"][0]
+    assert stop["exited_at"] == dip_at and stop["reported_at"] == market.now
+    assert "Gecikme" in loop.outbox()[-1]["text"]
+
+
+def test_an_unfinished_stop_backlog_is_unknown_and_blocks_the_exit_decision(tmp_path, monkeypatch):
+    b = 130
+    loop, market = _setup(tmp_path, breakout_day=b)
+    for d in (b - 1, b):
+        _decide(loop, market, d)
+    monkeypatch.setattr(tl, "STOP_CHUNKS", 1)
+    path = market.paths["C0USDT"]
+    for k in range(b + 2, b + 24):
+        path[k] = 108.0                                                 # above the stop (~106.6)
+    path[b + 24] = 107.5                                                # a close below the 10-day low
+    market.now = T0 + (b + 25) * DAY
+    assert loop.check_stops(market.now) == ["C0USDT"]                   # 23 days unchecked: two passes needed
+    assert loop.state["stop_unknown"] == ["C0USDT"] and not loop.fresh(market.now, stop_seconds=300)
+    checked = loop.state["positions"]["C0USDT"]["checked_from"]
+    assert checked == T0 + (b + 1) * DAY + 999 * QUARTER                 # progress is kept for the next pass
+    loop.state["positions"]["C0USDT"]["checked_from"] = T0 + (b + 1) * DAY   # as if no pass had run
+    loop.state["last_decision_day"] = T0 + (b + 23) * DAY
+    _decide(loop, market, b + 24, minutes=20)                           # the stop may have come first
+    assert "C0USDT" in loop.state["positions"]
+    assert [e for e in _events(tmp_path) if e["event"] == "UNKNOWN" and e["symbol"] == "C0USDT"]
+    assert not [e for e in _events(tmp_path) if e["event"] == "EXIT"]
+
+
+def test_a_lost_state_restores_the_recorded_universe_not_a_rebuild(tmp_path):
+    b = 130
+    loop, market = _setup(tmp_path, breakout_day=b)
+    _decide(loop, market, b - 1)
+    recorded = loop.state["universe"]["members"]
+    market.volumes = {s: float(i) for i, s in enumerate(market.volumes)}  # later volumes would rank differently
+    restarted = tl.TrendLoop(tl.Ledger(tmp_path / "ledger.jsonl"), market=market, workers=2)
+    restarted.load(None)
+    assert restarted.state["universe"]["members"] == recorded
+    restarted.state["last_decision_day"] = None
+    _decide(restarted, market, b)
+    assert restarted.state["universe"]["members"] == recorded

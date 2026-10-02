@@ -60,6 +60,8 @@ SETTLE_SECONDS = 120             # wait after 00:00 UTC so the last hourly candl
 HISTORY_DAYS = 33                # closed days fetched per decision: 31 needed for the 30-day volatility
 DECISION_RETRY_SECONDS = 900     # retry coins with missing data for 15 minutes after 00:00 UTC
 UNIVERSE_RETRY_SECONDS = 900
+STOP_CHUNK_BARS = 1000           # 15m bars per request
+STOP_CHUNKS = 12                 # requests per position per pass (~125 days); beyond that the stop stays unknown
 LATE_SECONDS = 3_600             # a message this long after its price point says so: it is not "buy now"
 TRIAL = "1fcc8f2ef5d92516"
 EVIDENCE = ("Kanıt: RİSK_AZALTIR (2 bağımsız test). Getiri kanıtı yok, risk azaltır; "
@@ -145,17 +147,16 @@ class DayBar:
 
 
 def daily_bars(hours: Sequence[Bar]) -> dict[int, DayBar]:
-    """UTC days built from closed hourly bars; a day counts only with its 23:00 hour (its close)."""
+    """UTC days built from closed hourly bars; a day counts only with all 24 hours (a missing one is unknown)."""
 
     groups: dict[int, list[Bar]] = {}
     for bar in hours:
         groups.setdefault(bar.open_time - bar.open_time % DAY, []).append(bar)
     out = {}
     for day0, bars in groups.items():
-        last = bars[-1]
-        if last.open_time != day0 + 23 * HOUR:
-            continue                                     # no daily close: the day is unknown
-        out[day0] = DayBar(day0, max(b.high for b in bars), min(b.low for b in bars), last.close,
+        if [b.open_time for b in bars] != [day0 + k * HOUR for k in range(24)]:
+            continue                                     # an hour is missing: high, low or close unknown
+        out[day0] = DayBar(day0, max(b.high for b in bars), min(b.low for b in bars), bars[-1].close,
                            sum(b.quote_volume for b in bars))
     return out
 
@@ -431,9 +432,12 @@ class TrendLoop:
         closed: set[str] = set()
         reentry: dict[str, int] = {}
         last_day = None
+        universe = None
         for record in self.ledger.records():
             kind = record.get("event")
-            if kind == "ENTRY":
+            if kind == "UNIVERSE":
+                universe = record
+            elif kind == "ENTRY":
                 entries[record["id"].split(":", 1)[1]] = record
             elif kind in ("STOP", "EXIT"):
                 closed.add(record["id"].split(":", 1)[1])
@@ -458,6 +462,10 @@ class TrendLoop:
         self.state["reentry_from"] = merged
         if last_day is not None and (self.state.get("last_decision_day") or 0) < last_day:
             self.state["last_decision_day"] = last_day
+        saved = self.state.get("universe") or {}
+        if universe is not None and str(saved.get("month") or "") < universe["month"]:
+            self.state["universe"] = {k: universe[k] for k in ("month", "members", "built_at", "candidates", "failed")
+                                      if k in universe}  # the recorded membership, never a rebuild with later data
 
     def export(self) -> dict[str, Any]:
         with self.lock:
@@ -570,7 +578,7 @@ class TrendLoop:
                     position["tracking_gap"] = True
             self._record({"id": f"DECISION_GAP:{_iso(last + DAY)}:{_iso(day - DAY)}", "event": "DECISION_GAP",
                           "from_day": last + DAY, "to_day": day - DAY}, None)
-        self.check_stops(now, until=decision)                      # a stop before the close comes first
+        unchecked = set(self.check_stops(now, until=decision))     # a stop before the close comes first
         with self.lock:
             positions = dict(self.state["positions"])
         symbols = sorted(set(members) | set(positions))
@@ -586,14 +594,14 @@ class TrendLoop:
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
             for symbol, levels, next_open in pool.map(evaluate, symbols):
                 results[symbol] = (levels, next_open)
-        unknown = sorted(s for s, (lv, op) in results.items() if lv is None or op is None)
+        unknown = sorted(s for s, (lv, op) in results.items() if lv is None or op is None or s in unchecked)
         with self.lock:
             for symbol, position in positions.items():
                 if symbol not in self.state["positions"]:
                     continue                                       # stopped out just above
                 levels, next_open = results.get(symbol, (None, None))
-                if levels is None or next_open is None:
-                    continue
+                if levels is None or next_open is None or symbol in unchecked:
+                    continue                                       # a stop may have come first: no exit decision
                 position["exit_level"] = levels.low10
                 if day > position["decision_day"] and exits(levels):
                     self._close(symbol, position, price=next_open.open, at=decision, reason="EXIT", now=now,
@@ -612,9 +620,9 @@ class TrendLoop:
                             "entry_price": next_open.open, "close": levels.close, "high20": levels.high20,
                             "atr20": levels.atr20, "vol30": levels.vol30, "exit_level": levels.low10,
                             "checked_from": decision, **plan}
-                self.state["positions"][symbol] = position
                 self._record({"id": f"ENTRY:{symbol}:{_iso(day)}", "event": "ENTRY", **position},
-                             entry_text(position, len(members)))
+                             entry_text(position, len(members)))          # durable first, then the state
+                self.state["positions"][symbol] = position
             self.state["unknown"] = unknown
             self.state["last_run_at"] = now
             if unknown and now - decision < DECISION_RETRY_SECONDS:
@@ -637,50 +645,78 @@ class TrendLoop:
                  "exit_price": price, "exited_at": at, "reported_at": now, "result_pct": result,
                  "close": close, "level": level,
                  "stop": position["stop"], "tracking_gap": bool(position.get("tracking_gap"))}
+        self._record(event, exit_text(event, reason))      # a failed write leaves the position open and tracked
         del self.state["positions"][symbol]
-        self._record(event, exit_text(event, reason))
 
     # -- intraday stops ----------------------------------------------------
 
-    def check_stops(self, now: int, *, until: int | None = None) -> None:
-        """Close positions whose acute stop was reached by a 15m bar since the last check (before ``until``)."""
+    def check_stops(self, now: int, *, until: int | None = None) -> list[str]:
+        """Close positions whose acute stop was reached by a 15m bar since the last check (before ``until``).
+
+        Every bar from the last checked one up to ``until`` (or the latest
+        published bar) is read, in chunks. Returns the positions whose stop
+        could not be checked that far: they stay open and are reported, and
+        the daily decision treats them as unknown.
+        """
 
         with self.lock:
             positions = dict(self.state["positions"])
         failed = []
         for symbol, position in positions.items():
-            start = int(position["checked_from"])
-            try:
-                rows = self.market.klines(symbol, QUARTER, start=start,          # ≤ 1000 bars either way
-                                          end=min(now + QUARTER, start + 1000 * QUARTER), limit=1000)
-                closed, open_bar = parse_klines(rows, interval=QUARTER, now=now)
-            except TrendLoopDataError:
-                failed.append(symbol)                              # reported: the stop is unchecked, not safe
-                continue
-            bars = [b for b in (*closed, *([open_bar] if open_bar else []))
-                    if b.open_time >= start and (until is None or b.open_time < until)]
-            if not bars and (until is None or start < until):
-                failed.append(symbol)                              # the bar at ``start`` exists: none is missing data
-                continue
-            gap = not bars or bars[0].open_time > start or any(
-                b.open_time - a.open_time > QUARTER for a, b in zip(bars, bars[1:]))
-            hit = stop_fill(position["stop"], bars)
+            hit, cursor, gap, complete = self._scan_stop(symbol, float(position["stop"]),
+                                                         int(position["checked_from"]), now=now, until=until)
             with self.lock:
                 current = self.state["positions"].get(symbol)
                 if current is None:
                     continue
-                if gap and bars:
+                if gap:
                     current["tracking_gap"] = True                 # a stop could have hidden in the hole
                 if hit:
                     bar, price = hit
                     self._close(symbol, current, price=price, at=bar.open_time, reason="STOP", now=now)
                     self.state["reentry_from"][symbol] = bar.open_time - bar.open_time % DAY
-                elif bars:
-                    current["checked_from"] = bars[-1].open_time   # re-read the still-open bar next time
+                    continue
+                current["checked_from"] = cursor                   # the last bar read: re-read next time
+            if not complete:
+                failed.append(symbol)                              # reported: the stop is unchecked, not safe
         with self.lock:
             self.state["stop_unknown"] = sorted(s for s in failed if s in self.state["positions"])
             if until is None:
                 self.state["last_stop_check_at"] = now
+        return failed
+
+    def _scan_stop(self, symbol: str, stop: float, start: int, *, now: int,
+                   until: int | None) -> tuple[tuple[Bar, float] | None, int, bool, bool]:
+        """(stop hit, last bar read, hole seen, read up to the target) for one position."""
+
+        bound = until if until is not None else now + 1            # bars opening before this
+        last_expected = (bound - 1) - (bound - 1) % QUARTER
+        cursor, gap = start, False
+        if cursor >= bound:
+            return None, cursor, False, True                       # nothing to read yet
+        for _ in range(STOP_CHUNKS):
+            end = min(bound, cursor + STOP_CHUNK_BARS * QUARTER)
+            try:
+                rows = self.market.klines(symbol, QUARTER, start=cursor, end=end, limit=STOP_CHUNK_BARS)
+                closed, open_bar = parse_klines(rows, interval=QUARTER, now=now)
+            except TrendLoopDataError:
+                return None, cursor, gap, False
+            bars = [b for b in (*closed, *([open_bar] if open_bar else [])) if cursor <= b.open_time < end]
+            if not bars:
+                return None, cursor, gap, False                    # the bar at the cursor exists: data is missing
+            if bars[0].open_time > cursor or any(b.open_time - a.open_time > QUARTER for a, b in zip(bars, bars[1:])):
+                gap = True
+            hit = stop_fill(stop, bars)
+            if hit:
+                return hit, cursor, gap, True
+            last = bars[-1].open_time
+            # live checks may trail the newest bar by one (not published yet); the pre-decision check may not
+            if last >= last_expected - (QUARTER if until is None else 0):
+                return None, last, gap, True
+            if last == cursor:
+                return None, cursor, gap, False                    # no progress: a hole longer than a chunk
+            cursor = last
+        return None, cursor, gap, False                            # backlog longer than one pass: next pass
 
     # -- reports -----------------------------------------------------------
 
