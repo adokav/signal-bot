@@ -20,6 +20,14 @@ Kod: `trading/research/atlas.py`. Makro tablo: `.github/workflows/atlas_macro.ym
   - FRED isteği 2024-08-31'de kesilir.
 - **Sıra.** Ön-tarih testi (2018-09 → 2020-09, `docs/TRADE_LOOP_STUDY.md`) atlastan **önce** yapıldı. Atlas o dönemi gösterdikten sonra o dönem "el değmemiş" sayılmazdı.
 
+**Mühür veri için geçerli, bilgi için değil.**
+- Kullanıcı da Claude da 2024-09 → 2026-08 arasında piyasada kabaca ne olduğunu biliyor: 2025 tarifeleri, 2025–26 Orta Doğu gerilimi gibi.
+- Bu yüzden hipotez seçimini etkileyen her bilgi kaydedilir.
+- Discovery'de sabitlenmiş mekanik kurallar (D1 "trend bozulunca çık" gibi) bu pencerede doğrulanabilir.
+- Pencerede olan olaylar konuşulduktan **sonra** seçilen bir faktör ise orada doğrulanamaz. Bu faktörü kullanan bir hipotez, seçimden sonraki veride ileriye dönük olarak test edilir.
+  - Brent ve USD/CNY 2026-10-02'de bu şekilde eklendi. Bu iki faktör için doğrulama 2026-10'da başlar (`CONFIRMATION_FROM`).
+  - Bu bilgi `build` çıktısında `confirmation_from` alanında da yazar.
+
 ## Katmanlar
 
 ### 1. Piyasa (Binance spot)
@@ -88,6 +96,7 @@ Seriler GitHub Actions'ta indirilir, çünkü bu konteyner FRED'e erişemiyor. A
 - Revize edilen bir seri, mühürlü 2024-09 → 2026-08 penceresinde yayımlanmış düzeltmeleri geçmişe taşır. Hipotez seçimine test döneminin bilgisi sızar.
 - Bu yüzden M2, ticaret ağırlıklı dolar endeksi, GDP, CPI ve istihdam gibi seriler atlasta yoktur. Ancak 2024-08-31 itibarıyla geçerli ALFRED sürümleriyle eklenebilirler.
 - Kod bunu zorlar: `REVISED_SERIES` listesindeki bir seri istenirse `macro` komutu çalışmayı reddeder.
+- `build`, bu kodun şemasına uymayan bir makro tabloyu reddeder. Örneğin Brent ve USD/CNY eklenmeden önce üretilmiş bir tablo. Bir ayı eksik olan tablo da reddedilir.
 
 | Alan | FRED | Birim | Neden revize edilmez |
 |---|---|---|---|
@@ -98,8 +107,8 @@ Seriler GitHub Actions'ta indirilir, çünkü bu konteyner FRED'e erişemiyor. A
 | Hazine hesabı (TGA) | WTREGEN | milyar $ | H.4.1 kaydı |
 | Ters repo (RRP) | RRPONTSYD | milyar $ | NY Fed işlem sonucu |
 | EUR/USD | DEXUSEU | $ / € | Piyasa kuru (H.10). Değer düşerse dolar güçleniyor demektir. |
-| USD/CNY | DEXCHUS | ¥ / $ | Piyasa kuru (H.10). Ticaret savaşının kanalı (2018–2019 tarifeleri, 2019-08 devalüasyonu). |
-| Brent petrol | DCOILBRENTEU | $ / varil | Spot fiyat (EIA). Orta Doğu geriliminin piyasaya geçtiği kanal. |
+| USD/CNY | DEXCHUS | ¥ / $ | Piyasa kuru (H.10). Ticaret savaşının kanalı (2018–2019 tarifeleri, 2019-08 devalüasyonu). Doğrulama 2026-10'da başlar. |
+| Brent petrol | DCOILBRENTEU | $ / varil | Spot fiyat (EIA). Orta Doğu geriliminin piyasaya geçtiği kanal. Doğrulama 2026-10'da başlar. |
 | VIX | VIXCLS | endeks | Piyasa verisi |
 | Nasdaq / S&P 500 | NASDAQCOM / SP500 | endeks | Piyasa verisi |
 

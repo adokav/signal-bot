@@ -68,6 +68,16 @@ FRED_SERIES = {
     "sp500": "SP500",
 }
 PCT_CHANGE = frozenset({"nasdaq", "eur_usd", "usd_cny", "brent"})   # prices: change in %, rates: in points
+CHANGE_COLUMNS = ("us_10y_real", "net_liquidity_busd", "eur_usd", "usd_cny", "brent", "vix", "nasdaq", "us_2y")
+MACRO_COLUMNS = ("month", *FRED_SERIES, "net_liquidity_busd", "curve_10y_2y", "fed_move_bp",
+                 *(f"{name}_chg" for name in CHANGE_COLUMNS))
+# Brent and USD/CNY were added on 2026-10-02, after a conversation about events
+# inside the 2024-09..2026-08 confirmation window (the 2025 tariffs, the 2025-26
+# Middle East tension). Choosing them was influenced by that window, so a
+# hypothesis that uses them cannot be confirmed there: only on data from the
+# month given here on (a forward holdout). Every other column keeps 2024-09.
+CONFIRMATION_FROM_DEFAULT = "2024-09"
+CONFIRMATION_FROM = {"brent": "2026-10", "usd_cny": "2026-10"}
 REVISED_SERIES = frozenset({"M2SL", "DTWEXBGS", "GDP", "GDPC1", "CPIAUCSL", "PCEPI", "PAYEMS", "UNRATE", "INDPRO"})
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 MAX_STALE_DAYS = 40                    # a month-end value older than this is missing, not carried
@@ -185,7 +195,7 @@ def macro_monthly(series: Mapping[str, Sequence[tuple[date, float]]], months: Se
         moves = [(d, v) for d, v in series.get("fed_upper", ()) if first <= d <= month_end]
         before = value_at(series.get("fed_upper", ()), first - timedelta(days=1), max_stale=10)
         row["fed_move_bp"] = (round((moves[-1][1] - before) * 100) if moves and before is not None else None)
-        for name in ("us_10y_real", "net_liquidity_busd", "eur_usd", "usd_cny", "brent", "vix", "nasdaq", "us_2y"):
+        for name in CHANGE_COLUMNS:
             now, then = row.get(name), (prev or {}).get(name)
             if now is None or then is None:
                 row[f"{name}_chg"] = None
@@ -210,12 +220,35 @@ def write_macro(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
 
 
 def read_macro(path: Path) -> dict[str, dict[str, Any]]:
+    """The monthly macro table, if it is this code's schema and covers every atlas month; otherwise refuse.
+
+    A table from an older schema (other columns) or a partial one would leave
+    channels or months silently missing while the atlas still claims a macro
+    layer, so it fails closed: rerun the atlas_macro workflow.
+    """
+
     out = {}
     with path.open(encoding="utf-8") as handle:
-        for row in csv.DictReader(handle):
+        reader = csv.DictReader(handle)
+        header = set(reader.fieldnames or ())
+        missing, extra = sorted(set(MACRO_COLUMNS) - header), sorted(header - set(MACRO_COLUMNS))
+        if missing or extra:
+            raise SystemExit(f"{path}: macro table schema does not match this code "
+                             f"(missing {missing}, unexpected {extra}); rerun the atlas_macro workflow")
+        for row in reader:
             out[row["month"]] = {k: (None if v in {"", "None"} else (v if k == "month" else float(v)))
                                  for k, v in row.items()}
+    expected = [m.strftime("%Y-%m") for m in month_ends()]
+    if list(out) != expected:
+        raise SystemExit(f"{path}: macro table does not cover {expected[0]}..{expected[-1]} month by month")
     return out
+
+
+def confirmation_from(column: str) -> str:
+    """First month a hypothesis using ``column`` may be confirmed on (CONFIRMATION_FROM)."""
+
+    base = column[:-4] if column.endswith("_chg") else column
+    return CONFIRMATION_FROM.get(base, CONFIRMATION_FROM_DEFAULT)
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +704,8 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     tmp = args.out.with_name(args.out.name + ".tmp")
     tmp.write_text(json.dumps({"rows": rows, "phases": phases(rows), "sealed_from": "2024-09",
                                "macro": "fred-unrevised-series" if args.macro else "missing",
+                               "confirmation_from": {c: confirmation_from(c) for c in MACRO_COLUMNS[1:]
+                                                     if confirmation_from(c) != CONFIRMATION_FROM_DEFAULT},
                                "can_authorize_trade": False}, indent=1, default=str), "utf-8")
     tmp.replace(args.out)
     print(f"wrote {len(rows)} months and {len(phases(rows))} phases to {args.out}")

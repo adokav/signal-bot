@@ -286,3 +286,38 @@ def test_a_member_not_trading_at_the_month_start_is_left_out_and_counted():
     assert feb["basket_ret_pct"] is not None                                # GONE sold at its last close
     assert mar["not_trading_at_start"] == 1 and mar["unknown_returns"] == 0
     assert mar["basket_ret_pct"] is not None and mar["members"] == 10
+
+
+def _full_macro(tmp_path):
+    months = atlas.month_ends()
+    series = {name: [(m, 1.0 + k) for k, m in enumerate(months)] for name in atlas.FRED_SERIES}
+    rows = atlas.macro_monthly(series, months)
+    path = tmp_path / "macro.csv"
+    atlas.write_macro(rows, path)
+    return path, rows
+
+
+def test_the_macro_table_must_match_this_schema_and_cover_every_month(tmp_path):
+    import csv as _csv
+
+    path, rows = _full_macro(tmp_path)
+    table = atlas.read_macro(path)
+    assert list(table) == [m.strftime("%Y-%m") for m in atlas.month_ends()]
+    assert table["2024-08"]["brent"] is not None
+    old = tmp_path / "old.csv"                                  # a table from before Brent and USD/CNY
+    keys = [k for k in rows[0] if k not in {"brent", "brent_chg", "usd_cny", "usd_cny_chg"}] + ["m2_busd"]
+    with old.open("w", newline="", encoding="utf-8") as handle:
+        writer = _csv.DictWriter(handle, fieldnames=keys, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    with pytest.raises(SystemExit, match="schema"):
+        atlas.read_macro(old)
+    partial = tmp_path / "partial.csv"
+    atlas.write_macro(rows[:-1], partial)                       # 2024-08 missing
+    with pytest.raises(SystemExit, match="month by month"):
+        atlas.read_macro(partial)
+
+
+def test_factors_chosen_with_knowledge_of_the_window_get_a_forward_holdout():
+    assert atlas.confirmation_from("brent") == "2026-10" and atlas.confirmation_from("usd_cny_chg") == "2026-10"
+    assert atlas.confirmation_from("vix") == "2024-09" and atlas.confirmation_from("net_liquidity_busd") == "2024-09"
