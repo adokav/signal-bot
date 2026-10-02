@@ -235,16 +235,33 @@ def test_completeness_fails_closed():
     assert tl.incomplete({**ok, "months_missing_fixed": 1}) == ["1 months without BTC and ETH"]
 
 
-def test_confirmation_stays_sealed_without_a_registered_loop(tmp_path):
-    if tl.REGISTERED:
-        pytest.skip("a loop is registered; the tripwire test covers it")
-    with pytest.raises(SystemExit):
-        tl.require_registration(tmp_path / "registry.jsonl")
+def test_the_confirmation_runs_only_the_registered_loops_and_only_once_registered(tmp_path):
+    assert [loop.name for loop in tl.registered_loops()] == ["D1_20_10", "D1_20_10_VOL"]
+    assert tl.registered_loops()[1].vol_target == tl.D1_VOL.vol_target
+    params = tl.trial_params()
+    assert params["loops"] == ["D1_20_10", "D1_20_10_VOL"] and params["family_alpha"] == pytest.approx(0.025)
+    assert params["chosen_after_discovery"] is True
+    with pytest.raises(SystemExit, match="not pre-registered"):
+        tl.require_registration(tmp_path / "registry.jsonl")             # an empty registry seals the window
     for argv in (["build-confirm", "--out", str(tmp_path / "data")],
                  ["confirm", "--spot-dir", str(tmp_path), "--out", str(tmp_path / "o")]):
         with pytest.raises(SystemExit):
             tl._cli(argv + ["--trial-registry", str(tmp_path / "none.jsonl")])
     assert not (tmp_path / "data").exists() and not (tmp_path / "o").exists()
+    from trading.research.robustness import TrialRecord, TrialRegistry
+
+    registry = tmp_path / "registered.jsonl"
+    TrialRegistry(registry).append(TrialRecord(
+        trial_id=tl.trial_id(), family=tl.FAMILY, kind="SELECTION_CANDIDATE", description="test",
+        params=params, dataset=tl.DATASET, recorded_at="2026-10-02T00:00:00Z", n_trades=None,
+        sharpe_per_trade=None))
+    assert tl.require_registration(registry) == tl.trial_id()
+
+
+def test_an_unknown_registered_loop_refuses_to_run(monkeypatch):
+    monkeypatch.setattr(tl, "REGISTERED", ("D1_20_10", "NOPE"))
+    with pytest.raises(SystemExit, match="NOPE"):
+        tl.registered_loops()
 
 
 # ---------------------------------------------------------------------------

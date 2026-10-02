@@ -266,6 +266,10 @@ güncellenenler belirtildi.
       - Giriş zamanı yine rastgeleden iyi değil.
       - Sharpe farkının güven aralığı sıfırı içeriyor. Son söz 2024–26
         doğrulamasının.
+    - **Doğrulama (2024-09 → 2026-08):** D1_20_10 ve D1_20_10_VOL ön-kayda
+      alındı. Kullanıcı `trade_loop_confirm` iş akışını bir kez çalıştıracak.
+      Pencere veri olarak mühürlü ama bilgi olarak değil; asıl temiz test
+      2026-10'dan itibaren canlı gölge kayıt.
 12. ⏳ **Majör coin atlası, 2017-09 → 2024-08** — `docs/ATLAS.md`.
     - Ay ay piyasa, makro (FRED) ve takvim. Sinyal değil, açıklama.
     - Piyasa katmanı hazır (`research/atlas/market_monthly.csv`). En iyi 5
