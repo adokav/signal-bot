@@ -636,8 +636,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DATASET = {"source": "binance_vision_spot", "built_as_of": sq.CONFIRMATION_END,
            "confirmation_window": "2024-09..2026-08"}
 
-# Filled in only after discovery, by the rule in docs/TRADE_LOOP_STUDY.md (loop names).
-REGISTERED: tuple[str, ...] = ()
+# Filled in only after discovery, by the rule in docs/TRADE_LOOP_STUDY.md (loop names). No loop met the
+# discovery candidate rule; D1_20_10 and D1_20_10_VOL are registered as the hypothesis chosen after
+# discovery and replicated on the 2018-09..2020-09 pre-history (RISK_AZALTIR, trial 83c3e26b5ea98c95).
+REGISTERED: tuple[str, ...] = ("D1_20_10", "D1_20_10_VOL")
 
 
 def code_fingerprint(repo_root: Path = REPO_ROOT) -> str:
@@ -652,6 +654,9 @@ def trial_params() -> dict[str, Any]:
     return {
         "code_fingerprint": code_fingerprint(),
         "loops": list(REGISTERED),
+        "vol_target": D1_VOL.vol_target,
+        "chosen_after_discovery": True,
+        "prehistory_trial": "83c3e26b5ea98c95",
         "universe": "majors_signals monthly universe (BTC, ETH, top 10 by 30d volume, largest meme)",
         "execution": "decide at the 00:00 UTC daily close, trade at the next 15m open, intraday disaster stop",
         "costs_pct": {"base": COST_PCT, "stress": STRESS_COST_PCT},
@@ -659,7 +664,8 @@ def trial_params() -> dict[str, Any]:
         "window": list(CONFIRMATION),
         "half_at": HALF_AT,
         "family_alpha": 0.05 / max(1, len(REGISTERED)),
-        "bootstrap": {"method": "circular_moving_block_days", "block_days": sq.BLOCK_DAYS, "resamples": 4000},
+        "bootstrap": {"trades": {"method": "circular_moving_block_days", "block_days": sq.BLOCK_DAYS},
+                      "sharpe_difference": {"block_days": SHARPE_BLOCK_DAYS, "information_only": True}},
         "min_trades": MIN_CONFIRM_TRADES,
         "completeness": {"max_unknown_trades": MAX_UNKNOWN_TRADES, "max_unknown_days": MAX_UNKNOWN_DAYS},
         "verdicts": "PASS / ZAMANLAMA_YOK / RISK_AZALTIR / NO_EFFECT; INCOMPLETE_DATA gives no verdict",
@@ -710,6 +716,16 @@ def require_prehistory_registration(registry: Path) -> str:
     if tid not in {r.trial_id for r in TrialRegistry(registry).selection_trials(PREHISTORY_FAMILY)}:
         raise SystemExit(f"pre-history trial {tid} is not pre-registered for this code; refusing to run it")
     return tid
+
+
+def registered_loops() -> list[Loop]:
+    """The registered loops, in registration order; an unknown name refuses to run."""
+
+    known = {loop.name: loop for loop in (*LOOPS, D1_VOL)}
+    missing = [name for name in REGISTERED if name not in known]
+    if missing:
+        raise SystemExit(f"registered loops {missing} are not defined; refusing to run")
+    return [known[name] for name in REGISTERED]
 
 
 def require_registration(registry: Path) -> str:
@@ -879,7 +895,7 @@ def _cli(argv: Iterable[str] | None = None) -> int:
             r["verdict"] = verdict(r, r["incomplete"])
     else:
         trial = require_registration(args.trial_registry)
-        loops = [loop for loop in LOOPS if loop.name in REGISTERED]
+        loops = registered_loops()
         report = run(args.spot_dir, window=CONFIRMATION, end=sq.CONFIRMATION_END, alpha=0.05 / len(loops),
                      half_at=HALF_AT, loops=loops, months=sq.CONFIRMATION_MONTHS)
         for r in report["results"]:

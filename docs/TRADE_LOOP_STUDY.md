@@ -438,3 +438,42 @@ reddeder). Bu istenen davranış: test bir kez yapıldı.
 - Bu, 46 keşif ayının 2'sinde, toplam yaklaşık 600 üye-aydan 5'inde görülür. Keşif sonucu zaten aday çıkarmamıştı; kayıtlı sonuçlar değiştirilmedi.
 - Doğrulama penceresi etkilenmez. Doğrulama verisi 2024-06'da başlıyor ve ilk evren 2024-09'da kuruluyor. Veri setinin başında görülen her coin o tarihte en az 92 günlüktür.
 - Atlas, coin yaşını veri setleri arasında taşıyarak bu durumu düzeltir (`monthly_universe(..., history_start=...)`, `docs/ATLAS.md`).
+
+## Doğrulama: 2024-09 → 2026-08 (ek, 2026-10-02, sonuçtan önce)
+
+**Ne test ediliyor (k = 2, α = 0.025):**
+
+| Döngü | Tanım |
+|---|---|
+| D1_20_10 | Keşifteki ve ön-tarih testindeki kural, değişmeden. |
+| D1_20_10_VOL | Aynı işlemler; her işlemin payı 1/N × min(1, %50 / coinin 30 günlük oynaklığı). |
+
+**Neden bu ikisi:**
+
+- Hipotez keşif sonucu görüldükten **sonra** seçildi. Bu, kayıtta açıkça yazılı (`chosen_after_discovery`).
+- İki döngü de 2018-09 → 2020-09 ön-tarih testinde RİSK_AZALTIR çıktı (trial `83c3e26b5ea98c95`).
+- Kuralın kendisi 2024-08'den önce sabitlendi. Bu ek bölümde hiçbir parametre değişmedi.
+
+**Nasıl:**
+
+- **Evren:** Keşifteki majör evreni, perp şartıyla birlikte. Doğrulama döneminde perp var.
+- **Uygulama:**
+  - Karar günlük kapanışta verilir, işlem bir sonraki 15 dakikalık mumun açılışında yapılır.
+  - Gün içi acil durum stopu vardır.
+  - Gidiş-dönüş maliyeti %0.20, stres maliyeti %0.35.
+- **Kararlar:** "Doğrulama karar kuralları" bölümündeki kurallar aynen uygulanır: PASS / ZAMANLAMA_YOK / RİSK_AZALTIR / NO_EFFECT / INCOMPLETE_DATA. İki yarı 2025-09-01'de ayrılır.
+- **Yalnızca bilgi:** Sharpe farkı için 30 günlük bloklarla bootstrap güven aralığı. Karara girmez.
+- **Kayıt şartı:** `build-confirm` ve `confirm`, kod için kayıtlı bir deneme yoksa çalışmayı reddeder. İş akışı `trade_loop_confirm` bir kez çalıştırılır. İkinci bir çalıştırma ikinci bir doğrulama sayılmaz.
+
+**Dürüst sınır: pencere veri olarak mühürlü, bilgi olarak değil.**
+
+- Kullanıcı da Claude da 2024-09 → 2026-08 arasında piyasada kabaca ne olduğunu biliyor:
+  - 2024 sonundaki yükseliş;
+  - 2025 tarifeleri;
+  - 2025–26 Orta Doğu gerilimi.
+- Kural bu bilgiden önce, keşif verisiyle sabitlendi. Bu bölümde hiçbir parametre değişmedi. Bu yüzden bilgi sızıntısı yalnızca "bu kuralı şimdi test etmeye karar vermek" ile sınırlı.
+- Yine de sonuç tek başına "kanıtlandı" sayılmaz. Asıl temiz test, 2026-10'dan itibaren canlı gölge kayıttır (`docs/ATLAS.md`, ileriye dönük doğrulama).
+
+**Canlıya etkisi:** "Canlıya etkisi" bölümündeki kurallar geçerlidir.
+- PASS ya da RİSK_AZALTIR çıkarsa, kanıt etiketiyle bir bildirim tasarlanır. Bu bildirim ayrı bir PR'la ve kullanıcının onayıyla eklenir.
+- Emir yetkisi yoktur.
