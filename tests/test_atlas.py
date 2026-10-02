@@ -49,6 +49,12 @@ def test_macro_month_rows_net_liquidity_units_and_fed_moves():
     assert rows[1]["net_liquidity_busd_chg"] == pytest.approx((7500 - 750 - 500) - 6200)
     assert rows[1]["curve_10y_2y"] == pytest.approx(-0.4)
     assert rows[0]["fed_move_bp"] == 0 and rows[1]["fed_move_bp"] == -25
+    oil = atlas.macro_monthly({"brent": [(date(2024, 1, 31), 80.0), (date(2024, 2, 29), 88.0)],
+                               "us_10y_real": [(date(2024, 1, 31), 1.8), (date(2024, 2, 29), 2.0)]},
+                              [date(2024, 1, 31), date(2024, 2, 29)])
+    assert oil[1]["brent_chg"] == pytest.approx(10.0)                       # prices change in %
+    assert oil[1]["us_10y_real_chg"] == pytest.approx(0.2)                   # rates change in points
+    assert {"DCOILBRENTEU", "DEXCHUS"} <= set(atlas.FRED_SERIES.values())
     assert "Fed -25 bp" in atlas.calendar_notes("2024-02", rows[1])
     assert "Bitcoin halving" in atlas.calendar_notes("2024-04", None)
     assert "(sonradan bilinen)" in atlas.calendar_notes("2022-11", None)

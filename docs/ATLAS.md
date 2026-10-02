@@ -98,6 +98,8 @@ Seriler GitHub Actions'ta indirilir, çünkü bu konteyner FRED'e erişemiyor. A
 | Hazine hesabı (TGA) | WTREGEN | milyar $ | H.4.1 kaydı |
 | Ters repo (RRP) | RRPONTSYD | milyar $ | NY Fed işlem sonucu |
 | EUR/USD | DEXUSEU | $ / € | Piyasa kuru (H.10). Değer düşerse dolar güçleniyor demektir. |
+| USD/CNY | DEXCHUS | ¥ / $ | Piyasa kuru (H.10). Ticaret savaşının kanalı (2018–2019 tarifeleri, 2019-08 devalüasyonu). |
+| Brent petrol | DCOILBRENTEU | $ / varil | Spot fiyat (EIA). Orta Doğu geriliminin piyasaya geçtiği kanal. |
 | VIX | VIXCLS | endeks | Piyasa verisi |
 | Nasdaq / S&P 500 | NASDAQCOM / SP500 | endeks | Piyasa verisi |
 
