@@ -37,7 +37,7 @@ def test_the_atlas_never_reaches_into_the_sealed_window():
 def test_macro_month_rows_net_liquidity_units_and_fed_moves():
     series = {
         "fed_assets_musd": [(date(2024, 1, 31), 7_600_000.0), (date(2024, 2, 28), 7_500_000.0)],
-        "tga_busd": [(date(2024, 1, 31), 800.0), (date(2024, 2, 28), 750.0)],
+        "tga_musd": [(date(2024, 1, 31), 800_000.0), (date(2024, 2, 28), 750_000.0)],   # WTREGEN is in $mn
         "rrp_busd": [(date(2024, 1, 31), 600.0), (date(2024, 2, 29), 500.0)],
         "us_2y": [(date(2024, 1, 31), 4.3), (date(2024, 2, 29), 4.6)],
         "us_10y": [(date(2024, 1, 31), 4.0), (date(2024, 2, 29), 4.2)],
@@ -45,7 +45,7 @@ def test_macro_month_rows_net_liquidity_units_and_fed_moves():
                       (date(2024, 2, 29), 5.25)],
     }
     rows = atlas.macro_monthly(series, [date(2024, 1, 31), date(2024, 2, 29)])
-    assert rows[0]["net_liquidity_busd"] == pytest.approx(7600 - 800 - 600)    # $bn: WALCL is in $mn
+    assert rows[0]["net_liquidity_busd"] == pytest.approx(7600 - 800 - 600)    # $bn: WALCL, WTREGEN in $mn
     assert rows[1]["net_liquidity_busd_chg"] == pytest.approx((7500 - 750 - 500) - 6200)
     assert rows[1]["curve_10y_2y"] == pytest.approx(-0.4)
     assert rows[0]["fed_move_bp"] == 0 and rows[1]["fed_move_bp"] == -25
@@ -334,7 +334,7 @@ def test_a_daily_value_is_used_only_after_its_publication_lag():
 
 def test_the_daily_table_holds_only_exchange_closes_never_corrected_releases():
     assert atlas.DAILY_SERIES == ("vix", "vix3m", "nasdaq", "sp500")
-    corrected = {"fed_assets_musd", "tga_busd", "rrp_busd", "us_2y", "us_10y", "us_10y_real", "eur_usd", "usd_cny",
+    corrected = {"fed_assets_musd", "tga_musd", "rrp_busd", "us_2y", "us_10y", "us_10y_real", "eur_usd", "usd_cny",
                  "brent"}
     assert not corrected & set(atlas.DAILY_COLUMNS)                         # FRED's current vintage could leak them
 
@@ -380,3 +380,13 @@ def test_table_readers_refuse_duplicates_and_non_finite_values(tmp_path):
     atlas.write_macro([dict(rows[0], vix=float("inf"))] + rows[1:], tmp_path / "inf.csv")
     with pytest.raises(SystemExit, match="non-finite"):
         atlas.read_macro(tmp_path / "inf.csv")
+
+
+def test_a_series_in_the_wrong_unit_refuses_the_macro_table():
+    assert set(atlas.UNIT_BOUNDS) == set(atlas.FRED_SERIES)
+    ok = {"tga_musd": [(date(2024, 1, 31), 750_000.0)], "rrp_busd": [(date(2024, 1, 31), 600.0)]}
+    atlas.check_units(ok)
+    with pytest.raises(SystemExit, match="tga_musd"):
+        atlas.check_units({"tga_musd": [(date(2024, 1, 31), 750.0)]})          # billions passed as millions
+    with pytest.raises(SystemExit, match="no plausible range"):
+        atlas.check_units({"m2_busd": [(date(2024, 1, 31), 21_000.0)]})

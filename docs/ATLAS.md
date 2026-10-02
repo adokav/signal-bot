@@ -104,7 +104,7 @@ Seriler GitHub Actions'ta indirilir, çünkü bu konteyner FRED'e erişemiyor. A
 | 10 yıllık reel faiz | DFII10 | % | Piyasa faizi (H.15) |
 | Fed politika faizi (üst sınır) | DFEDTARU | % | Politika kararı |
 | Fed bilançosu | WALCL | milyon $ | H.4.1 kaydı |
-| Hazine hesabı (TGA) | WTREGEN | milyar $ | H.4.1 kaydı |
+| Hazine hesabı (TGA) | WTREGEN | milyon $ | H.4.1 kaydı |
 | Ters repo (RRP) | RRPONTSYD | milyar $ | NY Fed işlem sonucu |
 | EUR/USD | DEXUSEU | $ / € | Piyasa kuru (H.10). Değer düşerse dolar güçleniyor demektir. |
 | USD/CNY | DEXCHUS | ¥ / $ | Piyasa kuru (H.10). Ticaret savaşının kanalı (2018–2019 tarifeleri, 2019-08 devalüasyonu). Doğrulama 2026-10'da başlar. |
@@ -128,6 +128,7 @@ H.4.1 kayıtlarında nadir düzeltmeler olabilir. Bu küçük bir artık risktir
 
 **Türetilen alanlar:**
 - **Net likidite** = Fed bilançosu − TGA − RRP. Birimler milyar $'a çevrilir.
+- **Birim kontrolü:** Her ham değer, serinin kendi biriminde makul bir aralıkta olmalı (`UNIT_BOUNDS`). Aralık dışı bir değer, birim karışıklığı demektir ve `macro` komutu çalışmayı reddeder. Bu kontrol, TGA'nın (WTREGEN) milyar değil **milyon** $ olduğunu gözden kaçırdığım bir hatadan sonra eklendi. O hata ilk tabloda net likiditeyi anlamsız kılmıştı (2017-09 için −160.512 milyar $). Düzeltilmiş tablo, iş akışının yeniden çalıştırılmasıyla üretilir.
 - **Getiri eğrisi** = 10 yıllık − 2 yıllık.
 - **Fed hamlesi** = Ay içindeki politika faizi değişikliği, baz puan.
 

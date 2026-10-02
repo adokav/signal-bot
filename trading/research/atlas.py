@@ -58,7 +58,7 @@ FRED_SERIES = {
     "us_10y_real": "DFII10",
     "fed_upper": "DFEDTARU",          # policy setting
     "fed_assets_musd": "WALCL",       # H.4.1 record, millions of US dollars, weekly (Wednesday)
-    "tga_busd": "WTREGEN",            # H.4.1 record, billions of US dollars, weekly
+    "tga_musd": "WTREGEN",            # H.4.1 record, millions of US dollars, weekly
     "rrp_busd": "RRPONTSYD",          # NY Fed operation results, billions of US dollars, daily
     "eur_usd": "DEXUSEU",             # H.10 noon rate, US dollars per euro: a falling value is a stronger dollar
     "usd_cny": "DEXCHUS",             # H.10 noon rate, yuan per US dollar: the trade-war channel (2018-2019)
@@ -90,6 +90,15 @@ AVAILABLE_LAG_DAYS = {"vix": 1, "vix3m": 1, "nasdaq": 1, "sp500": 1}
 DAILY_SERIES = tuple(AVAILABLE_LAG_DAYS)
 DAILY_STALE_DAYS = 7                   # beyond its lag, an observation older than this is missing, not carried
 DAILY_COLUMNS = ("date", *DAILY_SERIES)
+# Plausible ranges of raw FRED values over 2016..2024, in each series' own unit. A value outside
+# means a unit or series mix-up (WTREGEN is in millions, RRPONTSYD in billions) and the macro
+# command refuses instead of writing a table built on it.
+UNIT_BOUNDS = {
+    "us_2y": (-1.0, 10.0), "us_10y": (-1.0, 10.0), "us_10y_real": (-3.0, 5.0), "fed_upper": (0.0, 10.0),
+    "fed_assets_musd": (3.0e6, 1.0e7), "tga_musd": (1.0e3, 2.0e6), "rrp_busd": (0.0, 3.0e3),
+    "eur_usd": (0.8, 1.4), "usd_cny": (5.5, 8.0), "brent": (5.0, 200.0), "vix": (5.0, 100.0),
+    "vix3m": (5.0, 100.0), "nasdaq": (3.0e3, 3.0e4), "sp500": (1.5e3, 1.0e4),
+}
 REVISED_SERIES = frozenset({"M2SL", "DTWEXBGS", "GDP", "GDPC1", "CPIAUCSL", "PCEPI", "PAYEMS", "UNRATE", "INDPRO"})
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 MAX_STALE_DAYS = 40                    # a month-end value older than this is missing, not carried
@@ -191,6 +200,22 @@ def value_at(rows: Sequence[tuple[date, float]], day: date, *, max_stale: int = 
     return best[1]
 
 
+def check_units(series: Mapping[str, Sequence[tuple[date, float]]]) -> None:
+    """Refuse (SystemExit) when a series is missing a range or has a value outside it (UNIT_BOUNDS)."""
+
+    problems = []
+    for name, rows in series.items():
+        if name not in UNIT_BOUNDS:
+            problems.append(f"{name}: no plausible range defined")
+            continue
+        lo, hi = UNIT_BOUNDS[name]
+        bad = [(d, v) for d, v in rows if not lo <= v <= hi]
+        if bad:
+            problems.append(f"{name}: {len(bad)} values outside [{lo}, {hi}], first {bad[0][0]} = {bad[0][1]}")
+    if problems:
+        raise SystemExit("macro unit check failed: " + "; ".join(problems))
+
+
 def macro_monthly(series: Mapping[str, Sequence[tuple[date, float]]], months: Sequence[date]) -> list[dict]:
     """One row per month end: levels, monthly changes, net liquidity and the Fed's rate moves."""
 
@@ -199,8 +224,8 @@ def macro_monthly(series: Mapping[str, Sequence[tuple[date, float]]], months: Se
         row: dict[str, Any] = {"month": month_end.strftime("%Y-%m")}
         for name, rows in series.items():
             row[name] = value_at(rows, month_end)
-        assets, tga, rrp = row.get("fed_assets_musd"), row.get("tga_busd"), row.get("rrp_busd")
-        row["net_liquidity_busd"] = (assets / 1000.0 - tga - rrp) if None not in (assets, tga, rrp) else None
+        assets, tga, rrp = row.get("fed_assets_musd"), row.get("tga_musd"), row.get("rrp_busd")
+        row["net_liquidity_busd"] = ((assets - tga) / 1000.0 - rrp) if None not in (assets, tga, rrp) else None
         y2, y10 = row.get("us_2y"), row.get("us_10y")
         row["curve_10y_2y"] = (y10 - y2) if None not in (y2, y10) else None
         first = month_end.replace(day=1)
@@ -756,6 +781,7 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         start = datetime.fromtimestamp(ATLAS_START, tz=timezone.utc).date() - timedelta(days=400)
         end = datetime.fromtimestamp(ATLAS_END - DAY, tz=timezone.utc).date()
         series = {name: fetch_fred(sid, start=start, end=end) for name, sid in FRED_SERIES.items()}
+        check_units(series)
         rows = macro_monthly(series, month_ends())
         write_macro(rows, args.out)
         daily = macro_daily(series)
