@@ -25,7 +25,7 @@ Kod: `trading/research/atlas.py`. Makro tablo: `.github/workflows/atlas_macro.ym
 - Bu yüzden hipotez seçimini etkileyen her bilgi kaydedilir.
 - Discovery'de sabitlenmiş mekanik kurallar (D1 "trend bozulunca çık" gibi) bu pencerede doğrulanabilir.
 - Pencerede olan olaylar konuşulduktan **sonra** seçilen bir faktör ise orada doğrulanamaz. Bu faktörü kullanan bir hipotez, seçimden sonraki veride ileriye dönük olarak test edilir.
-  - Brent ve USD/CNY 2026-10-02'de bu şekilde eklendi. Bu iki faktör için doğrulama 2026-10'da başlar (`CONFIRMATION_FROM`).
+  - Brent, USD/CNY ve VIX3M 2026-10-02'de bu şekilde eklendi. Bu üç faktör için doğrulama 2026-10'da başlar (`CONFIRMATION_FROM`).
   - Bu bilgi `build` çıktısında `confirmation_from` alanında da yazar.
 
 ## Katmanlar
@@ -110,9 +110,27 @@ Seriler GitHub Actions'ta indirilir, çünkü bu konteyner FRED'e erişemiyor. A
 | USD/CNY | DEXCHUS | ¥ / $ | Piyasa kuru (H.10). Ticaret savaşının kanalı (2018–2019 tarifeleri, 2019-08 devalüasyonu). Doğrulama 2026-10'da başlar. |
 | Brent petrol | DCOILBRENTEU | $ / varil | Spot fiyat (EIA). Orta Doğu geriliminin piyasaya geçtiği kanal. Doğrulama 2026-10'da başlar. |
 | VIX | VIXCLS | endeks | Piyasa verisi |
+| VIX3M | VXVCLS | endeks | Piyasa verisi. VIX'in VIX3M'i geçmesi (vade eğrisinin terse dönmesi), literatürde akut stresin işareti. Doğrulama 2026-10'da başlar. |
 | Nasdaq / S&P 500 | NASDAQCOM / SP500 | endeks | Piyasa verisi |
 
 H.4.1 kayıtlarında nadir düzeltmeler olabilir. Bu küçük bir artık risktir.
+
+**İki tablo üretilir:**
+
+1. **Aylık tablo** (`--out`). Ay sonu değerleri; yalnızca açıklama içindir. Gözlem tarihi kullanılır, yayımlanma tarihi değil.
+2. **Günlük tablo** (`--daily-out`). Her gün için, o günün 00:00 UTC'sinde **bilinen** değerler. Günlük kurallar bu tabloyla test edilir.
+   - Bir gözlem, yayımlanma gecikmesi geçmeden kullanılmaz (`AVAILABLE_LAG_DAYS`). Gecikmeler temkinli seçildi:
+
+     | Seri | Gecikme (gün) |
+     |---|---:|
+     | VIX, VIX3M, Nasdaq, S&P 500, RRP, Fed faizi | 1 |
+     | Fed bilançosu, TGA | 2 |
+     | Faizler (H.15) | 4 |
+     | Kurlar (H.10, haftalık yayın) | 8 |
+     | Brent (EIA, haftalık yayın) | 10 |
+
+   - Gecikmesinden sonra 7 günden eski bir değer eksik sayılır; bir sonraki güne taşınmaz.
+   - `read_daily`, şeması farklı ya da bir günü eksik olan bir tabloyu reddeder.
 
 **Türetilen alanlar:**
 - **Net likidite** = Fed bilançosu − TGA − RRP. Birimler milyar $'a çevrilir.
@@ -145,7 +163,8 @@ H.4.1 kayıtlarında nadir düzeltmeler olabilir. Bu küçük bir artık risktir
 ```bash
 # 1) Makro tablo (GitHub Actions → atlas_macro → Run workflow).
 #    CSV, logda ATLAS_MACRO_BEGIN / ATLAS_MACRO_END arasında ve artifact olarak çıkar.
-python -m trading.research.atlas macro --out research/data/atlas_macro.csv
+python -m trading.research.atlas macro --out research/data/atlas_macro.csv \
+  --daily-out research/data/atlas_macro_daily.csv
 
 # 2) Atlas. Veri setleri en eskiden yeniye verilir; aralarında boşluk olmamalıdır.
 python -m trading.research.atlas build \

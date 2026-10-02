@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 import pytest
@@ -321,3 +321,39 @@ def test_the_macro_table_must_match_this_schema_and_cover_every_month(tmp_path):
 def test_factors_chosen_with_knowledge_of_the_window_get_a_forward_holdout():
     assert atlas.confirmation_from("brent") == "2026-10" and atlas.confirmation_from("usd_cny_chg") == "2026-10"
     assert atlas.confirmation_from("vix") == "2024-09" and atlas.confirmation_from("net_liquidity_busd") == "2024-09"
+
+
+def test_a_daily_value_is_used_only_after_its_publication_lag():
+    vix = [(date(2024, 3, 4), 20.0), (date(2024, 3, 5), 30.0)]            # Monday, Tuesday closes
+    assert atlas.known_at(vix, date(2024, 3, 5), atlas.AVAILABLE_LAG_DAYS["vix"]) == 20.0   # Tuesday 00:00 UTC
+    assert atlas.known_at(vix, date(2024, 3, 6), atlas.AVAILABLE_LAG_DAYS["vix"]) == 30.0
+    assert atlas.known_at(vix, date(2024, 3, 4), atlas.AVAILABLE_LAG_DAYS["vix"]) is None    # not yet closed
+    brent = [(date(2024, 3, 4), 80.0)]
+    lag = atlas.AVAILABLE_LAG_DAYS["brent"]
+    assert atlas.known_at(brent, date(2024, 3, 4) + timedelta(days=lag - 1), lag) is None     # not yet published
+    assert atlas.known_at(brent, date(2024, 3, 4) + timedelta(days=lag), lag) == 80.0
+    assert atlas.known_at(brent, date(2024, 3, 4) + timedelta(days=lag + 8), lag) is None     # stale, not carried
+    assert set(atlas.AVAILABLE_LAG_DAYS) == set(atlas.FRED_SERIES)
+
+
+def test_the_daily_table_covers_every_day_and_refuses_a_foreign_schema(tmp_path):
+    first = date(2017, 9, 1)
+    origin = first - timedelta(days=30)                                 # value = days since origin
+    series = {name: [(origin + timedelta(days=k), float(k)) for k in range(2700)] for name in atlas.FRED_SERIES}
+    rows = atlas.macro_daily(series)
+    assert len(rows) == (atlas.ATLAS_END - atlas.ATLAS_START) // 86_400
+    assert rows[0]["date"] == "2017-09-01" and rows[-1]["date"] == "2024-08-31"
+    for r in rows:                                                      # never a value before its lag
+        age = (date.fromisoformat(r["date"]) - origin).days
+        assert r["vix"] == age - atlas.AVAILABLE_LAG_DAYS["vix"]
+        assert r["brent"] == age - atlas.AVAILABLE_LAG_DAYS["brent"]
+    path = tmp_path / "daily.csv"
+    atlas.write_macro(rows, path)
+    assert atlas.read_daily(path)["2024-08-31"]["vix"] is not None
+    atlas.write_macro(rows[:-1], tmp_path / "short.csv")
+    with pytest.raises(SystemExit, match="day by day"):
+        atlas.read_daily(tmp_path / "short.csv")
+    atlas.write_macro([{k: v for k, v in r.items() if k != "vix3m"} for r in rows], tmp_path / "old.csv")
+    with pytest.raises(SystemExit, match="schema"):
+        atlas.read_daily(tmp_path / "old.csv")
+    assert atlas.confirmation_from("vix3m") == "2026-10" and atlas.confirmation_from("vix") == "2024-09"

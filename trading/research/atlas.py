@@ -64,6 +64,7 @@ FRED_SERIES = {
     "usd_cny": "DEXCHUS",             # H.10 noon rate, yuan per US dollar: the trade-war channel (2018-2019)
     "brent": "DCOILBRENTEU",          # EIA Brent spot, US dollars per barrel: the Middle East channel
     "vix": "VIXCLS",
+    "vix3m": "VXVCLS",                # CBOE 3-month VIX: VIX above it (an inverted curve) marks acute stress
     "nasdaq": "NASDAQCOM",
     "sp500": "SP500",
 }
@@ -71,13 +72,26 @@ PCT_CHANGE = frozenset({"nasdaq", "eur_usd", "usd_cny", "brent"})   # prices: ch
 CHANGE_COLUMNS = ("us_10y_real", "net_liquidity_busd", "eur_usd", "usd_cny", "brent", "vix", "nasdaq", "us_2y")
 MACRO_COLUMNS = ("month", *FRED_SERIES, "net_liquidity_busd", "curve_10y_2y", "fed_move_bp",
                  *(f"{name}_chg" for name in CHANGE_COLUMNS))
-# Brent and USD/CNY were added on 2026-10-02, after a conversation about events
+# Brent, USD/CNY and VIX3M were added on 2026-10-02, after a conversation about events
 # inside the 2024-09..2026-08 confirmation window (the 2025 tariffs, the 2025-26
 # Middle East tension). Choosing them was influenced by that window, so a
 # hypothesis that uses them cannot be confirmed there: only on data from the
 # month given here on (a forward holdout). Every other column keeps 2024-09.
 CONFIRMATION_FROM_DEFAULT = "2024-09"
-CONFIRMATION_FROM = {"brent": "2026-10", "usd_cny": "2026-10"}
+CONFIRMATION_FROM = {"brent": "2026-10", "usd_cny": "2026-10", "vix3m": "2026-10"}
+# Conservative publication lags, in days: an observation dated d is used from
+# 00:00 UTC of d + lag on (the daily table), never before it was published.
+AVAILABLE_LAG_DAYS = {
+    "us_2y": 4, "us_10y": 4, "us_10y_real": 4,      # H.15: next business day, Friday's on Monday
+    "fed_upper": 1,                                  # announced before it takes effect
+    "fed_assets_musd": 2, "tga_busd": 2,             # Wednesday levels, published Thursday afternoon (ET)
+    "rrp_busd": 1,                                   # results the same afternoon (ET)
+    "eur_usd": 8, "usd_cny": 8,                      # H.10: weekly release on Monday for the previous week
+    "brent": 10,                                     # EIA spot prices: weekly release
+    "vix": 1, "vix3m": 1, "nasdaq": 1, "sp500": 1,   # US closes, before 00:00 UTC of the next day
+}
+DAILY_STALE_DAYS = 7                   # beyond its lag, an observation older than this is missing, not carried
+DAILY_COLUMNS = ("date", *FRED_SERIES)
 REVISED_SERIES = frozenset({"M2SL", "DTWEXBGS", "GDP", "GDPC1", "CPIAUCSL", "PCEPI", "PAYEMS", "UNRATE", "INDPRO"})
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 MAX_STALE_DAYS = 40                    # a month-end value older than this is missing, not carried
@@ -205,6 +219,47 @@ def macro_monthly(series: Mapping[str, Sequence[tuple[date, float]]], months: Se
                 row[f"{name}_chg"] = now - then
         out.append(row)
         prev = row
+    return out
+
+
+def known_at(rows: Sequence[tuple[date, float]], day: date, lag: int, *,
+             stale: int = DAILY_STALE_DAYS) -> float | None:
+    """Value known at 00:00 UTC of ``day``: the last observation dated at least ``lag`` days earlier, if not stale."""
+
+    return value_at(rows, day - timedelta(days=lag), max_stale=stale)
+
+
+def macro_daily(series: Mapping[str, Sequence[tuple[date, float]]], *, start: int = ATLAS_START,
+                end: int = ATLAS_END) -> list[dict]:
+    """One row per calendar day in [start, end): every series as known at 00:00 UTC of that day (point in time)."""
+
+    first = datetime.fromtimestamp(start, tz=timezone.utc).date()
+    days = (end - start) // DAY
+    out = []
+    for k in range(days):
+        day = first + timedelta(days=k)
+        row: dict[str, Any] = {"date": day.isoformat()}
+        for name in FRED_SERIES:
+            row[name] = known_at(series.get(name, ()), day, AVAILABLE_LAG_DAYS[name])
+        out.append(row)
+    return out
+
+
+def read_daily(path: Path) -> dict[str, dict[str, Any]]:
+    """The daily point-in-time table, if it is this code's schema and covers every atlas day; otherwise refuse."""
+
+    out = {}
+    with path.open(encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if list(reader.fieldnames or ()) != list(DAILY_COLUMNS):
+            raise SystemExit(f"{path}: daily table schema does not match this code; rerun the atlas_macro workflow")
+        for row in reader:
+            out[row["date"]] = {k: (v if k == "date" else (None if v in {"", "None"} else float(v)))
+                                for k, v in row.items()}
+    first = datetime.fromtimestamp(ATLAS_START, tz=timezone.utc).date()
+    expected = [(first + timedelta(days=k)).isoformat() for k in range((ATLAS_END - ATLAS_START) // DAY)]
+    if list(out) != expected:
+        raise SystemExit(f"{path}: daily table does not cover {expected[0]}..{expected[-1]} day by day")
     return out
 
 
@@ -667,8 +722,10 @@ def _cli(argv: Iterable[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description="Descriptive 2017-09..2024-08 atlas (docs/ATLAS.md).")
     sub = parser.add_subparsers(dest="mode", required=True)
-    macro = sub.add_parser("macro", help="download FRED series and write the monthly macro table")
-    macro.add_argument("--out", type=Path, required=True)
+    macro = sub.add_parser("macro", help="download FRED series and write the monthly and daily macro tables")
+    macro.add_argument("--out", type=Path, required=True, help="monthly table (month-end values, descriptive)")
+    macro.add_argument("--daily-out", type=Path, required=True,
+                       help="daily table: each series as known at 00:00 UTC, after its publication lag")
     build = sub.add_parser("build", help="market layer from local data + the macro table -> atlas rows")
     build.add_argument("--spot-dir", type=Path, action="append", required=True,
                        help="liquid-universe data directories, oldest first")
@@ -685,7 +742,9 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         series = {name: fetch_fred(sid, start=start, end=end) for name, sid in FRED_SERIES.items()}
         rows = macro_monthly(series, month_ends())
         write_macro(rows, args.out)
-        print(f"wrote {len(rows)} months to {args.out}; observations "
+        daily = macro_daily(series)
+        write_macro(daily, args.daily_out)
+        print(f"wrote {len(rows)} months to {args.out} and {len(daily)} days to {args.daily_out}; observations "
               + json.dumps({k: len(v) for k, v in series.items()}, sort_keys=True))
         return 0
 

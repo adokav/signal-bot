@@ -3,7 +3,9 @@ name: atlas_macro
 # Manual-trigger research job for docs/ATLAS.md: downloads public FRED series
 # that are not revised after publication (rates, real rate, Fed funds target,
 # Fed balance sheet, Treasury account, reverse repo, EUR/USD, USD/CNY, Brent,
-# VIX, equities) for 2016..2024-08 and writes the monthly macro table.
+# VIX, VIX3M, equities) for 2016..2024-08 and writes the monthly macro table
+# and a daily table of each series as known at 00:00 UTC (after its
+# publication lag).
 # Nothing after 2024-08-31 is requested (the 2024-09..2026-08 confirmation window stays
 # sealed); revised series stay out, as their current vintage would carry
 # revisions published inside it. No API key, no secrets.
@@ -35,14 +37,23 @@ jobs:
       - name: Monthly macro table (FRED, 2017-09..2024-08)
         run: |
           set -euo pipefail
-          python -m trading.research.atlas macro --out research/data/atlas_macro.csv
+          python -m trading.research.atlas macro --out research/data/atlas_macro.csv \
+              --daily-out research/data/atlas_macro_daily.csv
           echo "ATLAS_MACRO_BEGIN"
           cat research/data/atlas_macro.csv
           echo "ATLAS_MACRO_END"
+      - name: Daily point-in-time table (as known at 00:00 UTC)
+        run: |
+          set -euo pipefail
+          echo "ATLAS_DAILY_BEGIN"
+          cat research/data/atlas_macro_daily.csv
+          echo "ATLAS_DAILY_END"
       - name: Upload artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: atlas-macro
-          path: research/data/atlas_macro.csv
+          path: |
+            research/data/atlas_macro.csv
+            research/data/atlas_macro_daily.csv
           retention-days: 30
