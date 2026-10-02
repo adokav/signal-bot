@@ -41,6 +41,7 @@ from acce_unified.tactical_long_data import (
     TacticalTimeframe,
 )
 from acce_unified.tactical_long_engine import TacticalLongEngine
+from acce_unified.trend_loop import Ledger as TrendLedger, MexcSpot, TrendLoop
 from acce_unified.providers import MexcPublicProvider
 from acce_unified.models import MexcListing
 
@@ -68,6 +69,13 @@ LIQUID_LONG_ALERTS = os.getenv("LIQUID_LONG_ALERTS_ENABLED", "1") == "1"
 # User decision (2026-10-01): alerts the confirmed F1 filter labels KAÇIN are not pushed;
 # they stay in the radar log so the filter keeps being checked live. "1" pushes them again.
 LIQUID_AVOID_ALERTS = os.getenv("LIQUID_AVOID_ALERTS_ENABLED", "0") == "1"
+# D1 trend loop in shadow mode (docs/TREND_LOOP_LIVE.md): the majors' daily close at 00:00 UTC,
+# intraday acute stops, an append-only ledger. User decision (2026-10-02): entry and exit alerts are
+# pushed with the RİSK_AZALTIR label; "0" records them without pushing. No orders either way.
+TREND_LOOP_ENABLED = os.getenv("TREND_LOOP_ENABLED", "1") == "1"
+TREND_LOOP_ALERTS = os.getenv("TREND_LOOP_ALERTS_ENABLED", "1") == "1"
+TREND_LOOP_STOP_SECONDS = max(60, int(os.getenv("TREND_LOOP_STOP_INTERVAL_SECONDS", "300")))
+TREND_LOOP_TICK_SECONDS = 60
 
 CONFIG = UnifiedConfig.from_env()
 # A snapshot older than three scan cycles is stale evidence, not a current view.
@@ -93,6 +101,11 @@ KLINES = MexcPublicProvider(timeout=CONFIG.request_timeout_seconds)
 FORWARD_LEDGER = ForwardLedger(Path(os.getenv(
     "FORWARD_LEDGER_FILE", str(STATE_FILE.parent / "tactical_forward_ledger.json")
 )))
+TREND_LOOP = TrendLoop(
+    TrendLedger(Path(os.getenv("TREND_LOOP_LEDGER_FILE", str(STATE_FILE.parent / "trend_loop_ledger.jsonl")))),
+    market=MexcSpot(timeout=CONFIG.request_timeout_seconds),
+)
+TREND_LOOP_LOADED = threading.Event()
 APP = Flask(__name__)
 HTTP = requests.Session()
 LOCK = threading.RLock()
@@ -109,6 +122,8 @@ STATE: dict[str, Any] = {
     "forward_vs_replay": None,
     "forward_ledger_error": None,
     "radar_log": [],
+    "trend_loop": None,
+    "trend_loop_error": None,
 }
 
 COMMANDS = [
@@ -117,6 +132,7 @@ COMMANDS = [
     {"command": "longs", "description": "MEXC Likit 100 Long İlk 3"},
     {"command": "new", "description": "Doğrulanmış MEXC yeni listeleri"},
     {"command": "radar", "description": "Radara giren long sinyalleri ve stop durumu"},
+    {"command": "d1", "description": "D1 döngü: gölge pozisyonlar, çıkış seviyesi ve acil stop"},
     {"command": "status", "description": "Tarama sağlığı ve veri durumu"},
     {"command": "scan", "description": "Şimdi yeniden tara"},
 ]
@@ -230,6 +246,7 @@ def panel_keyboard() -> dict[str, Any]:
         [{"text": "₿ BTC / Ξ ETH Long", "callback_data": "TACTICAL"}],
         [{"text": "💧 Long İlk 3", "callback_data": "LONGS"}],
         [{"text": "📋 Radar kaydı", "callback_data": "RADAR"}],
+        [{"text": "📈 D1 Döngü", "callback_data": "D1"}],
         [{"text": "🆕 Yeni Listeler", "callback_data": "NEW"}],
         [
             {"text": "📊 Durum", "callback_data": "STATUS"},
@@ -498,6 +515,8 @@ def format_status(snapshot: dict[str, Any] | None) -> str:
         str(STATE.get("forward_ledger_status") or "İleriye dönük kayıt: henüz yok"),
         str(STATE.get("forward_vs_replay") or ""),
         _radar_status_line(),
+        TREND_LOOP.status_line() if TREND_LOOP_ENABLED else "D1 döngü: kapalı",
+        f"D1 hata: {STATE.get('trend_loop_error')}" if STATE.get("trend_loop_error") else "",
         f"Kayıt hatası: {STATE.get('forward_ledger_error')}" if STATE.get("forward_ledger_error") else "",
         "Emir yetkisi: YOK",
     ] if line)
@@ -843,12 +862,78 @@ def tactical_scanner_loop() -> None:
         time.sleep(TACTICAL_SCAN_SECONDS)
 
 
+# ---------------------------------------------------------------------------
+# D1 trend loop (shadow; acce_unified.trend_loop)
+# ---------------------------------------------------------------------------
+
+
+def _deliver_trend_alerts(now: int) -> None:
+    """Push the ledger's pending D1 messages in order; a failed send stays pending for the next tick."""
+
+    for message in TREND_LOOP.outbox():
+        pushed = TREND_LOOP_ALERTS and bool(TOKEN and CHAT_ID)
+        if pushed:
+            try:
+                send(message["text"], keyboard=panel_keyboard(), html_mode=True)
+            except Exception as exc:
+                log.warning("D1 uyarısı gönderilemedi, tekrar denenecek: %s", _safe_error(exc))
+                return
+        TREND_LOOP.delivered(message["id"], at=now, sent=pushed)
+
+
+def trend_loop_tick(now: int | None = None) -> None:
+    """One pass: restore once, decide the due daily close, check the acute stops, deliver pending alerts.
+
+    Each step fails on its own: a failed daily decision does not skip the stop
+    check, and alerts already in the ledger are delivered either way.
+    """
+
+    now = int(time.time()) if now is None else now
+    errors: list[str] = []
+    if not TREND_LOOP_LOADED.is_set():
+        try:
+            with LOCK:
+                saved = STATE.get("trend_loop")
+            TREND_LOOP.load(saved)
+            TREND_LOOP_LOADED.set()
+        except Exception as exc:
+            errors.append(_safe_error(exc))
+    if TREND_LOOP_LOADED.is_set():
+        steps = [lambda: TREND_LOOP.run_daily(now)]
+        last_check = TREND_LOOP.state.get("last_stop_check_at")
+        if last_check is None or now - int(last_check) >= TREND_LOOP_STOP_SECONDS:
+            steps.append(lambda: TREND_LOOP.check_stops(now))
+        steps.append(lambda: _deliver_trend_alerts(now))
+        for step in steps:
+            try:
+                step()
+            except Exception as exc:
+                errors.append(_safe_error(exc))
+    error = "; ".join(errors) or None
+    if error:
+        log.warning("D1 döngü adımı başarısız: %s", error)
+    with LOCK:
+        if TREND_LOOP_LOADED.is_set():
+            STATE["trend_loop"] = TREND_LOOP.export()
+        STATE["trend_loop_error"] = error
+        _save_state()
+
+
+def trend_loop_loop() -> None:
+    while True:
+        try:
+            trend_loop_tick()
+        except Exception:
+            log.warning("D1 döngü beklenmedik hata", exc_info=True)
+        time.sleep(TREND_LOOP_TICK_SECONDS)
+
+
 def _command(text: str) -> str:
     token = (text or "").strip().split(maxsplit=1)[0].lower()
     return {
         "/start": "PANEL", "/panel": "PANEL", "/tactical": "TACTICAL",
         "/btceth": "TACTICAL", "/longs": "LONGS", "/new": "NEW",
-        "/listings": "NEW", "/status": "STATUS", "/scan": "SCAN", "/radar": "RADAR",
+        "/listings": "NEW", "/status": "STATUS", "/scan": "SCAN", "/radar": "RADAR", "/d1": "D1",
     }.get(token, token.lstrip("/").upper())
 
 
@@ -867,6 +952,20 @@ def handle(action: str) -> None:
         with LOCK:
             rows = [dict(e) for e in STATE.get("radar_log") or []]
         send(long_alerts.format_radar(rows, now=int(time.time())), keyboard=panel_keyboard(), html_mode=True)
+    elif action == "D1":
+        now = int(time.time())
+        if not TREND_LOOP_ENABLED:
+            send("D1 döngü kapalı (TREND_LOOP_ENABLED=0).", keyboard=panel_keyboard())
+        elif not TREND_LOOP_LOADED.is_set():          # an empty report would read as "no open positions"
+            send(f"D1 döngü yüklenemedi; pozisyonlar bilinmiyor. Hata: {STATE.get('trend_loop_error') or 'yok'}",
+                 keyboard=panel_keyboard())
+        else:
+            text = TREND_LOOP.positions_text(now)
+            if not TREND_LOOP.fresh(now, stop_seconds=TREND_LOOP_STOP_SECONDS):
+                text += "\n" + long_alerts.esc(
+                    "⚠️ Döngü güncel değil: son kapanış karara bağlanmadı ya da stop kontrolü gecikti. "
+                    f"Hata: {STATE.get('trend_loop_error') or 'yok'}")
+            send(text, keyboard=panel_keyboard(), html_mode=True)
     elif action == "STATUS":
         send(format_status(snapshot), keyboard=panel_keyboard())
     elif action == "SCAN":
@@ -876,7 +975,7 @@ def handle(action: str) -> None:
         send(format_status(refreshed or _snapshot()), keyboard=panel_keyboard())
     else:
         send(
-            "🎯 SIGNAL BOT v5 CORE\n\nAktif araştırma motorları:\n• BTC/ETH Taktik Long giriş ve stop radarı\n• MEXC Likit 100 Long İlk 3\n• Doğrulanmış MEXC yeni listelemeleri",
+            "🎯 SIGNAL BOT v5 CORE\n\nAktif araştırma motorları:\n• BTC/ETH Taktik Long giriş ve stop radarı\n• MEXC Likit 100 Long İlk 3\n• Doğrulanmış MEXC yeni listelemeleri\n• D1 trend döngüsü (gölge kayıt, emir yok)",
             keyboard=panel_keyboard(),
         )
 
@@ -942,11 +1041,13 @@ def health() -> Any:
     now = int(time.time())
     main_fresh = _age_ok(snapshot.get("generated_at"), MAIN_MAX_AGE_SECONDS, now)
     tactical_fresh = _age_ok(tactical.get("generated_at"), TACTICAL_MAX_AGE_SECONDS, now)
+    trend_fresh = TREND_LOOP.fresh(now, stop_seconds=TREND_LOOP_STOP_SECONDS) if TREND_LOOP_ENABLED else None
     return jsonify({
         # Healthy means fresh artifacts exist, not merely "no error recorded".
         "ok": (
             main_fresh and tactical_fresh
             and STATE.get("last_error") is None and STATE.get("tactical_last_error") is None
+            and (not TREND_LOOP_ENABLED or (trend_fresh and STATE.get("trend_loop_error") is None))
         ),
         "service": "signal-bot-v5-core",
         "main_scan_fresh": main_fresh,
@@ -956,6 +1057,8 @@ def health() -> Any:
         "errors": [_error_code(e) for e in snapshot.get("errors") or []],
         "last_error": _error_code(STATE.get("last_error")),
         "tactical_last_error": _error_code(STATE.get("tactical_last_error")),
+        "trend_loop_fresh": trend_fresh,
+        "trend_loop_last_error": _error_code(STATE.get("trend_loop_error")),
         "can_authorize_trade": False,
     })
 
@@ -965,6 +1068,8 @@ def main() -> None:
     threading.Thread(target=scanner_loop, name="mexc-core-scanner", daemon=True).start()
     threading.Thread(target=tactical_scanner_loop, name="btc-eth-tactical-scanner", daemon=True).start()
     threading.Thread(target=telegram_loop, name="telegram-command-loop", daemon=True).start()
+    if TREND_LOOP_ENABLED:
+        threading.Thread(target=trend_loop_loop, name="d1-trend-loop", daemon=True).start()
     if STARTUP_MESSAGE:
         try:
             send("✅ Signal Bot v5 Core başladı.", keyboard=panel_keyboard())

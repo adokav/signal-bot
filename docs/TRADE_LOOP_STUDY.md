@@ -527,3 +527,5 @@ reddeder). Bu istenen davranış: test bir kez yapıldı.
 - RİSK_AZALTIR, "getiri kanıtı yok, risk azaltır" etiketli bir bildirim tasarlanmasına izin veriyor.
 - Bildirim ayrı bir PR'la ve kullanıcının onayıyla eklenir.
 - Emir yetkisi yok.
+- **Uygulandı (2026-10-02, kullanıcı onayıyla):** canlı gölge kayıt ve
+  bildirimler, `docs/TREND_LOOP_LIVE.md`.

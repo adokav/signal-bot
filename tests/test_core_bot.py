@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import bot
+from acce_unified.trend_loop import Ledger as TrendLedger, TrendLoop
 
 
 def _snapshot():
@@ -49,7 +51,7 @@ def _snapshot():
 
 def test_public_commands_include_tactical_radar_without_legacy_bloat():
     assert [row["command"] for row in bot.COMMANDS] == [
-        "panel", "tactical", "longs", "new", "radar", "status", "scan"
+        "panel", "tactical", "longs", "new", "radar", "d1", "status", "scan"
     ]
 
 
@@ -130,7 +132,8 @@ def test_health_is_not_healthy_before_any_scan():
         bot.STATE.update(saved)
 
 
-def test_health_requires_fresh_artifacts_and_hides_error_text():
+def test_health_requires_fresh_artifacts_and_hides_error_text(monkeypatch):
+    monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
     saved = _preserve_state(*HEALTH_KEYS)
     now = int(bot.time.time())
     try:
@@ -153,6 +156,110 @@ def test_health_requires_fresh_artifacts_and_hides_error_text():
         assert payload["ok"] is False
         assert payload["last_error"] == "HTTPError"
         assert "SECRET" not in json.dumps(payload)
+    finally:
+        bot.STATE.update(saved)
+
+
+def test_health_needs_a_fresh_trend_loop_and_hides_its_error_text(monkeypatch):
+    saved = _preserve_state(*HEALTH_KEYS, "trend_loop_error")
+    now = int(bot.time.time())
+    try:
+        bot.STATE.update({"snapshot": {"generated_at": now - 10}, "tactical_snapshot": {"generated_at": now - 10},
+                          "last_error": None, "tactical_last_error": None, "trend_loop_error": None})
+        monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: False)
+        payload = bot.APP.test_client().get("/").get_json()
+        assert payload["ok"] is False and payload["trend_loop_fresh"] is False
+        monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
+        bot.STATE["trend_loop_error"] = "TrendLoopDataError: mexc https://api.mexc.com/api/v3/klines?x=SECRET"
+        payload = bot.APP.test_client().get("/").get_json()
+        assert payload["ok"] is False and payload["trend_loop_last_error"] == "TrendLoopDataError"
+        assert "SECRET" not in json.dumps(payload) and payload["can_authorize_trade"] is False
+    finally:
+        bot.STATE.update(saved)
+
+
+def test_d1_command_and_panel_button_open_the_shadow_loop_report(monkeypatch):
+    assert bot._command("/d1") == "D1"
+    buttons = [b["callback_data"] for row in bot.panel_keyboard()["inline_keyboard"] for b in row]
+    assert "D1" in buttons
+    sent = []
+    monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append((text, kw)))
+    monkeypatch.setattr(bot, "TREND_LOOP_LOADED", threading.Event())
+    bot.handle("D1")
+    assert "yüklenemedi" in sent[0][0] and "pozisyonlar bilinmiyor" in sent[0][0]   # never "no positions"
+    bot.TREND_LOOP_LOADED.set()
+    bot.handle("D1")
+    text, kw = sent[1]
+    assert "D1 DÖNGÜ" in text and "emir yok" in text and kw["html_mode"] is True
+    assert "Döngü güncel değil" in text                                              # nothing decided yet
+
+
+def _tick_loop(tmp_path, monkeypatch, *, send):
+    loop = TrendLoop(TrendLedger(tmp_path / "ledger.jsonl"), market=None)
+    loop._record({"id": "NOTE:A", "event": "NOTE"}, "first")
+    loop._record({"id": "NOTE:B", "event": "NOTE"}, "second")
+    calls = []
+    monkeypatch.setattr(loop, "run_daily", lambda now: calls.append("daily"))
+    monkeypatch.setattr(loop, "check_stops", lambda now: calls.append("stops"))
+    monkeypatch.setattr(bot, "TREND_LOOP", loop)
+    monkeypatch.setattr(bot, "TREND_LOOP_LOADED", threading.Event())
+    monkeypatch.setattr(bot, "TOKEN", "token")
+    monkeypatch.setattr(bot, "CHAT_ID", "chat")
+    monkeypatch.setattr(bot, "_save_state", lambda: None)
+    monkeypatch.setattr(bot, "send", send)
+    return loop, calls
+
+
+def test_trend_loop_tick_delivers_in_order_and_keeps_a_failed_alert(tmp_path, monkeypatch):
+    saved = _preserve_state("trend_loop", "trend_loop_error")
+    sent, fail = [], {"second"}
+
+    def flaky(text, **kw):
+        if text in fail:
+            fail.discard(text)
+            raise RuntimeError("telegram_http_429:sendMessage")
+        sent.append(text)
+    try:
+        loop, calls = _tick_loop(tmp_path, monkeypatch, send=flaky)
+        bot.trend_loop_tick(1_790_000_000)
+        assert sent == ["first"] and [m["text"] for m in loop.outbox()] == ["second"]
+        assert calls == ["daily", "stops"] and bot.STATE["trend_loop_error"] is None
+        bot.trend_loop_tick(1_790_000_060)
+        assert sent == ["first", "second"] and loop.outbox() == []
+        restarted = TrendLoop(TrendLedger(tmp_path / "ledger.jsonl"), market=None)
+        assert restarted.outbox() == []                                  # deliveries are in the ledger
+    finally:
+        bot.STATE.update(saved)
+
+
+def test_a_failed_daily_decision_still_checks_stops_and_redacts_the_error(tmp_path, monkeypatch):
+    saved = _preserve_state("trend_loop", "trend_loop_error")
+    sent = []
+    try:
+        loop, calls = _tick_loop(tmp_path, monkeypatch, send=lambda text, **kw: sent.append(text))
+
+        def broken(now):
+            calls.append("daily")
+            raise RuntimeError("failed https://api.mexc.com/api/v3/klines?signature=SECRET")
+        monkeypatch.setattr(loop, "run_daily", broken)
+        bot.trend_loop_tick(1_790_000_000)
+        assert calls == ["daily", "stops"] and sent == ["first", "second"]
+        assert "SECRET" not in bot.STATE["trend_loop_error"] and "<url>" in bot.STATE["trend_loop_error"]
+        assert bot.STATE["trend_loop"]["positions"] == {}
+    finally:
+        bot.STATE.update(saved)
+
+
+def test_alerts_switched_off_are_recorded_as_not_sent(tmp_path, monkeypatch):
+    saved = _preserve_state("trend_loop", "trend_loop_error")
+    sent = []
+    try:
+        loop, _ = _tick_loop(tmp_path, monkeypatch, send=lambda text, **kw: sent.append(text))
+        monkeypatch.setattr(bot, "TREND_LOOP_ALERTS", False)
+        bot.trend_loop_tick(1_790_000_000)
+        assert sent == [] and loop.outbox() == []
+        rows = [json.loads(l) for l in (tmp_path / "ledger.jsonl").read_text().splitlines()]
+        assert [r["sent"] for r in rows if r["event"] == "DELIVERED"] == [False, False]
     finally:
         bot.STATE.update(saved)
 

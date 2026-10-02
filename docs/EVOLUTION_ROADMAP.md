@@ -276,6 +276,10 @@ güncellenenler belirtildi.
       - Giriş zamanı yine rastgeleden iyi değil. Getiri kanıtı yok; 2. yarıda
         döngü para kaybetti ama al-tut'tan çok daha az.
       - Asıl temiz test 2026-10'dan itibaren canlı gölge kayıt.
+    - **Canlı gölge kayıt (2026-10-02, kullanıcı onayıyla):** `/d1` ve giriş,
+      çıkış, acil stop bildirimleri; RİSK_AZALTIR etiketi; emir yok.
+      `docs/TREND_LOOP_LIVE.md`. Araştırmadan farklar orada listelendi
+      (MEXC verisi, perp şartı yok, 15 dakikalık stop kontrolü).
 12. ⏳ **Majör coin atlası, 2017-09 → 2024-08** — `docs/ATLAS.md`.
     - Ay ay piyasa, makro (FRED) ve takvim. Sinyal değil, açıklama.
     - Piyasa katmanı hazır (`research/atlas/market_monthly.csv`). En iyi 5
