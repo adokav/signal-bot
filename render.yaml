@@ -39,6 +39,18 @@ services:
       - key: TACTICAL_REJECTED_ALERTS_ENABLED
         value: "0"
 
+      # D1 trend loop, shadow record (docs/TREND_LOOP_LIVE.md): daily 00:00 UTC
+      # decisions on the majors, intraday acute stops, append-only ledger.
+      # Alerts carry the RİSK_AZALTIR label (user decision 2026-10-02); no orders.
+      - key: TREND_LOOP_ENABLED
+        value: "1"
+      - key: TREND_LOOP_ALERTS_ENABLED
+        value: "1"
+      - key: TREND_LOOP_LEDGER_FILE
+        value: /data/trend_loop_ledger.jsonl
+      - key: TREND_LOOP_STOP_INTERVAL_SECONDS
+        value: "300"
+
       # Exactly two MEXC opportunity engines
       - key: UNIFIED_ENGINE_ENABLED
         value: "1"
