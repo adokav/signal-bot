@@ -325,15 +325,18 @@ def test_factors_chosen_with_knowledge_of_the_window_get_a_forward_holdout():
 
 def test_a_daily_value_is_used_only_after_its_publication_lag():
     vix = [(date(2024, 3, 4), 20.0), (date(2024, 3, 5), 30.0)]            # Monday, Tuesday closes
-    assert atlas.known_at(vix, date(2024, 3, 5), atlas.AVAILABLE_LAG_DAYS["vix"]) == 20.0   # Tuesday 00:00 UTC
-    assert atlas.known_at(vix, date(2024, 3, 6), atlas.AVAILABLE_LAG_DAYS["vix"]) == 30.0
-    assert atlas.known_at(vix, date(2024, 3, 4), atlas.AVAILABLE_LAG_DAYS["vix"]) is None    # not yet closed
-    brent = [(date(2024, 3, 4), 80.0)]
-    lag = atlas.AVAILABLE_LAG_DAYS["brent"]
-    assert atlas.known_at(brent, date(2024, 3, 4) + timedelta(days=lag - 1), lag) is None     # not yet published
-    assert atlas.known_at(brent, date(2024, 3, 4) + timedelta(days=lag), lag) == 80.0
-    assert atlas.known_at(brent, date(2024, 3, 4) + timedelta(days=lag + 8), lag) is None     # stale, not carried
-    assert set(atlas.AVAILABLE_LAG_DAYS) == set(atlas.FRED_SERIES)
+    lag = atlas.AVAILABLE_LAG_DAYS["vix"]
+    assert atlas.known_at(vix, date(2024, 3, 5), lag) == 20.0               # Tuesday 00:00 UTC
+    assert atlas.known_at(vix, date(2024, 3, 6), lag) == 30.0
+    assert atlas.known_at(vix, date(2024, 3, 4), lag) is None               # not yet closed
+    assert atlas.known_at(vix, date(2024, 3, 5) + timedelta(days=lag + 8), lag) is None   # stale, not carried
+
+
+def test_the_daily_table_holds_only_exchange_closes_never_corrected_releases():
+    assert atlas.DAILY_SERIES == ("vix", "vix3m", "nasdaq", "sp500")
+    corrected = {"fed_assets_musd", "tga_busd", "rrp_busd", "us_2y", "us_10y", "us_10y_real", "eur_usd", "usd_cny",
+                 "brent"}
+    assert not corrected & set(atlas.DAILY_COLUMNS)                         # FRED's current vintage could leak them
 
 
 def test_the_daily_table_covers_every_day_and_refuses_a_foreign_schema(tmp_path):
@@ -346,7 +349,7 @@ def test_the_daily_table_covers_every_day_and_refuses_a_foreign_schema(tmp_path)
     for r in rows:                                                      # never a value before its lag
         age = (date.fromisoformat(r["date"]) - origin).days
         assert r["vix"] == age - atlas.AVAILABLE_LAG_DAYS["vix"]
-        assert r["brent"] == age - atlas.AVAILABLE_LAG_DAYS["brent"]
+        assert "brent" not in r
     path = tmp_path / "daily.csv"
     atlas.write_macro(rows, path)
     assert atlas.read_daily(path)["2024-08-31"]["vix"] is not None
@@ -357,3 +360,23 @@ def test_the_daily_table_covers_every_day_and_refuses_a_foreign_schema(tmp_path)
     with pytest.raises(SystemExit, match="schema"):
         atlas.read_daily(tmp_path / "old.csv")
     assert atlas.confirmation_from("vix3m") == "2026-10" and atlas.confirmation_from("vix") == "2024-09"
+
+
+def test_table_readers_refuse_duplicates_and_non_finite_values(tmp_path):
+    first = date(2017, 9, 1)
+    series = {name: [(first - timedelta(days=30) + timedelta(days=k), 1.0) for k in range(2700)]
+              for name in atlas.FRED_SERIES}
+    daily = atlas.macro_daily(series)
+    atlas.write_macro(daily + [dict(daily[-1], vix=99.0)], tmp_path / "dup.csv")
+    with pytest.raises(SystemExit, match="duplicate date"):
+        atlas.read_daily(tmp_path / "dup.csv")
+    atlas.write_macro([dict(daily[0], vix=float("nan"))] + daily[1:], tmp_path / "nan.csv")
+    with pytest.raises(SystemExit, match="non-finite"):
+        atlas.read_daily(tmp_path / "nan.csv")
+    path, rows = _full_macro(tmp_path)
+    atlas.write_macro(rows + [rows[-1]], tmp_path / "dup_month.csv")
+    with pytest.raises(SystemExit, match="duplicate month"):
+        atlas.read_macro(tmp_path / "dup_month.csv")
+    atlas.write_macro([dict(rows[0], vix=float("inf"))] + rows[1:], tmp_path / "inf.csv")
+    with pytest.raises(SystemExit, match="non-finite"):
+        atlas.read_macro(tmp_path / "inf.csv")

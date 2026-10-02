@@ -119,18 +119,12 @@ H.4.1 kayıtlarında nadir düzeltmeler olabilir. Bu küçük bir artık risktir
 
 1. **Aylık tablo** (`--out`). Ay sonu değerleri; yalnızca açıklama içindir. Gözlem tarihi kullanılır, yayımlanma tarihi değil.
 2. **Günlük tablo** (`--daily-out`). Her gün için, o günün 00:00 UTC'sinde **bilinen** değerler. Günlük kurallar bu tabloyla test edilir.
-   - Bir gözlem, yayımlanma gecikmesi geçmeden kullanılmaz (`AVAILABLE_LAG_DAYS`). Gecikmeler temkinli seçildi:
-
-     | Seri | Gecikme (gün) |
-     |---|---:|
-     | VIX, VIX3M, Nasdaq, S&P 500, RRP, Fed faizi | 1 |
-     | Fed bilançosu, TGA | 2 |
-     | Faizler (H.15) | 4 |
-     | Kurlar (H.10, haftalık yayın) | 8 |
-     | Brent (EIA, haftalık yayın) | 10 |
-
-   - Gecikmesinden sonra 7 günden eski bir değer eksik sayılır; bir sonraki güne taşınmaz.
-   - `read_daily`, şeması farklı ya da bir günü eksik olan bir tabloyu reddeder.
+   - **Yalnızca borsa kapanışları:** VIX, VIX3M, Nasdaq, S&P 500. Bunlar yayımlandıklarında kesinleşmiş olur.
+   - **Sonradan düzeltilebilen yayınlar günlük tabloda yoktur:** H.4.1 (Fed bilançosu, TGA), H.15 (faizler), H.10 (kurlar), EIA (Brent) ve NY Fed (RRP).
+     - FRED her zaman serinin güncel sürümünü verir. Bu yayınlar günlük tabloya girseydi, bir geri test bir düzeltmeyi yayımlanmadan önce görebilirdi.
+     - Bu seriler yalnızca aylık ve açıklama amaçlı kalır. Günlük kullanılmaları için her test anı için ALFRED sürümleri gerekir.
+   - Bir kapanış ertesi gün 00:00 UTC'den itibaren kullanılır (`AVAILABLE_LAG_DAYS`). Bu gecikmeden sonra 7 günden eski bir değer eksik sayılır; bir sonraki güne taşınmaz.
+   - `read_daily` ve `read_macro` şu tabloları reddeder: şeması farklı olan, bir günü ya da ayı eksik olan, aynı tarihi iki kez içeren, sayı olmayan ya da sonsuz (NaN/inf) değer içeren.
 
 **Türetilen alanlar:**
 - **Net likidite** = Fed bilançosu − TGA − RRP. Birimler milyar $'a çevrilir.

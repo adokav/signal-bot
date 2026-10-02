@@ -4,8 +4,8 @@ name: atlas_macro
 # that are not revised after publication (rates, real rate, Fed funds target,
 # Fed balance sheet, Treasury account, reverse repo, EUR/USD, USD/CNY, Brent,
 # VIX, VIX3M, equities) for 2016..2024-08 and writes the monthly macro table
-# and a daily table of each series as known at 00:00 UTC (after its
-# publication lag).
+# and a daily table of the exchange closes (VIX, VIX3M, Nasdaq, S&P 500) as
+# known at 00:00 UTC of each day.
 # Nothing after 2024-08-31 is requested (the 2024-09..2026-08 confirmation window stays
 # sealed); revised series stay out, as their current vintage would carry
 # revisions published inside it. No API key, no secrets.

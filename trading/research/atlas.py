@@ -79,19 +79,17 @@ MACRO_COLUMNS = ("month", *FRED_SERIES, "net_liquidity_busd", "curve_10y_2y", "f
 # month given here on (a forward holdout). Every other column keeps 2024-09.
 CONFIRMATION_FROM_DEFAULT = "2024-09"
 CONFIRMATION_FROM = {"brent": "2026-10", "usd_cny": "2026-10", "vix3m": "2026-10"}
-# Conservative publication lags, in days: an observation dated d is used from
-# 00:00 UTC of d + lag on (the daily table), never before it was published.
-AVAILABLE_LAG_DAYS = {
-    "us_2y": 4, "us_10y": 4, "us_10y_real": 4,      # H.15: next business day, Friday's on Monday
-    "fed_upper": 1,                                  # announced before it takes effect
-    "fed_assets_musd": 2, "tga_busd": 2,             # Wednesday levels, published Thursday afternoon (ET)
-    "rrp_busd": 1,                                   # results the same afternoon (ET)
-    "eur_usd": 8, "usd_cny": 8,                      # H.10: weekly release on Monday for the previous week
-    "brent": 10,                                     # EIA spot prices: weekly release
-    "vix": 1, "vix3m": 1, "nasdaq": 1, "sp500": 1,   # US closes, before 00:00 UTC of the next day
-}
+# The daily table holds only exchange closes (CBOE, Nasdaq, S&P DJI), which are
+# final when published. Releases that are sometimes corrected later (H.4.1,
+# H.15, H.10, EIA, NY Fed) would let a replay see a correction before it was
+# published, since FRED serves the current vintage: they stay monthly and
+# descriptive until they come from ALFRED vintages at each replay cut.
+# Lag in days: an observation dated d is used from 00:00 UTC of d + lag on
+# (US closes come before 00:00 UTC of the next day).
+AVAILABLE_LAG_DAYS = {"vix": 1, "vix3m": 1, "nasdaq": 1, "sp500": 1}
+DAILY_SERIES = tuple(AVAILABLE_LAG_DAYS)
 DAILY_STALE_DAYS = 7                   # beyond its lag, an observation older than this is missing, not carried
-DAILY_COLUMNS = ("date", *FRED_SERIES)
+DAILY_COLUMNS = ("date", *DAILY_SERIES)
 REVISED_SERIES = frozenset({"M2SL", "DTWEXBGS", "GDP", "GDPC1", "CPIAUCSL", "PCEPI", "PAYEMS", "UNRATE", "INDPRO"})
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 MAX_STALE_DAYS = 40                    # a month-end value older than this is missing, not carried
@@ -239,10 +237,24 @@ def macro_daily(series: Mapping[str, Sequence[tuple[date, float]]], *, start: in
     for k in range(days):
         day = first + timedelta(days=k)
         row: dict[str, Any] = {"date": day.isoformat()}
-        for name in FRED_SERIES:
+        for name in DAILY_SERIES:
             row[name] = known_at(series.get(name, ()), day, AVAILABLE_LAG_DAYS[name])
         out.append(row)
     return out
+
+
+def _number(value: str, where: str) -> float | None:
+    """A table cell: missing stays None; a non-finite or unreadable number refuses the table."""
+
+    if value in {"", "None"}:
+        return None
+    try:
+        number = float(value)
+    except ValueError:
+        raise SystemExit(f"{where}: not a number") from None
+    if not math.isfinite(number):
+        raise SystemExit(f"{where}: non-finite value")
+    return number
 
 
 def read_daily(path: Path) -> dict[str, dict[str, Any]]:
@@ -254,7 +266,9 @@ def read_daily(path: Path) -> dict[str, dict[str, Any]]:
         if list(reader.fieldnames or ()) != list(DAILY_COLUMNS):
             raise SystemExit(f"{path}: daily table schema does not match this code; rerun the atlas_macro workflow")
         for row in reader:
-            out[row["date"]] = {k: (v if k == "date" else (None if v in {"", "None"} else float(v)))
+            if row["date"] in out:
+                raise SystemExit(f"{path}: duplicate date {row['date']}")
+            out[row["date"]] = {k: (v if k == "date" else _number(v, f"{path} {row['date']} {k}"))
                                 for k, v in row.items()}
     first = datetime.fromtimestamp(ATLAS_START, tz=timezone.utc).date()
     expected = [(first + timedelta(days=k)).isoformat() for k in range((ATLAS_END - ATLAS_START) // DAY)]
@@ -291,7 +305,9 @@ def read_macro(path: Path) -> dict[str, dict[str, Any]]:
             raise SystemExit(f"{path}: macro table schema does not match this code "
                              f"(missing {missing}, unexpected {extra}); rerun the atlas_macro workflow")
         for row in reader:
-            out[row["month"]] = {k: (None if v in {"", "None"} else (v if k == "month" else float(v)))
+            if row["month"] in out:
+                raise SystemExit(f"{path}: duplicate month {row['month']}")
+            out[row["month"]] = {k: (v if k == "month" else _number(v, f"{path} {row['month']} {k}"))
                                  for k, v in row.items()}
     expected = [m.strftime("%Y-%m") for m in month_ends()]
     if list(out) != expected:
