@@ -296,48 +296,68 @@ BTC'nin ay getirisi ile aynı aydaki makro değişim arasındaki korelasyon:
 | EUR/USD | +0.07 | +0.14 | +0.24 | +0.15 |
 
 - Majör sepette de aynı desen var. Sepet–Nasdaq korelasyonu dönemlere göre −0.14 (17 ay), +0.41 ve +0.63.
-- **Kripto 2020'den önce makrodan bağımsız hareket ediyordu.** Korelasyonlar sıfıra yakındı.
-- 2020'den sonra kripto aynı ay içinde Nasdaq, net likidite ve reel faizle birlikte hareket etmeye başladı. 2022–24'te bu bağ en güçlü hâlindeydi.
+- **2020'den önce aynı ay içinde doğrusal bir birlikte hareket görülmedi.**
+  - Korelasyonlar sıfıra yakındı.
+  - Bu bir bağımsızlık kanıtı değildir. 27 ay (sepette 17 ay) düşük güçtür. Gecikmeli ya da doğrusal olmayan bir bağ bu ölçüyle görülmez.
+- 2020'den sonra kripto aynı ay içinde Nasdaq, net likidite ve reel faizle belirgin şekilde birlikte hareket etti. 2022–24'te bu bağ en güçlü hâlindeydi.
 - **Bu, aynı ayın hareketidir; ne geleceğini söylemez.**
 - 30 aylık bir dönemde ±0.36'nın altındaki korelasyonlar gürültü sınırının içindedir.
 
-### Ay başında bilinen makro durum → o ayın getirisi
+### Ay başında yayımlanmış makro durum → o ayın getirisi
 
-Durum, önceki ayın değişiminin yönüdür (arttı ya da azaldı). Yönler eşik seçilmeden ayrıldı.
+Bu tablo yalnızca 00:00 UTC'de ayın 1'inde kesin olarak yayımlanmış bilgiyi kullanır.
 
-| Önceki ay | Sepet ort. | Sepet medyan | Pozitif ay | BTC ort. |
+**Hangi değişim kullanıldı:**
+- **Net likidite, reel faiz ve dolar:** İki ay önceki ayın değişimi (m−2).
+  - Bu seriler gecikmeyle yayımlanır:
+    - H.4.1 (Fed bilançosu, TGA): perşembe.
+    - H.15 (faizler): ertesi iş günü.
+    - H.10 (kurlar) ve EIA: haftalık; bir haftaya kadar gecikebilir.
+  - Yani önceki ayın (m−1) son değerleri, ayın 1'inde henüz yayımlanmamış olabilir.
+  - m−2'nin değişimi ise ayın başında her zaman yayımlanmıştır.
+- **Nasdaq:** Önceki ayın değişimi (m−1). Borsa kapanışı olduğu için ayın 1'inde 00:00 UTC'de bilinir.
+- **Fed:** Önceki 3 ayda yürürlüğe giren karar. Karar açıklandığı anda bilinir.
+
+**Gruplar:**
+- Artış (> 0) ve azalış (< 0) ayrı tutulur.
+- Değişmeyen aylar ayrı sayılır. Yalnızca reel faizde 2 ay vardı (2019-04, 2019-12); tabloya alınmadı.
+- Eşik seçilmedi.
+
+| Ay başında yayımlanmış durum | Sepet ort. | Sepet medyan | Pozitif ay | BTC ort. |
 |---|---:|---:|---:|---:|
-| Net likidite arttı | +%5.9 | −%2.5 | 17 / 39 | +%6.0 |
-| Net likidite azaldı | +%1.1 | −%0.7 | 16 / 34 | +%3.8 |
-| Reel faiz arttı | +%8.9 | +%4.0 | 21 / 34 | +%9.5 |
-| Reel faiz düştü | −%0.9 | −%4.6 | 12 / 39 | +%0.8 |
-| Dolar güçlendi | +%6.6 | +%1.5 | 23 / 42 | +%6.9 |
-| Dolar zayıfladı | −%0.3 | −%7.7 | 10 / 31 | +%2.4 |
-| Nasdaq yükseldi | +%4.3 | −%2.4 | 19 / 48 | +%4.2 |
-| Nasdaq düştü | +%2.4 | +%1.3 | 14 / 25 | +%6.3 |
+| Net likidite arttı (m−2) | +%9.4 | +%0.5 | 19 / 38 | +%8.2 |
+| Net likidite azaldı (m−2) | −%2.6 | −%4.3 | 14 / 35 | +%0.2 |
+| Reel faiz arttı (m−2) | +%1.8 | −%0.8 | 16 / 34 | +%3.0 |
+| Reel faiz düştü (m−2) | +%5.6 | −%0.7 | 16 / 37 | +%5.2 |
+| Dolar zayıfladı, EUR/USD arttı (m−2) | +%4.1 | −%0.7 | 14 / 31 | +%2.7 |
+| Dolar güçlendi, EUR/USD düştü (m−2) | +%3.3 | −%1.1 | 19 / 42 | +%5.6 |
+| Nasdaq yükseldi (m−1) | +%4.3 | −%2.4 | 19 / 48 | +%4.2 |
+| Nasdaq düştü (m−1) | +%2.4 | +%1.3 | 14 / 25 | +%6.3 |
 | Son 3 ayda Fed faiz artırdı | −%4.8 | −%4.6 | 9 / 27 | −%2.5 |
 | Son 3 ayda Fed faiz indirdi | +%6.0 | +%0.4 | 4 / 8 | +%5.7 |
 | Son 3 ayda Fed hamlesi yok | +%9.2 | +%1.5 | 20 / 38 | +%12.0 |
 
-**Yayın gecikmesi:** Ay sonu değerleri ay başında hemen değil, birkaç gün içinde bilinir. Bu yüzden tablo açıklama içindir; günlük bir kural için kullanılamaz.
-- H.4.1 (Fed bilançosu, TGA) perşembe günü yayımlanır.
-- Faizler (H.15) ertesi iş günü yayımlanır.
-- Kurlar (H.10) ve Brent (EIA) haftalık yayımlanır; bir haftaya kadar gecikebilir.
-
 **Okuma:**
-- **Ay başındaki makro durum, ertesi ayı hikâyenin söylediği yönde tahmin etmiyor.**
-  - İki durumda sonuç hikâyenin tersine çıktı. Reel faizin arttığı ve doların güçlendiği aylardan sonra sepet daha iyi gitti.
-  - Bu büyük olasılıkla az sayıda bağımsız bölümün ürettiği bir rastlantıdır, ters bir etki değil.
-  - AGENTS.md §6, hikâye makul göründü diye bir faktöre yön atanmasını tam da bu yüzden yasaklar.
-- **Fed artırımlarından sonraki 3 ay zayıf** (sepet ortalaması −%4.8, 27 ayın 9'u pozitif).
+- **Bu tablonun ilk sürümü yanlıştı.**
+  - İlk sürüm, önceki ayın (m−1) değişimini "ay başında bilinen" saymıştı. Oysa bu değerlerin bir kısmı ancak ayın içinde yayımlanıyordu.
+  - O sürümde reel faiz ve dolar hikâyenin tersine işaret ediyordu. Yayın gecikmesine uyan bu sürümde o fark kayboldu: dolarda fark yok, reel faizde yalnızca ortalamalar ayrılıyor, medyanlar aynı.
+  - Aynı bakışın, birkaç günlük bilgi farkıyla bu kadar değişmesi, bu bakışların ne kadar kırılgan olduğunu gösterir.
+- **Net likidite hikâyenin yönünde görünüyor.**
+  - Arttıktan sonra sepet ortalaması +%9.4, azaldıktan sonra −%2.6.
+  - Ama bu, aynı 84 aya yapılan birçok bakıştan biridir.
+  - Aylar birkaç rejimde kümeleniyor: 2020–21 bol para ve 2022 sıkılaşma. Bağımsız gözlem sayısı ay sayısından çok azdır.
+  - Artıştan sonra ayların yarısı (19 / 38), azalıştan sonra %40'ı (14 / 35) pozitif. Ortalamalar arasındaki fark büyük ölçüde birkaç uç aydan geliyor.
+  - **Kanıt değildir.**
+- **Fed artırımlarından sonraki 3 ay zayıf.**
+  - Sepet ortalaması −%4.8; 27 ayın 9'u pozitif.
   - Ama bu 27 ay aslında iki bölümdür: 2018 ve 2022.
   - 2023'teki artırımlar sırasında kripto yükseldi.
   - İki bölüm kanıt değildir.
-- **Uç aylar:** En kötü 5 sepet ayının 3'ünden önce net likidite sert düşmüştü (2022-05 öncesi −402, 2022-01 öncesi −359, 2022-04 öncesi −144 milyar $).
-  - Bu üç ayın hepsi 2022'dir, yani tek bir bölümdür.
-  - 2018-11 ve 2020-03'ten önce likidite yataydı.
-  - En iyi 5 ayın öncesinde ortak bir makro durum yok. Örneğin ay başındaki VIX 13 ile 38 arasındaydı.
-  - BTC trend durumu uç ayları makrodan daha iyi ayırdı: en iyi 5 ayın hepsi YÜKSELİŞ'ten sonra geldi, en kötü 5 ayın hiçbiri YÜKSELİŞ'ten sonra gelmedi.
+- **Uç aylarda ortak bir makro durum yok.**
+  - En kötü 5 sepet ayından önce (m−2) net likidite 3'ünde düşmüş, 2'sinde artmıştı.
+  - En iyi 5 ayın 4'ünden önce artmış, 1'inden önce düşmüştü.
+  - Ay sonundaki VIX, en iyi aylardan önce 13 ile 38 arasındaydı.
+- **BTC trend durumu uç ayları makrodan daha iyi ayırdı.** En iyi 5 ayın hepsi YÜKSELİŞ'ten sonra geldi; en kötü 5 ayın hiçbiri YÜKSELİŞ'ten sonra gelmedi.
 
 ### VIX stres freni: desteklenmedi
 
@@ -368,6 +388,10 @@ Durum, önceki ayın değişiminin yönüdür (arttı ya da azaldı). Yönler e�
 ### Makro katmanın kararı: aday yok
 
 - Hiçbir makro faktör ön-kayda alınmadı.
+  - Net likiditenin yayın gecikmesine uyan sürümü hikâyenin yönünde görünüyor.
+  - Ama bu, birçok bakıştan biridir ve birkaç rejime dayanır.
+  - Aynı bakışın gecikmeye uymayan ilk sürümü farklı bir tablo çiziyordu.
+  - Aday sayılmadı. Bir hipoteze dönüşecekse önce ön-kayda girer ve seçimden sonraki veride test edilir.
 - Makro, atlasta bağlam olarak kalır; sinyal değildir ve emir yetkisi yoktur.
 - Atlasın tekrar eden tek deseni hâlâ fiyattan geliyor: uç aylarda BTC trend durumu. Bu desenden çıkan "altcoin girişini BTC YÜKSELİŞ'teyken yap" önerisi geçmiş veride değil, 2026-10'dan sonraki canlı gölge kayıtta test edilmek üzere önerildi. Kullanıcı onayı bekliyor.
 - **Neden mühürlü pencerede değil:**

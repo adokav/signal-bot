@@ -288,11 +288,13 @@ güncellenenler belirtildi.
       söylemiyor. Keşiftir, kanıt değil.
     - **Makro katman** (`research/atlas/macro_monthly.csv`,
       `macro_daily.csv`, 2026-10-03): Makro büyük rejimleri geriye dönük
-      açıklıyor (2020–21 bol para, 2022 sıkılaşma), ama ay başındaki makro
-      durum ertesi ayı tahmin etmiyor; bazı yönler hikâyenin tersine çıktı.
-      Kripto 2020'den sonra Nasdaq, likidite ve reel faizle aynı ay içinde
-      birlikte hareket etmeye başladı. VIX stres freni desteklenmedi. **Aday
-      yok;** hiçbir makro faktör ön-kayda alınmadı.
+      açıklıyor (2020–21 bol para, 2022 sıkılaşma). Ay başında yayımlanmış
+      makro durum ertesi ayı güvenilir biçimde ayırmıyor; yalnızca net
+      likidite hikâyenin yönünde görünüyor, o da birkaç rejime dayanıyor.
+      2020'den sonra kripto Nasdaq, likidite ve reel faizle aynı ay içinde
+      belirgin şekilde birlikte hareket etti; öncesinde böyle bir bağ
+      görülmedi. VIX stres freni desteklenmedi. **Aday yok;** hiçbir makro
+      faktör ön-kayda alınmadı.
     - Atlastan çıkan tek öneri fiyat tabanlı: altcoin girişini BTC
       YÜKSELİŞ'teyken yapmak. Canlı gölge kayıtta 2026-10'dan sonra ileriye
       dönük test edilmesi önerildi; kullanıcı onayı bekliyor.
