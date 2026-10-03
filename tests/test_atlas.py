@@ -390,3 +390,25 @@ def test_a_series_in_the_wrong_unit_refuses_the_macro_table():
         atlas.check_units({"tga_musd": [(date(2024, 1, 31), 750.0)]})          # billions passed as millions
     with pytest.raises(SystemExit, match="no plausible range"):
         atlas.check_units({"m2_busd": [(date(2024, 1, 31), 21_000.0)]})
+
+
+def test_the_committed_macro_tables_are_complete_and_in_their_units():
+    """research/atlas tables from the atlas_macro run after the TGA unit fix (run 2, 2026-10-03)."""
+
+    import csv
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "research" / "atlas"
+    monthly = atlas.read_macro(root / "macro_monthly.csv")
+    daily = atlas.read_daily(root / "macro_daily.csv")
+    with (root / "market_monthly.csv").open(encoding="utf-8") as handle:
+        market_months = [row["month"] for row in csv.DictReader(handle)]
+    assert sorted(monthly) == market_months and len(monthly) == 84
+    assert min(daily) == "2017-09-01" and max(daily) == "2024-08-31"            # nothing from the sealed window
+    for month, row in monthly.items():
+        for name, (lo, hi) in atlas.UNIT_BOUNDS.items():
+            assert row[name] is None or lo <= row[name] <= hi, (month, name)
+        if None not in (row["fed_assets_musd"], row["tga_musd"], row["rrp_busd"]):
+            expected = (row["fed_assets_musd"] - row["tga_musd"]) / 1000.0 - row["rrp_busd"]
+            assert row["net_liquidity_busd"] == pytest.approx(expected, abs=0.01)
+            assert 2_000 < row["net_liquidity_busd"] < 9_000, month               # billions, not the TGA mix-up
