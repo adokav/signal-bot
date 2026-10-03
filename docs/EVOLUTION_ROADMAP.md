@@ -280,16 +280,24 @@ güncellenenler belirtildi.
       çıkış, acil stop bildirimleri; RİSK_AZALTIR etiketi; emir yok.
       `docs/TREND_LOOP_LIVE.md`. Araştırmadan farklar orada listelendi
       (MEXC verisi, perp şartı yok, 15 dakikalık stop kontrolü).
-12. ⏳ **Majör coin atlası, 2017-09 → 2024-08** — `docs/ATLAS.md`.
+12. ✅ **Majör coin atlası, 2017-09 → 2024-08** — `docs/ATLAS.md`.
     - Ay ay piyasa, makro (FRED) ve takvim. Sinyal değil, açıklama.
-    - Piyasa katmanı hazır (`research/atlas/market_monthly.csv`). En iyi 5
+    - **Piyasa katmanı** (`research/atlas/market_monthly.csv`): En iyi 5
       sepet ayının hepsinden önce BTC YÜKSELİŞ'teydi; en kötü 5 ayın
       hiçbirinden önce YÜKSELİŞ'te değildi. Tipik ayda trend durumu bir şey
-      söylemiyor. Keşiftir, kanıt değil. Makro katman, iş akışı çalışınca
-      eklenecek.
-    - Hipotezler kullanıcıyla birlikte çıkarılacak ve önce ön-kayda girecek.
-    - Ardından "trend bozulunca çık" döngüsüyle birlikte, mühürlü 2024-09 →
-      2026-08 penceresinde bir kez test edilecek.
+      söylemiyor. Keşiftir, kanıt değil.
+    - **Makro katman** (`research/atlas/macro_monthly.csv`,
+      `macro_daily.csv`, 2026-10-03): Makro büyük rejimleri geriye dönük
+      açıklıyor (2020–21 bol para, 2022 sıkılaşma). Ay başında yayımlanmış
+      makro durum ertesi ayı güvenilir biçimde ayırmıyor; yalnızca net
+      likidite hikâyenin yönünde görünüyor, o da birkaç rejime dayanıyor.
+      2020'den sonra kripto Nasdaq, likidite ve reel faizle aynı ay içinde
+      belirgin şekilde birlikte hareket etti; öncesinde böyle bir bağ
+      görülmedi. VIX stres freni desteklenmedi. **Aday yok;** hiçbir makro
+      faktör ön-kayda alınmadı.
+    - Atlastan çıkan tek öneri fiyat tabanlı: altcoin girişini BTC
+      YÜKSELİŞ'teyken yapmak. Canlı gölge kayıtta 2026-10'dan sonra ileriye
+      dönük test edilmesi önerildi; kullanıcı onayı bekliyor.
 
 ## Kesin çizgiler
 
