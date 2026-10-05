@@ -39,6 +39,12 @@ LISTINGS_LIMIT = 200              # newest coins read per scan (one CMC credit)
 RECHECK_SECONDS = 6 * HOUR        # contract powers and liquidity locks can change: re-check
 MAX_CHECKS_PER_SCAN = 40          # security look-ups per scan (provider rate limits)
 OUTCOME_DAYS = (7, 30, 90)
+OUTCOME_TOLERANCE_SECONDS = DAY   # a horizon is measured within a day of it, or it is MISSED (never backfilled)
+# Every field that can raise a red flag must be present before its group can pass.
+SELLABILITY_FIELDS = ("is_honeypot", "cannot_sell_all", "buy_tax", "sell_tax", "slippage_modifiable",
+                      "personal_slippage_modifiable")
+POWER_FIELDS = ("is_open_source", "is_mintable", "owner_change_balance", "hidden_owner",
+                "can_take_back_ownership", "selfdestruct")
 KEEP_PER_VERDICT = 20             # cards kept in the bot state per verdict (newest first); counts cover all
 SCHEMA = "new-coins/v1"
 
@@ -89,7 +95,7 @@ TRIAL_FAMILY = "new_coin_security_screen_forward"
 TRIAL_DATASET = {"source": "coinmarketcap listings/latest by date_added; GoPlus (EVM), RugCheck (Solana), "
                            "DexScreener; outcomes from CoinMarketCap quotes",
                  "forward_from": "2026-10-05", "kind": "live forward record (/data/new_coins_ledger.jsonl)"}
-TRIAL = "71a4ac3276e13694"
+TRIAL = "3deff6cb87ad4e38"
 
 
 def trial_params() -> dict[str, Any]:
@@ -103,14 +109,19 @@ def trial_params() -> dict[str, Any]:
                        "lp_lock_warn": str(LP_LOCK_WARN), "liquidity_fail_usd": LIQUIDITY_FAIL_USD,
                        "liquidity_warn_usd": LIQUIDITY_WARN_USD, "young_pool_seconds": YOUNG_POOL_SECONDS,
                        "no_sells_min_buys": NO_SELLS_MIN_BUYS, "solana_top10": "WARN only; FAIL from RugCheck risks"},
-        "outcome_days": list(OUTCOME_DAYS), "no_quote_after_seconds": DAY,
+        "required_fields": {"sellability": list(SELLABILITY_FIELDS), "powers": list(POWER_FIELDS),
+                            "holders": "at least one counted holder"},
+        "outcome_days": list(OUTCOME_DAYS),
+        "outcome_rule": "price measured within 1 day after the horizon; past that the horizon is MISSED, or "
+                        "NO_QUOTE if CMC was asked inside the window and had no price; never backfilled",
+        "outcome_tolerance_seconds": OUTCOME_TOLERANCE_SECONDS,
         "evaluation": {
             "not_before": "2027-04-05",
             "unit": "coin, by its verdict at first sight (FIRST_SEEN)",
             "primary": "collapse rate at 30 days: share with a 30-day return <= -90% or NO_QUOTE",
             "compare": "AGIR_RISK minus BAYRAK_YOK; VERI_EKSIK reported separately",
             "ci": "95% bootstrap over ISO weeks of first sight, 2000 draws, seed 0",
-            "min_per_group": 30, "max_missing_outcomes": 0.2,
+            "min_per_group": 30, "max_missing_outcomes": 0.2, "missing": "MISSED outcomes (NO_QUOTE is not missing)",
             "decisions": {"SCREEN_SEPARATES": "difference > 0 and the interval excludes 0",
                           "NO_SEPARATION": "the interval includes 0",
                           "REVERSED": "difference < 0 and the interval excludes 0",
@@ -214,8 +225,8 @@ def parse_listing(row: Any, *, now: int) -> NewCoin | None:
     except (KeyError, TypeError, ValueError):
         return None
     added = _epoch(row.get("date_added"))
-    if added is None or added > now + 300:
-        return None
+    if added is None or added > now:
+        return None                                    # not yet added as of now: never seen early
     platform = row.get("platform") if isinstance(row.get("platform"), Mapping) else None
     chain = chain_of(platform)
     usd = ((row.get("quote") or {}).get("USD") or {}) if isinstance(row.get("quote"), Mapping) else {}
@@ -452,12 +463,14 @@ def screen_evm(card: Card, entry: Mapping[str, Any] | None) -> None:
                               ("trading_cooldown", WARN, "işlem bekleme süresi var")):
         if _flag(entry.get(key)):
             card.add(SELLABILITY, status, text)
-    if honeypot is None or sell_tax is None:
+    parsed = {"buy_tax": buy_tax, "sell_tax": sell_tax,
+              **{k: _flag(entry.get(k)) for k in SELLABILITY_FIELDS if k not in ("buy_tax", "sell_tax")}}
+    if any(parsed[k] is None for k in SELLABILITY_FIELDS):
         card.add(SELLABILITY, UNKNOWN, "satılabilirlik doğrulanamadı")
-    elif not honeypot and not cannot_sell:
-        card.add(SELLABILITY, PASS, f"honeypot yok, vergi {_pct(buy_tax or Decimal(0))}/{_pct(sell_tax)}")
+    elif not card.groups.get(SELLABILITY):
+        card.add(SELLABILITY, PASS, f"honeypot yok, vergi {_pct(buy_tax)}/{_pct(sell_tax)}")
 
-    required = {k: _flag(entry.get(k)) for k in ("is_open_source", "is_mintable", "owner_change_balance")}
+    required = {k: _flag(entry.get(k)) for k in POWER_FIELDS}
     if required["is_open_source"] is False:
         card.add(POWERS, FAIL, "kaynak kodu doğrulanmamış")
     for key, status, text in (("is_mintable", FAIL, "yeni token basılabilir"),
@@ -484,7 +497,7 @@ def screen_evm(card: Card, entry: Mapping[str, Any] | None) -> None:
                    and str(h.get("address") or "").lower() not in BURN_ADDRESSES | pairs
                    and not (_flag(h.get("is_contract")) and h.get("tag"))]
         shares = [_share(h.get("balance"), total) for h in counted[:10]]
-        if any(s is None for s in shares):
+        if not shares or any(s is None for s in shares):
             card.add(HOLDERS, UNKNOWN, "cüzdan payları okunamadı")
         else:
             _holder_findings(card, sum(shares, Decimal(0)), "havuz, kilitli ve yakılmış hesaplar hariç")
@@ -556,7 +569,7 @@ def screen_solana(card: Card, report: Mapping[str, Any] | None) -> None:
         counted = [h for h in holders if isinstance(h, Mapping)
                    and not ({str(h.get("owner") or ""), str(h.get("address") or "")} & pools)]
         shares = [_share(h.get("amount"), supply) for h in counted[:10]]
-        if any(s is None for s in shares):
+        if not shares or any(s is None for s in shares):
             card.add(HOLDERS, UNKNOWN, "cüzdan payları okunamadı")
         else:
             top10 = sum(shares, Decimal(0))
@@ -814,30 +827,48 @@ class NewCoinsScanner:
         self._verdicts[coin.cmc_id] = summary["verdict"]
 
     def record_outcomes(self, now: int) -> int:
-        """Price 7, 30 and 90 days after first sight; a coin CMC no longer quotes is NO_QUOTE, not zero."""
+        """Price 7, 30 and 90 days after first sight, measured within a day of each horizon.
 
-        first, done = {}, set()
+        A horizon is never filled with a later price: past its tolerance it is
+        MISSED (explicitly missing), or NO_QUOTE when CoinMarketCap was asked
+        inside the window and had no price (a QUOTE_GAP record proves the
+        attempt), never zero.
+        """
+
+        first, done, gaps = {}, set(), set()
         for record in self.ledger.records():
             if record.get("event") == "FIRST_SEEN" and record.get("schema") == SCHEMA:
                 first[record["cmc_id"]] = record
             elif record.get("event") == "OUTCOME":
                 done.add((record["cmc_id"], record["days"]))
+            elif record.get("event") == "QUOTE_GAP":
+                gaps.add((record["cmc_id"], record["days"]))
         due = [(cid, d) for cid, r in first.items() for d in OUTCOME_DAYS
                if (cid, d) not in done and now >= int(r["at"]) + d * DAY]
         if not due:
             return 0
-        prices = self.cmc.prices(sorted({cid for cid, _ in due}))
+        open_ids = sorted({cid for cid, d in due if now - (int(first[cid]["at"]) + d * DAY)
+                           <= OUTCOME_TOLERANCE_SECONDS})
+        prices = self.cmc.prices(open_ids) if open_ids else {}
         recorded = 0
         for cid, days in due:
+            horizon = int(first[cid]["at"]) + days * DAY
+            late = now - horizon
             start, price = first[cid].get("price"), prices.get(cid)
-            late = now - (int(first[cid]["at"]) + days * DAY)
-            if price is None and late < DAY:
-                continue                                   # retry for a day before calling it NO_QUOTE
+            if late <= OUTCOME_TOLERANCE_SECONDS:
+                if price is None:
+                    self.ledger.append({"id": f"QUOTE_GAP:{cid}:{days}", "event": "QUOTE_GAP", "cmc_id": cid,
+                                        "days": days, "at": now, "schema": SCHEMA, "trial": TRIAL,
+                                        "can_authorize_trade": False})
+                    continue                               # ask again until the window closes
+                status = "OK"
+            else:
+                status, price = ("NO_QUOTE" if (cid, days) in gaps else "MISSED"), None
             recorded += 1
             self.ledger.append({
                 "id": f"OUTCOME:{cid}:{days}", "event": "OUTCOME", "cmc_id": cid, "days": days, "at": now,
-                "late_days": round(late / DAY, 1), "status": "OK" if price is not None else "NO_QUOTE",
-                "price": price, "return_pct": ((price / start - 1.0) * 100.0) if price and start else None,
+                "horizon_at": horizon, "late_hours": round(late / HOUR, 1), "status": status, "price": price,
+                "return_pct": ((price / start - 1.0) * 100.0) if price and start else None,
                 "verdict_at_first_sight": first[cid].get("verdict"), "schema": SCHEMA, "trial": TRIAL,
                 "can_authorize_trade": False})
         return recorded

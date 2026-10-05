@@ -101,6 +101,7 @@ def test_chains_match_exact_platform_names_and_addresses_must_be_valid():
 def test_a_listing_needs_an_id_and_a_past_add_date():
     assert coin().cmc_id == 1 and coin().chain == "ethereum" and coin().is_meme
     assert nc.parse_listing(cmc_row(1, "X", added=NOW + 3_600), now=NOW) is None      # from the future
+    assert nc.parse_listing(cmc_row(1, "X", added=NOW + 60), now=NOW) is None         # not even a minute early
     row = cmc_row(1, "X")
     row["date_added"] = None
     assert nc.parse_listing(row, now=NOW) is None
@@ -174,6 +175,16 @@ def test_unlocked_liquidity_is_a_rug_risk():
     (clean_evm(), [], False),                                       # no DEX pool
     (clean_evm(), pairs(), True),                                   # security provider unreachable
     (clean_evm(sell_tax="7"), pairs(), False),                      # outside 0..1: not trusted
+    (clean_evm(cannot_sell_all=None), pairs(), False),              # every red-flag field must be present
+    (clean_evm(buy_tax=""), pairs(), False),
+    (clean_evm(slippage_modifiable=None), pairs(), False),
+    (clean_evm(personal_slippage_modifiable="?"), pairs(), False),
+    (clean_evm(hidden_owner=None), pairs(), False),
+    (clean_evm(can_take_back_ownership=""), pairs(), False),
+    (clean_evm(selfdestruct=None), pairs(), False),
+    (clean_evm(holders=[]), pairs(), False),                        # no holder evidence is not 0%
+    (clean_evm(holders=[{"address": "0x000000000000000000000000000000000000dead", "balance": "1"}]),
+     pairs(), False),                                               # nothing left to count
 ])
 def test_missing_or_untrusted_data_is_never_a_clean_result(security, dex, error):
     card = nc.assess(coin(), security=security, pairs=dex, copies=1, now=NOW, security_error=error)
@@ -225,7 +236,7 @@ def test_solana_scam_patterns(override, reason):
 
 
 def test_solana_missing_authorities_or_lp_data_is_data_missing():
-    for override in ({"token": None}, {"markets": []}, {"topHolders": None},
+    for override in ({"token": None}, {"markets": []}, {"topHolders": None}, {"topHolders": []},
                      {"token": {"mintAuthority": None, "freezeAuthority": None}}):
         card = nc.assess(sol_coin(), security=clean_solana(**override), pairs=sol_pairs(), copies=1, now=NOW)
         assert card.verdict == nc.DATA_MISSING, override
@@ -368,7 +379,7 @@ def test_the_lookup_budget_leaves_the_rest_unknown_not_clean(tmp_path, monkeypat
     assert len(_events(tmp_path)) == 1                                            # only the assessed coin
 
 
-def test_outcomes_after_7_30_90_days_and_no_quote_only_after_a_day(tmp_path):
+def test_outcomes_after_7_30_90_days_and_no_quote_only_after_an_attempt_in_the_window(tmp_path):
     scanner, _ = _scanner(tmp_path, [cmc_row(1, "AAA")])
     scanner.scan(NOW)
     assert scanner.record_outcomes(NOW + 6 * 86_400) == 0
@@ -433,3 +444,16 @@ def test_a_rate_limited_provider_stops_further_look_ups_this_scan(tmp_path):
     assert providers.calls == 1 and snap["counts"][nc.DATA_MISSING] == 2
     providers.goplus = lambda chain, address: clean_evm()
     assert scanner.scan(NOW + 60)["counts"][nc.NO_RED_FLAG] == 2              # failures were not cached
+
+
+def test_missed_horizons_are_never_backfilled_with_a_later_price(tmp_path):
+    scanner, _ = _scanner(tmp_path, [cmc_row(1, "AAA")])
+    scanner.scan(NOW)
+    scanner.cmc.quotes = {1: 0.5}
+    assert scanner.record_outcomes(NOW + 31 * 86_400 + 60) == 2              # the bot was down for a month
+    outcomes = {e["days"]: e for e in _events(tmp_path) if e["event"] == "OUTCOME"}
+    assert outcomes[7]["status"] == outcomes[30]["status"] == "MISSED"
+    assert outcomes[7]["price"] is None and outcomes[30]["return_pct"] is None
+    assert scanner.cmc.price_calls == []                                      # no price was even asked for
+    assert scanner.record_outcomes(NOW + 90 * 86_400 + 3_600) == 1
+    assert {e["days"]: e for e in _events(tmp_path) if e["event"] == "OUTCOME"}[90]["status"] == "OK"

@@ -80,6 +80,11 @@ Hesaba girmeyen hesaplar:
 
 **Hata ve sınır durumları:**
 - Sağlayıcıya ulaşılamazsa, cevap bozuksa ya da bir alan boşsa o kontrol ❔ olur.
+- **Zorunlu alanlar:** Kırmızı bayrak üretebilen her alan gelmeden grup ✅ olamaz.
+  - Satılabilirlik: honeypot, tamamı satılamama, alım vergisi, satış vergisi, vergi değiştirme, cüzdana özel vergi.
+  - Yetkiler: kaynak kodu, basım, bakiye değiştirme, gizli sahip, sahipliği geri alma, kendini yok etme.
+  - Dağılım: en az bir sayılabilen cüzdan. Boş liste ❔ olur.
+- Eklenme zamanı şimdiden sonra olan bir CMC satırı taramaya alınmaz.
 - Bir taramada en fazla 40 coin kontrol edilir (sağlayıcı hız sınırları).
   - Sıraya giremeyen coin ❔ olur ve bir sonraki taramada kontrol edilir.
   - Kontrol edilen coin 6 saat sonra yeniden kontrol edilir; yetkiler ve havuz kilidi değişebilir.
@@ -92,11 +97,15 @@ Hesaba girmeyen hesaplar:
 **Kayıt:** `/data/new_coins_ledger.jsonl` (yalnızca ekleme yapılır, fsync).
 - **`FIRST_SEEN`:** Her coinin ilk görüldüğü andaki kararı, grupları ve fiyatı.
 - **`VERDICT`:** Kararın sonradan değiştiği an.
-- **`OUTCOME`:** 7, 30 ve 90 gün sonraki fiyat.
-  - CMC artık fiyat vermiyorsa, bir gün bekledikten sonra `NO_QUOTE` yazılır. Sıfır yazılmaz.
+- **`OUTCOME`:** 7, 30 ve 90 gün sonraki fiyat. Her vade, vadesinden sonraki 1 gün içinde ölçülür.
+  - O pencerede CMC'ye sorulduysa ama fiyat yoksa `NO_QUOTE` yazılır. Sorulduğunu bir `QUOTE_GAP` kaydı kanıtlar.
+  - Bot o pencerede kapalıysa vade `MISSED` (eksik) olur.
+  - Kaçırılan bir vade, sonraki bir fiyatla asla doldurulmaz. Sıfır da yazılmaz.
 - Her kayıt `trial` ve `can_authorize_trade: false` taşır.
 
-**Ön-kayıt:** Trial `71a4ac3276e13694`, `research/trials/registry.jsonl`. Hiçbir kayıt oluşmadan, 2026-10-05'te yapıldı.
+**Ön-kayıt:** Trial `3deff6cb87ad4e38`, `research/trials/registry.jsonl`. Hiçbir kayıt oluşmadan, 2026-10-05'te yapıldı.
+- Birleşmemiş ilk taslak `71a4ac3276e13694` incelemede iki noktada değişti: zorunlu alanlar eklendi ve kaçırılan vadeler artık doldurulmuyor.
+- Bu değişiklik de henüz hiçbir kayıt yokken yapıldı.
 - **İddia:** İlk görüldüğünde AĞIR RİSK olan coinler, BARİZ KIRMIZI BAYRAK YOK olanlardan daha sık çöker.
   - Çöküş: 30 günde −%90 ya da daha kötü, veya fiyat yok.
 - **Zaman:** 2027-04-05'ten önce değerlendirilmez.
@@ -107,7 +116,7 @@ Hesaba girmeyen hesaplar:
   - `SCREEN_SEPARATES`: Fark pozitif ve aralık sıfırı içermiyor.
   - `NO_SEPARATION`: Aralık sıfırı içeriyor.
   - `REVERSED`: Fark negatif ve aralık sıfırı içermiyor.
-  - `INCOMPLETE_DATA`: Gruplardan birinde 30'dan az coin var ya da 30 günlük sonuçların %20'sinden fazlası eksik.
+  - `INCOMPLETE_DATA`: Gruplardan birinde 30'dan az coin var ya da 30 günlük sonuçların %20'sinden fazlası eksik (`MISSED`). `NO_QUOTE` eksik sayılmaz; çöküş sayılır.
 - **Asıl sayı:** "Bariz kırmızı bayrak yok" denen coinlerin yüzde kaçı yine de çöktü? Bir isabet oranından söz edilecekse kaynağı bu sayı olur.
 - **Değişiklik kuralı:** Eşik, kritik grup ya da karar kuralı değişirse yeni şema ve yeni trial gerekir. Bir test bunu zorlar.
 
