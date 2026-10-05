@@ -109,6 +109,8 @@ Hesaba girmeyen hesaplar:
     - DEX'te havuzu olmayan bir token simüle edilemez; sonuç ❔ olur.
   - Yetkiler: kaynak kodu, basım, bakiye değiştirme, gizli sahip, sahipliği geri alma, kendini yok etme.
   - Dağılım: en az bir sayılabilen cüzdan. Boş liste ❔ olur.
+  - Solana dağılımı: RugCheck'in yaratıcı bakiyesi (`creatorBalance`). Gelmezse ❔ olur.
+  - Havuz: EVM'de payı %1 ya da daha fazla olan her LP sahibinin cüzdan mı kontrat mı olduğu bilinmeli. Solana'da LP tokenli havuzlar likiditenin %1'ini ya da fazlasını taşıyorsa ölçülebilir olmalı. Olmazsa ❔.
 - Eklenme zamanı şimdiden sonra olan bir CMC satırı taramaya alınmaz.
 - Bir taramada en fazla 40 coin kontrol edilir (sağlayıcı hız sınırları).
   - Sıraya giremeyen coin ❔ olur ve bir sonraki taramada kontrol edilir.
@@ -130,9 +132,10 @@ Hesaba girmeyen hesaplar:
   - Kaçırılan bir vade, sonraki bir fiyatla asla doldurulmaz. Sıfır da yazılmaz.
 - Her kayıt `trial` ve `can_authorize_trade: false` taşır.
 
-**Ön-kayıt:** Trial `49aa03675513c906` (`new-coins/v2`), `research/trials/registry.jsonl`. Hiçbir v2 kaydı ve hiçbir sonuç oluşmadan, 2026-10-05'te yapıldı.
+**Ön-kayıt:** Trial `b57b9eb0a6073085` (`new-coins/v2`), `research/trials/registry.jsonl`. Hiçbir v2 kaydı ve hiçbir sonuç oluşmadan, 2026-10-05'te yapıldı.
 - Yerini aldığı v1 trial'ı `3deff6cb87ad4e38` değerlendirilmeyecek. Neden yukarıda, "Sürüm 2" başlığında.
 - v1'in birleşmemiş taslağı `71a4ac3276e13694` incelemede değişmişti. O değişiklik de henüz hiçbir kayıt yokken yapıldı.
+- v2'nin birleşmemiş taslağı `49aa03675513c906` de incelemede değişti: ölçülemeyen önemli LP verisi ve eksik yaratıcı bakiyesi artık ❔ sayılıyor. Bu da henüz hiçbir kayıt yokken yapıldı.
 - **İddia:** İlk görüldüğünde AĞIR RİSK olan coinler, BARİZ KIRMIZI BAYRAK YOK olanlardan daha sık çöker.
   - Çöküş: 30 günde −%90 ya da daha kötü, veya fiyat yok.
 - **Zaman:** 2027-04-05'ten önce değerlendirilmez.

@@ -343,11 +343,34 @@ def test_solana_lp_lock_is_weighted_by_liquidity_and_never_a_red_flag_on_its_own
     assert card.verdict == nc.NO_RED_FLAG and card.liquidity_usd == 60_000.0       # RugCheck's figure as fallback
 
 
+def test_unmeasurable_lp_data_is_unknown_once_it_is_material():
+    good = {"marketType": "raydium", "lp": {"lpMint": "LpA1111111111111111111111111111111111111111", "lpLocked": 99,
+                                            "lpTotalSupply": 100, "quoteUSD": 5_000.0, "baseUSD": 5_000.0}}
+    broken = {"marketType": "raydium", "lp": {"lpMint": "LpB1111111111111111111111111111111111111111", "lpLocked": None,
+                                              "lpTotalSupply": 100, "quoteUSD": 500_000.0, "baseUSD": 500_000.0}}
+    card = nc.assess(sol_coin(), security=clean_solana(markets=[good, broken]), pairs=sol_pairs(), copies=1, now=NOW)
+    assert card.verdict == nc.DATA_MISSING                                   # the broken pool holds most liquidity
+    dust = {**broken, "lp": {**broken["lp"], "quoteUSD": 1.0, "baseUSD": 1.0}}
+    card = nc.assess(sol_coin(), security=clean_solana(markets=[good, dust]), pairs=sol_pairs(), copies=1, now=NOW)
+    assert card.verdict == nc.NO_RED_FLAG                                    # a dust pool cannot hide a rug
+    no_size = {**good, "lp": {**good["lp"], "quoteUSD": None}}
+    card = nc.assess(sol_coin(), security=clean_solana(markets=[good, no_size]), pairs=sol_pairs(), copies=1, now=NOW)
+    assert card.verdict == nc.DATA_MISSING
+    lp = [{"address": "0x000000000000000000000000000000000000dead", "balance": "900", "is_locked": 0},
+          {"address": "0x" + "25" * 20, "balance": "100", "is_locked": 0}]               # is_contract missing
+    card = nc.assess(coin(), security=evm(goplus=clean_goplus(lp_holders=lp)), pairs=pairs(), copies=1, now=NOW)
+    assert card.verdict == nc.DATA_MISSING
+    lp[1]["balance"], lp[0]["balance"] = "5", "995"
+    card = nc.assess(coin(), security=evm(goplus=clean_goplus(lp_holders=lp)), pairs=pairs(), copies=1, now=NOW)
+    assert card.verdict == nc.NO_RED_FLAG                                    # 0.5% unclassified is immaterial
+
+
 def test_solana_missing_authorities_or_lp_data_is_data_missing():
     only_concentrated = [{"marketType": "meteoraDlmm", "lp": {"lpMint": nc.SYSTEM_PROGRAM, "lpLocked": 0,
                                                               "lpTotalSupply": 0, "quoteUSD": 1.0, "baseUSD": 1.0}}]
     for override in ({"token": None}, {"markets": []}, {"markets": only_concentrated}, {"topHolders": None},
-                     {"topHolders": []}, {"token": {"mintAuthority": None, "freezeAuthority": None}}):
+                     {"topHolders": []}, {"token": {"mintAuthority": None, "freezeAuthority": None}},
+                     {"creatorBalance": None}, {"creatorBalance": "unknown"}):
         card = nc.assess(sol_coin(), security=clean_solana(**override), pairs=sol_pairs(), copies=1, now=NOW)
         assert card.verdict == nc.DATA_MISSING, override
     assert nc.assess(sol_coin(), security=None, pairs=sol_pairs(), copies=1, now=NOW).verdict == nc.DATA_MISSING

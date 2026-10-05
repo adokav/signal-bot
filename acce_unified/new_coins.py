@@ -66,6 +66,8 @@ GROUPS = (*CRITICAL, VOLUME, SUPPLY)
 TAX_FAIL, TAX_WARN = Decimal("0.10"), Decimal("0.05")
 TOP10_FAIL, TOP10_WARN = Decimal("0.50"), Decimal("0.30")
 LP_WALLET_FAIL = Decimal("0.50")  # LP held by plain wallets (not locked, burned or in a contract) can be pulled
+# Data that cannot be measured is UNKNOWN once it is material: an LP holder or LP pool carrying at least this share.
+MATERIAL_SHARE = Decimal("0.01")
 CREATOR_FAIL, CREATOR_WARN = Decimal("0.20"), Decimal("0.05")
 LP_LOCK_WARN = Decimal("0.90")
 LIQUIDITY_FAIL_USD, LIQUIDITY_WARN_USD = 10_000.0, 50_000.0
@@ -102,7 +104,7 @@ TRIAL_DATASET = {"source": "coinmarketcap listings/latest by date_added; GoPlus 
                  "forward_from": "2026-10-05", "kind": "live forward record (/data/new_coins_ledger.jsonl)",
                  "supersedes": "3deff6cb87ad4e38 (new-coins/v1, never evaluated: recalibrated on live provider "
                                "replies the day it shipped, before any outcome)"}
-TRIAL = "49aa03675513c906"
+TRIAL = "b57b9eb0a6073085"
 
 
 def trial_params() -> dict[str, Any]:
@@ -115,10 +117,13 @@ def trial_params() -> dict[str, Any]:
                        "creator_warn": str(CREATOR_WARN),
                        "lp_lock_warn": str(LP_LOCK_WARN), "liquidity_fail_usd": LIQUIDITY_FAIL_USD,
                        "liquidity_warn_usd": LIQUIDITY_WARN_USD, "young_pool_seconds": YOUNG_POOL_SECONDS,
-                       "no_sells_min_buys": NO_SELLS_MIN_BUYS, "lp_wallet_fail": str(LP_WALLET_FAIL)},
+                       "no_sells_min_buys": NO_SELLS_MIN_BUYS, "lp_wallet_fail": str(LP_WALLET_FAIL),
+                       "material_share": str(MATERIAL_SHARE)},
         "required_fields": {"sellability": list(SELLABILITY_FIELDS) + [f"simulation.{k}" for k in SIMULATION_FIELDS]
                             + ["simulation.isHoneypot"], "powers": list(POWER_FIELDS),
-                            "holders": "at least one counted holder"},
+                            "holders": "at least one counted holder; Solana creatorBalance",
+                            "lp": "every LP holder >= 1% classified (EVM); LP-token pools carrying >= 1% of "
+                                  "their liquidity measurable (Solana)"},
         "lp_rule": {"evm": "FAIL if >= 50% of LP is held by plain wallets; PASS if >= 90% locked or burned; "
                            "else WARN (contract-held, unverifiable)",
                     "solana": "liquidity-weighted lock over LP-token pools and bonding curves; PASS >= 90%, else "
@@ -583,6 +588,9 @@ def _evm_lp_lock(card: Card, entry: Mapping[str, Any]) -> None:
             safe.append(share)
         elif _flag(h.get("is_contract")) is False:
             wallets.append(share)
+        elif _flag(h.get("is_contract")) is None and share >= MATERIAL_SHARE:
+            card.add(LIQUIDITY, UNKNOWN, "havuz sahibinin cüzdan mı kontrat mı olduğu bilinmiyor")
+            return
     safe_share, wallet_share = sum(safe, Decimal(0)), sum(wallets, Decimal(0))
     if wallet_share >= LP_WALLET_FAIL:
         card.add(LIQUIDITY, FAIL, f"havuzun {_pct(wallet_share)}'ı cüzdanlarda; çekilebilir (rug riski)")
@@ -647,8 +655,10 @@ def screen_solana(card: Card, report: Mapping[str, Any] | None) -> None:
             card.add(HOLDERS, status, f"ilk 10 cüzdan {_pct(top10)} (havuzlar hariç)")
         if sum(1 for h in counted[:10] if h.get("insider") is True) >= 3:
             card.add(HOLDERS, WARN, "ilk 10 cüzdanda birbirine bağlı (insider) hesaplar")
-    creator = _share(report.get("creatorBalance"), supply) if report.get("creatorBalance") is not None else None
-    if creator is not None and creator >= CREATOR_FAIL:
+    creator = _share(report.get("creatorBalance"), supply)
+    if creator is None:
+        card.add(HOLDERS, UNKNOWN, "yaratıcının payı bilinmiyor")
+    elif creator >= CREATOR_FAIL:
         card.add(HOLDERS, FAIL, f"yaratıcı payı {_pct(creator)}")
     elif creator is not None and creator >= CREATOR_WARN:
         card.add(HOLDERS, WARN, f"yaratıcı payı {_pct(creator)}")
@@ -667,7 +677,7 @@ def _solana_lp_lock(card: Card, markets: Any) -> None:
     comes from RugCheck's risk list ("LP unlocked") or its rug flag.
     """
 
-    weighted, weight = Decimal(0), Decimal(0)
+    weighted, weight, unmeasured, unknown_size = Decimal(0), Decimal(0), Decimal(0), False
     for market in markets if isinstance(markets, list) else []:
         lp = market.get("lp") if isinstance(market, Mapping) and isinstance(market.get("lp"), Mapping) else None
         if lp is None:
@@ -675,11 +685,21 @@ def _solana_lp_lock(card: Card, markets: Any) -> None:
         curve = str(market.get("marketType") or "") == "pump_fun"
         if str(lp.get("lpMint") or SYSTEM_PROGRAM) == SYSTEM_PROGRAM and not curve:
             continue
+        quote, base = _dec(lp.get("quoteUSD")), _dec(lp.get("baseUSD"))
+        if quote is None or base is None or quote < 0 or base < 0:
+            unknown_size = True                            # cannot tell whether this pool matters
+            continue
+        usd = quote + base
+        if usd <= 0:
+            continue                                       # an empty pool carries nothing to pull
         share = _share(lp.get("lpLocked"), lp.get("lpTotalSupply"))
-        usd = (_dec(lp.get("quoteUSD")) or Decimal(0)) + (_dec(lp.get("baseUSD")) or Decimal(0))
-        if share is None or usd <= 0:
+        if share is None:
+            unmeasured += usd
             continue
         weighted, weight = weighted + share * usd, weight + usd
+    if unknown_size or (unmeasured > 0 and unmeasured / (weight + unmeasured) >= MATERIAL_SHARE):
+        card.add(LIQUIDITY, UNKNOWN, "havuz kilidi ölçülemiyor (LP tokenli bir havuzun verisi bozuk)")
+        return
     if weight <= 0:
         card.add(LIQUIDITY, UNKNOWN, "havuz kilidi ölçülemiyor (LP tokeni olan havuz yok)")
         return
