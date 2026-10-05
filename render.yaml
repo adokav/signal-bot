@@ -39,6 +39,21 @@ services:
       - key: TACTICAL_REJECTED_ALERTS_ENABLED
         value: "0"
 
+      # New CoinMarketCap coins through a contract-security screen (docs/NEW_COINS.md):
+      # honeypot, owner powers, holder concentration, liquidity lock. Research only, no orders.
+      # CMC_API_KEY: free Basic plan key from pro.coinmarketcap.com, set in the Render
+      # dashboard (never in this file, logs or chat).
+      - key: NEW_COINS_ENABLED
+        value: "1"
+      - key: NEW_COINS_SCAN_INTERVAL_SECONDS
+        value: "1800"
+      - key: NEW_COINS_WINDOW_HOURS
+        value: "72"
+      - key: NEW_COINS_LEDGER_FILE
+        value: /data/new_coins_ledger.jsonl
+      - key: CMC_API_KEY
+        sync: false
+
       # D1 trend loop, shadow record (docs/TREND_LOOP_LIVE.md): daily 00:00 UTC
       # decisions on the majors, intraday acute stops, append-only ledger.
       # Alerts carry the RİSK_AZALTIR label (user decision 2026-10-02); no orders.
@@ -58,8 +73,10 @@ services:
         value: SHADOW
       - key: UNIFIED_CEX_RADAR_ENABLED
         value: "1"
+      # The MEXC new-listing radar is off: the "Yeni Listeler" menu reads CoinMarketCap
+      # (user decision 2026-10-05; see NEW_COINS_* below and docs/NEW_COINS.md).
       - key: UNIFIED_LISTING_RADAR_ENABLED
-        value: "1"
+        value: "0"
       - key: UNIFIED_SCAN_INTERVAL_SECONDS
         value: "120"
 

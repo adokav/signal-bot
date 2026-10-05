@@ -434,7 +434,8 @@ def default_listing_evidence() -> ListingEvidence:
     return load_listing_evidence()
 
 
-def listing_evidence_line(evidence: ListingEvidence | None = None) -> str:
+def listing_evidence_line(evidence: ListingEvidence | None = None, *,
+                          venue_note: str = "MEXC listelemeleri için test yok.") -> str:
     """Historical base rate for the listing panel; descriptive, never a per-candidate probability."""
 
     evidence = evidence or default_listing_evidence()
@@ -450,7 +451,7 @@ def listing_evidence_line(evidence: ListingEvidence | None = None) -> str:
     )
     if group.mean_gross_pct - group.median_gross_pct > 10:
         line += "; ortalama ile medyan arasındaki büyük fark sonucun birkaç büyük kazanana bağlı olduğunu gösterir"
-    return line + ". MEXC listelemeleri için test yok."
+    return f"{line}. {venue_note}"
 
 
 # ---------------------------------------------------------------------------

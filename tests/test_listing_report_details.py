@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from acce_unified.listing_fundamentals import enrich_price_extremes
-from bot import format_new
+from bot import _fundamental_lines
 
 
 def _candidate(symbol: str, score: int, *, ready: bool = True) -> dict:
@@ -52,32 +52,17 @@ def test_price_extremes_are_preserved_from_provider_row():
     assert signal["atl_change_pct"] == 2420.0
 
 
-def test_new_listing_report_ranks_only_accepted_rows_with_supply_and_extremes():
-    snapshot = {
-        "listing_candidates": [
-            _candidate("AUSDT", 70),
-            _candidate("BUSDT", 95),
-            _candidate("CUSDT", 80),
-        ],
-    }
-    report = format_new(snapshot)
+# The MEXC new-listing view was replaced by the CoinMarketCap security screen (docs/NEW_COINS.md,
+# tests/test_new_coins.py). The supply and ATH/ATL lines it used still serve the tactical view.
 
-    assert "getirisi kanıtlanmadı" in report
-    assert report.index("BUSDT") < report.index("CUSDT") < report.index("AUSDT")
+
+def test_supply_and_price_extremes_are_shown_from_ready_fundamentals():
+    report = "\n".join(_fundamental_lines(_candidate("AUSDT", 70)["metadata"]["fundamentals"]))
     assert "Arz: dolaşan 25.00M · toplam 100.00M · max 120.00M" in report
     assert "ATH $2.50 (%-60.0) · ATL $0.05 (%+1900.0)" in report
 
 
 def test_pending_provider_does_not_invent_supply_or_price_extremes():
-    report = format_new(
-        {
-            "listing_candidates": [_candidate("WAITUSDT", 88, ready=False)],
-        }
-    )
+    report = "\n".join(_fundamental_lines(_candidate("WAITUSDT", 88, ready=False)["metadata"]["fundamentals"]))
     assert "Arz ve ATH/ATL: PROVIDER_COOLDOWN" in report
     assert "dolaşan 0" not in report
-
-
-def test_empty_snapshot_reports_no_verified_candidate():
-    report = format_new({"listing_candidates": []})
-    assert "Son 72 saatte doğrulanmış aktif aday yok." in report
