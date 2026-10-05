@@ -299,6 +299,17 @@ güncellenenler belirtildi.
       YÜKSELİŞ'teyken yapmak. Canlı gölge kayıtta 2026-10'dan sonra ileriye
       dönük test edilmesi önerildi; kullanıcı onayı bekliyor.
 
+13. ⏳ **Yeni coinler: CoinMarketCap + güvenlik taraması** — `docs/NEW_COINS.md`
+    (kullanıcı kararı 2026-10-05).
+    - "Yeni Listeler" menüsü MEXC yerine CoinMarketCap'in yeni coinlerini
+      okuyor; MEXC yeni listeleme radarı kapatıldı.
+    - Her coin honeypot, geliştirici yetkileri, cüzdan yoğunlaşması ve havuz
+      kilidi için taranıyor (GoPlus, RugCheck, DexScreener). Sonuç: AĞIR RİSK,
+      VERİ EKSİK ya da BARİZ KIRMIZI BAYRAK YOK. Güvenilirlik ya da getiri
+      iddiası yok.
+    - İsabet henüz ölçülmedi. İleriye dönük kayıt ön-kayıtlı (trial
+      `3deff6cb87ad4e38`); değerlendirme 2027-04-05'ten önce yapılmaz.
+
 ## Kesin çizgiler
 
 - OOS validation atlanmaz. Faz A ↔ Faz C arasında bir "kanıt eşiği" vardır.

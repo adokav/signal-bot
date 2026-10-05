@@ -17,6 +17,7 @@ from flask import Flask, jsonify
 
 from acce_unified import UnifiedConfig, UnifiedRadarEngine, build_trade_universe
 from acce_unified import long_alerts
+from acce_unified import new_coins
 from acce_unified.listing_fundamentals import ListingFundamentalMetricsProvider
 from acce_unified.forward_ledger import ForwardLedger, status_text, update_records
 from acce_unified.radar_gate import (
@@ -76,6 +77,13 @@ TREND_LOOP_ENABLED = os.getenv("TREND_LOOP_ENABLED", "1") == "1"
 TREND_LOOP_ALERTS = os.getenv("TREND_LOOP_ALERTS_ENABLED", "1") == "1"
 TREND_LOOP_STOP_SECONDS = max(60, int(os.getenv("TREND_LOOP_STOP_INTERVAL_SECONDS", "300")))
 TREND_LOOP_TICK_SECONDS = 60
+# "Yeni Listeler" menu (docs/NEW_COINS.md). User decision (2026-10-05): new coins come from
+# CoinMarketCap, not MEXC, and every coin goes through a contract-security screen (honeypot, owner
+# powers, holder concentration, liquidity lock). Needs CMC_API_KEY (free Basic plan) in the environment.
+NEW_COINS_ENABLED = os.getenv("NEW_COINS_ENABLED", "1") == "1"
+NEW_COINS_SCAN_SECONDS = max(600, int(os.getenv("NEW_COINS_SCAN_INTERVAL_SECONDS", "1800")))
+NEW_COINS_MAX_AGE_SECONDS = 3 * NEW_COINS_SCAN_SECONDS
+CMC_API_KEY = os.getenv("CMC_API_KEY", "").strip()
 
 CONFIG = UnifiedConfig.from_env()
 # A snapshot older than three scan cycles is stale evidence, not a current view.
@@ -106,6 +114,12 @@ TREND_LOOP = TrendLoop(
     market=MexcSpot(timeout=CONFIG.request_timeout_seconds),
 )
 TREND_LOOP_LOADED = threading.Event()
+CMC = new_coins.CoinMarketCap(CMC_API_KEY, timeout=CONFIG.request_timeout_seconds)
+NEW_COINS = new_coins.NewCoinsScanner(
+    CMC, new_coins.SecurityProviders(timeout=CONFIG.request_timeout_seconds),
+    TrendLedger(Path(os.getenv("NEW_COINS_LEDGER_FILE", str(STATE_FILE.parent / "new_coins_ledger.jsonl")))),
+    window_hours=max(1, int(os.getenv("NEW_COINS_WINDOW_HOURS", str(new_coins.WINDOW_HOURS)))),
+)
 APP = Flask(__name__)
 HTTP = requests.Session()
 LOCK = threading.RLock()
@@ -124,13 +138,15 @@ STATE: dict[str, Any] = {
     "radar_log": [],
     "trend_loop": None,
     "trend_loop_error": None,
+    "new_coins": None,
+    "new_coins_error": None,
 }
 
 COMMANDS = [
     {"command": "panel", "description": "Sade kontrol paneli"},
     {"command": "tactical", "description": "BTC ve ETH giriş/stop radarı"},
     {"command": "longs", "description": "MEXC Likit 100 Long İlk 3"},
-    {"command": "new", "description": "Doğrulanmış MEXC yeni listeleri"},
+    {"command": "new", "description": "CoinMarketCap yeni coinler: dolandırıcılık taraması"},
     {"command": "radar", "description": "Radara giren long sinyalleri ve stop durumu"},
     {"command": "d1", "description": "D1 döngü: gölge pozisyonlar, çıkış seviyesi ve acil stop"},
     {"command": "status", "description": "Tarama sağlığı ve veri durumu"},
@@ -150,8 +166,9 @@ def _safe_error(exc: BaseException) -> str:
     """
 
     message = _URL_RE.sub("<url>", str(exc))
-    if TOKEN:
-        message = message.replace(TOKEN, "<token>")
+    for secret, mask in ((TOKEN, "<token>"), (CMC_API_KEY, "<cmc-key>")):
+        if secret:
+            message = message.replace(secret, mask)
     message = message.strip()[:160]
     return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
@@ -247,7 +264,7 @@ def panel_keyboard() -> dict[str, Any]:
         [{"text": "💧 Long İlk 3", "callback_data": "LONGS"}],
         [{"text": "📋 Radar kaydı", "callback_data": "RADAR"}],
         [{"text": "📈 D1 Döngü", "callback_data": "D1"}],
-        [{"text": "🆕 Yeni Listeler", "callback_data": "NEW"}],
+        [{"text": "🆕 Yeni Coinler (CMC)", "callback_data": "NEW"}],
         [
             {"text": "📊 Durum", "callback_data": "STATUS"},
             {"text": "🔄 Şimdi Tara", "callback_data": "SCAN"},
@@ -461,37 +478,14 @@ def format_tactical(report: dict[str, Any] | None, *, fundamentals: dict[str, di
     return "\n".join(lines)
 
 
-def format_new(snapshot: dict[str, Any] | None) -> str:
-    if not snapshot:
-        return "🆕 MEXC NEW LISTING\n\nİlk tarama bekleniyor."
-    rows = sorted(
-        snapshot.get("listing_candidates") or [],
-        key=lambda item: (
-            int(item.get("score") or 0),
-            float((item.get("metadata") or {}).get("quote_volume") or 0),
-            str(item.get("symbol") or ""),
-        ), reverse=True,
-    )[:5]
-    lines = ["🆕 MEXC NEW LISTING — ADAYLAR (kimliği doğrulandı, getirisi kanıtlanmadı)", ""]
-    if not rows:
-        lines.append("Son 72 saatte doğrulanmış aktif aday yok.")
-    for index, item in enumerate(rows, 1):
-        meta = item.get("metadata") or {}
-        social = meta.get("social") or {}
-        fundamental = meta.get("fundamentals") or {}
-        lines.extend([
-            f"{index}. {item.get('symbol', '?')} — {int(item.get('score') or 0)}/100 · {item.get('stage') or '-'}",
-            f"   24s %{float(meta.get('change_pct') or 0):+.1f} · MEXC hacim {_money(meta.get('quote_volume'))} · İvme {float(meta.get('volume_acceleration') or 0):.1f}x",
-        ])
-        lines.extend(_fundamental_lines(fundamental))
-        lines.extend([
-            f"   Sosyal kapı {social.get('community_gate') or social.get('status') or '?'}",
-            f"   Risk: {', '.join(item.get('risk_flags') or []) or 'belirgin sert risk yok'}",
-            "",
-        ])
-    lines.append(listing_evidence_line())
-    lines.append("Araştırma sıralamasıdır; otomatik işlem veya sermaye yetkisi vermez.")
-    return "\n".join(lines)
+def format_new() -> str:
+    with LOCK:
+        snapshot, error = STATE.get("new_coins"), STATE.get("new_coins_error")
+    return new_coins.render(
+        snapshot, now=int(time.time()), error=error, enabled=NEW_COINS_ENABLED,
+        max_age=NEW_COINS_MAX_AGE_SECONDS,
+        base_rate=listing_evidence_line(venue_note="CoinMarketCap yeni coinleri için test yok."),
+    )
 
 
 def format_status(snapshot: dict[str, Any] | None) -> str:
@@ -508,7 +502,8 @@ def format_status(snapshot: dict[str, Any] | None) -> str:
         f"Taktik radar: {tactical_age} sn önce" if tactical else "Taktik radar: henüz yok",
         f"Likit evren: {int((snapshot or {}).get('liquid_universe_size') or 0)}/100",
         f"Long aday: {len((snapshot or {}).get('liquid_long_candidates') or [])}/3",
-        f"Yeni listeleme adayı (kimliği doğrulanmış): {len((snapshot or {}).get('listing_candidates') or [])}",
+        new_coins.status_line(STATE.get("new_coins"), now=int(time.time()), enabled=NEW_COINS_ENABLED,
+                              configured=CMC.configured, error=STATE.get("new_coins_error")),
         f"Ana hata: {error_text}",
         f"Taktik hata: {STATE.get('tactical_last_error') or 'yok'}",
         evidence_status_text(),
@@ -919,6 +914,41 @@ def trend_loop_tick(now: int | None = None) -> None:
         _save_state()
 
 
+def new_coins_tick(now: int | None = None) -> None:
+    """Scan CoinMarketCap's newest coins through the security screen, then record due outcomes."""
+
+    now = int(time.time()) if now is None else now
+    snapshot, errors = None, []
+    if not CMC.configured:
+        errors.append("CMC_API_KEY tanımlı değil")
+    else:
+        for step in ("scan", "outcomes"):
+            try:
+                if step == "scan":
+                    snapshot = NEW_COINS.scan(now)
+                else:
+                    NEW_COINS.record_outcomes(now)
+            except Exception as exc:
+                errors.append(_safe_error(exc))
+    error = "; ".join(errors) or None
+    if error:
+        log.warning("Yeni coin taraması: %s", error)
+    with LOCK:
+        if snapshot is not None:
+            STATE["new_coins"] = snapshot
+        STATE["new_coins_error"] = error
+        _save_state()
+
+
+def new_coins_loop() -> None:
+    while True:
+        try:
+            new_coins_tick()
+        except Exception:
+            log.warning("Yeni coin taraması beklenmedik hata", exc_info=True)
+        time.sleep(NEW_COINS_SCAN_SECONDS)
+
+
 def trend_loop_loop() -> None:
     while True:
         try:
@@ -947,7 +977,7 @@ def handle(action: str) -> None:
     elif action == "LONGS":
         send(format_longs(snapshot), keyboard=panel_keyboard())
     elif action == "NEW":
-        send(format_new(snapshot), keyboard=panel_keyboard())
+        send(format_new(), keyboard=panel_keyboard(), html_mode=True)
     elif action == "RADAR":
         with LOCK:
             rows = [dict(e) for e in STATE.get("radar_log") or []]
@@ -975,7 +1005,7 @@ def handle(action: str) -> None:
         send(format_status(refreshed or _snapshot()), keyboard=panel_keyboard())
     else:
         send(
-            "🎯 SIGNAL BOT v5 CORE\n\nAktif araştırma motorları:\n• BTC/ETH Taktik Long giriş ve stop radarı\n• MEXC Likit 100 Long İlk 3\n• Doğrulanmış MEXC yeni listelemeleri\n• D1 trend döngüsü (gölge kayıt, emir yok)",
+            "🎯 SIGNAL BOT v5 CORE\n\nAktif araştırma motorları:\n• BTC/ETH Taktik Long giriş ve stop radarı\n• MEXC Likit 100 Long İlk 3\n• CoinMarketCap yeni coinler: dolandırıcılık taraması\n• D1 trend döngüsü (gölge kayıt, emir yok)",
             keyboard=panel_keyboard(),
         )
 
@@ -1042,12 +1072,15 @@ def health() -> Any:
     main_fresh = _age_ok(snapshot.get("generated_at"), MAIN_MAX_AGE_SECONDS, now)
     tactical_fresh = _age_ok(tactical.get("generated_at"), TACTICAL_MAX_AGE_SECONDS, now)
     trend_fresh = TREND_LOOP.fresh(now, stop_seconds=TREND_LOOP_STOP_SECONDS) if TREND_LOOP_ENABLED else None
+    coins_fresh = (new_coins.fresh(STATE.get("new_coins"), now=now, max_age=NEW_COINS_MAX_AGE_SECONDS)
+                   if NEW_COINS_ENABLED else None)
     return jsonify({
         # Healthy means fresh artifacts exist, not merely "no error recorded".
         "ok": (
             main_fresh and tactical_fresh
             and STATE.get("last_error") is None and STATE.get("tactical_last_error") is None
             and (not TREND_LOOP_ENABLED or (trend_fresh and STATE.get("trend_loop_error") is None))
+            and (not NEW_COINS_ENABLED or (coins_fresh and STATE.get("new_coins_error") is None))
         ),
         "service": "signal-bot-v5-core",
         "main_scan_fresh": main_fresh,
@@ -1059,6 +1092,8 @@ def health() -> Any:
         "tactical_last_error": _error_code(STATE.get("tactical_last_error")),
         "trend_loop_fresh": trend_fresh,
         "trend_loop_last_error": _error_code(STATE.get("trend_loop_error")),
+        "new_coins_fresh": coins_fresh,
+        "new_coins_last_error": _error_code(STATE.get("new_coins_error")),
         "can_authorize_trade": False,
     })
 
@@ -1070,6 +1105,8 @@ def main() -> None:
     threading.Thread(target=telegram_loop, name="telegram-command-loop", daemon=True).start()
     if TREND_LOOP_ENABLED:
         threading.Thread(target=trend_loop_loop, name="d1-trend-loop", daemon=True).start()
+    if NEW_COINS_ENABLED:
+        threading.Thread(target=new_coins_loop, name="cmc-new-coins", daemon=True).start()
     if STARTUP_MESSAGE:
         try:
             send("✅ Signal Bot v5 Core başladı.", keyboard=panel_keyboard())

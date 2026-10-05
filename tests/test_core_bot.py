@@ -95,12 +95,41 @@ def test_tactical_report_exposes_entry_stop_and_no_trade_authority():
     assert "otomatik emir" in text
 
 
-def test_new_listing_report_contains_only_accepted_enriched_rows():
-    text = bot.format_new(_snapshot())
-    assert "getirisi kanıtlanmadı" in text
-    assert "NEWUSDT" in text
-    assert "OLDUSDT" not in text
-    assert "Sosyal kapı PASS" in text
+def test_new_coins_menu_reads_coinmarketcap_and_says_unknown_without_a_key(monkeypatch):
+    saved = _preserve_state("new_coins", "new_coins_error")
+    try:
+        monkeypatch.setattr(bot, "CMC", bot.new_coins.CoinMarketCap(""))
+        monkeypatch.setattr(bot, "_save_state", lambda: None)
+        bot.new_coins_tick(1_790_000_000)
+        assert bot.STATE["new_coins"] is None and "CMC_API_KEY" in bot.STATE["new_coins_error"]
+        text = bot.format_new()
+        assert "CoinMarketCap" in text and "Aday yok demek değildir" in text and "MEXC" not in text
+        assert "API anahtarı yok" in bot.format_status(None)
+        sent = []
+        monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append((text, kw)))
+        bot.handle("NEW")
+        assert sent[0][1]["html_mode"] is True and "güvenlik taraması" in sent[0][0]
+    finally:
+        bot.STATE.update(saved)
+
+
+def test_a_failed_new_coins_scan_keeps_the_last_snapshot_and_redacts_the_key(monkeypatch):
+    saved = _preserve_state("new_coins", "new_coins_error")
+    try:
+        monkeypatch.setattr(bot, "CMC_API_KEY", "CMCSECRET")
+        monkeypatch.setattr(bot, "CMC", bot.new_coins.CoinMarketCap("CMCSECRET"))
+        monkeypatch.setattr(bot, "_save_state", lambda: None)
+
+        def broken(now):
+            raise RuntimeError("failed https://pro-api.coinmarketcap.com/x?key=CMCSECRET and CMCSECRET")
+        monkeypatch.setattr(bot.NEW_COINS, "scan", broken)
+        monkeypatch.setattr(bot.NEW_COINS, "record_outcomes", lambda now: 0)
+        bot.STATE["new_coins"] = {"generated_at": 1_789_990_000, "cards": [], "counts": {}}
+        bot.new_coins_tick(1_790_000_000)
+        assert bot.STATE["new_coins"]["generated_at"] == 1_789_990_000             # kept, shown as stale
+        assert "CMCSECRET" not in bot.STATE["new_coins_error"]
+    finally:
+        bot.STATE.update(saved)
 
 
 def test_status_surfaces_last_scan_error():
@@ -134,6 +163,8 @@ def test_health_is_not_healthy_before_any_scan():
 
 def test_health_requires_fresh_artifacts_and_hides_error_text(monkeypatch):
     monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
+    monkeypatch.setattr(bot.new_coins, "fresh", lambda snapshot, now, max_age: True)
+    monkeypatch.setitem(bot.STATE, "new_coins_error", None)
     saved = _preserve_state(*HEALTH_KEYS)
     now = int(bot.time.time())
     try:
@@ -161,6 +192,8 @@ def test_health_requires_fresh_artifacts_and_hides_error_text(monkeypatch):
 
 
 def test_health_needs_a_fresh_trend_loop_and_hides_its_error_text(monkeypatch):
+    monkeypatch.setattr(bot.new_coins, "fresh", lambda snapshot, now, max_age: True)
+    monkeypatch.setitem(bot.STATE, "new_coins_error", None)
     saved = _preserve_state(*HEALTH_KEYS, "trend_loop_error")
     now = int(bot.time.time())
     try:
@@ -332,3 +365,23 @@ def test_long_candidates_carry_the_negative_replay_and_regime_rejects():
     assert "kalibre edilmemiş" in text
     snapshot["liquid_market_context"] = {"regime": "RISK_OFF", "positive_breadth_pct": 20}
     assert "Durum: REJECT — rejim RISK_OFF" in bot.format_longs(snapshot)
+
+
+def test_health_needs_a_fresh_new_coins_scan_and_hides_its_error_text(monkeypatch):
+    monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
+    saved = _preserve_state(*HEALTH_KEYS, "trend_loop_error", "new_coins", "new_coins_error")
+    now = int(bot.time.time())
+    try:
+        bot.STATE.update({"snapshot": {"generated_at": now - 10}, "tactical_snapshot": {"generated_at": now - 10},
+                          "last_error": None, "tactical_last_error": None, "trend_loop_error": None,
+                          "new_coins": None, "new_coins_error": "CMC_API_KEY tanımlı değil"})
+        payload = bot.APP.test_client().get("/").get_json()
+        assert payload["ok"] is False and payload["new_coins_fresh"] is False
+        bot.STATE.update({"new_coins": {"generated_at": now - 10}, "new_coins_error": None})
+        assert bot.APP.test_client().get("/").get_json()["ok"] is True
+        bot.STATE["new_coins_error"] = "NewCoinsDataError: cmc http 429 https://x?key=SECRET"
+        payload = bot.APP.test_client().get("/").get_json()
+        assert payload["ok"] is False and payload["new_coins_last_error"] == "NewCoinsDataError"
+        assert "SECRET" not in json.dumps(payload)
+    finally:
+        bot.STATE.update(saved)
