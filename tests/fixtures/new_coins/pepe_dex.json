@@ -1,0 +1,140 @@
+{
+ "pairs": [
+  {
+   "baseToken": {
+    "address": "0x6982508145454Ce325dDbE47a25d4ec3d2311933",
+    "name": "Pepe",
+    "symbol": "PEPE"
+   },
+   "chainId": "ethereum",
+   "dexId": "uniswap",
+   "liquidity": {
+    "base": 3656132170744,
+    "quote": 5935.3755,
+    "usd": 32176941.61
+   },
+   "pairAddress": "0xA43fe16908251ee70EF74718545e4FE6C5cCEc9f",
+   "pairCreatedAt": 1681492871000,
+   "quoteToken": {
+    "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "name": "Wrapped Ether",
+    "symbol": "WETH"
+   },
+   "txns": {
+    "h1": {
+     "buys": 9,
+     "sells": 12
+    },
+    "h24": {
+     "buys": 294,
+     "sells": 453
+    },
+    "h6": {
+     "buys": 33,
+     "sells": 72
+    },
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    }
+   },
+   "volume": {
+    "h1": 22243.38,
+    "h24": 1661821.7,
+    "h6": 222609.52,
+    "m5": 0
+   }
+  },
+  {
+   "baseToken": {
+    "address": "0x6982508145454Ce325dDbE47a25d4ec3d2311933",
+    "name": "Pepe",
+    "symbol": "PEPE"
+   },
+   "chainId": "ethereum",
+   "dexId": "uniswap",
+   "liquidity": {
+    "base": 547801036171,
+    "quote": 54.8032,
+    "usd": 2558690.17
+   },
+   "pairAddress": "0x11950d141EcB863F01007AdD7D1A342041227b58",
+   "pairCreatedAt": 1681942955000,
+   "quoteToken": {
+    "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "name": "Wrapped Ether",
+    "symbol": "WETH"
+   },
+   "txns": {
+    "h1": {
+     "buys": 5,
+     "sells": 5
+    },
+    "h24": {
+     "buys": 216,
+     "sells": 230
+    },
+    "h6": {
+     "buys": 22,
+     "sells": 41
+    },
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    }
+   },
+   "volume": {
+    "h1": 1571.52,
+    "h24": 110145.94,
+    "h6": 18526.43,
+    "m5": 0
+   }
+  },
+  {
+   "baseToken": {
+    "address": "0x6982508145454Ce325dDbE47a25d4ec3d2311933",
+    "name": "Pepe",
+    "symbol": "PEPE"
+   },
+   "chainId": "ethereum",
+   "dexId": "uniswap",
+   "liquidity": {
+    "base": 45501193452,
+    "quote": 11.6667,
+    "usd": 233204.19
+   },
+   "pairAddress": "0xe42df52d7938631f6c6cb56aac2fafc1e00ea77b7517a02ee244bd7d86c061cd",
+   "pairCreatedAt": 1739562395000,
+   "quoteToken": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "name": "Ether",
+    "symbol": "ETH"
+   },
+   "txns": {
+    "h1": {
+     "buys": 0,
+     "sells": 1
+    },
+    "h24": {
+     "buys": 25,
+     "sells": 14
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 12
+    },
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    }
+   },
+   "volume": {
+    "h1": 73.92,
+    "h24": 7869.51,
+    "h6": 2196.37,
+    "m5": 0
+   }
+  }
+ ],
+ "schemaVersion": "1.0.0"
+}

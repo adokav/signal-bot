@@ -1,0 +1,56 @@
+{
+ "creatorBalance": 0,
+ "knownAccounts": {},
+ "markets": [],
+ "mint": "F6DLLkHbrwmmv1amv5DGbJsDDrimrWhDUqHF3GGrWgFp",
+ "risks": [
+  {
+   "description": "More tokens can be minted by the owner",
+   "level": "danger",
+   "name": "Mint Authority still enabled",
+   "score": 50000,
+   "value": ""
+  },
+  {
+   "description": "Tokens can be frozen and prevented from trading",
+   "level": "danger",
+   "name": "Freeze Authority still enabled",
+   "score": 25000,
+   "value": ""
+  }
+ ],
+ "rugged": false,
+ "score_normalised": 76,
+ "token": {
+  "decimals": 0,
+  "freezeAuthority": "E4ZGRC794TxPeY1DUoxcw2p6YaaHwCmgH2GQynTXAB2q",
+  "isInitialized": true,
+  "mintAuthority": "HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC",
+  "supply": 1
+ },
+ "tokenMeta": {
+  "mutable": false,
+  "name": "Meteora Position NFT",
+  "symbol": "MPN",
+  "updateAuthority": "11111111111111111111111111111111",
+  "uri": "https://raw.githubusercontent.com/MeteoraAg/token-metadata/main/meteora_position_nft.png"
+ },
+ "topHolders": [
+  {
+   "address": "J9QmPKtdsf3ugSgbCTg569rXMd8y9yKPJ5NT4fCvjBE7",
+   "amount": 1,
+   "decimals": 0,
+   "insider": false,
+   "owner": "CCi3K8YvmamREX9Y1aXmmS3zskD645yUFL75p8ok3uDw",
+   "pct": 0,
+   "uiAmount": 1,
+   "uiAmountString": "1"
+  }
+ ],
+ "totalMarketLiquidity": 0,
+ "transferFee": {
+  "authority": "11111111111111111111111111111111",
+  "maxAmount": 0,
+  "pct": 0
+ }
+}

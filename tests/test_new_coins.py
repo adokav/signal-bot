@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -36,23 +37,48 @@ def coin(**kw) -> nc.NewCoin:
     return nc.parse_listing(cmc_row(1, kw.pop("symbol", "PEPE2"), **kw), now=NOW)
 
 
-def clean_evm(**over) -> dict:
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "new_coins"
+POOL_AUTHORITY = "Poo1Authority111111111111111111111111111"
+
+
+def fixture(name: str):
+    return json.loads((FIXTURES / f"{name}.json").read_text())
+
+
+def clean_goplus(**over) -> dict:
+    """A GoPlus reply shaped like the live ones: taxes blank, cannot_sell_all absent."""
+
     entry = {
-        "is_honeypot": "0", "cannot_sell_all": "0", "buy_tax": "0", "sell_tax": "0",
+        "is_honeypot": "0", "buy_tax": "", "sell_tax": "", "cannot_buy": "0",
         "slippage_modifiable": "0", "personal_slippage_modifiable": "0", "transfer_pausable": "0",
         "is_blacklisted": "0", "trading_cooldown": "0", "is_open_source": "1", "is_mintable": "0",
         "owner_change_balance": "0", "hidden_owner": "0", "can_take_back_ownership": "0", "selfdestruct": "0",
         "is_proxy": "0", "external_call": "0", "creator_percent": "0.01", "owner_percent": "0",
         "total_supply": "1000000", "token_symbol": "PEPE2", "is_in_dex": "1",
-        "dex": [{"pair": "0x" + "99" * 20}],
+        "dex": [{"liquidity_type": "UniV2", "pair": "0x" + "99" * 20}],
         "holders": [{"address": "0x" + f"{k:02x}" * 20, "balance": "20000", "percent": "0.02", "is_locked": 0,
                      "is_contract": 0, "tag": ""} for k in range(1, 11)],
         "lp_total_supply": "1000",
-        "lp_holders": [{"address": "0x000000000000000000000000000000000000dead", "balance": "990", "is_locked": 0},
-                       {"address": "0x" + "22" * 20, "balance": "10", "is_locked": 0}],
+        "lp_holders": [{"address": "0x000000000000000000000000000000000000dead", "balance": "990", "is_locked": 0,
+                        "is_contract": 0},
+                       {"address": "0x" + "22" * 20, "balance": "10", "is_locked": 0, "is_contract": 0}],
     }
     entry.update(over)
     return entry
+
+
+def clean_sim(**over) -> dict:
+    """A honeypot.is reply shaped like the live ones (taxes in percent)."""
+
+    sim = {"simulationSuccess": True, "honeypotResult": {"isHoneypot": False},
+           "simulationResult": {"buyTax": 0, "sellTax": 0, "transferTax": 0}}
+    sim.update(over)
+    return sim
+
+
+def evm(goplus="clean", sim="clean") -> dict:
+    return {"goplus": clean_goplus() if goplus == "clean" else goplus,
+            "honeypot": clean_sim() if sim == "clean" else sim}
 
 
 def pairs(*, liquidity=250_000.0, buys=300, sells=250, age_days=3.0, chain="ethereum", address=EVM) -> list:
@@ -61,23 +87,27 @@ def pairs(*, liquidity=250_000.0, buys=300, sells=250, age_days=3.0, chain="ethe
 
 
 def clean_solana(**over) -> dict:
+    """A RugCheck report shaped like the live ones (knownAccounts tag the pool, LP mint on the market)."""
+
     report = {
         "token": {"mintAuthority": None, "freezeAuthority": None, "supply": 1_000_000_000_000},
         "tokenMeta": {"symbol": "DOG2", "mutable": False},
-        "topHolders": [{"address": VAULT, "owner": "RaydiumAuth1111111111111111111111111111", "amount": 600_000_000_000,
-                        "insider": False}]
+        "topHolders": [{"address": VAULT, "owner": POOL_AUTHORITY, "amount": 600_000_000_000, "insider": False}]
                       + [{"address": HOLDER[:-2] + f"{k:02d}", "owner": HOLDER[:-2] + f"{k:02d}",
                           "amount": 10_000_000_000, "insider": False} for k in range(10, 19)],
-        "markets": [{"pubkey": "Poo1Address1111111111111111111111111111111", "liquidityA": VAULT,
-                     "lp": {"lpLocked": 9_990, "lpTotalSupply": 10_000}}],
+        "knownAccounts": {POOL_AUTHORITY: {"name": "Raydium Authority", "type": "AMM"}},
+        "markets": [{"pubkey": "Poo1Address1111111111111111111111111111111", "marketType": "raydium",
+                     "lp": {"lpMint": "LpMint11111111111111111111111111111111111", "lpLocked": 9_990,
+                            "lpTotalSupply": 10_000, "quoteUSD": 60_000.0, "baseUSD": 60_000.0}}],
+        "creatorBalance": 0, "totalMarketLiquidity": 120_000.0,
         "risks": [], "rugged": False, "transferFee": {"pct": 0},
     }
     report.update(over)
     return report
 
 
-def sol_coin() -> nc.NewCoin:
-    return nc.parse_listing(cmc_row(2, "DOG2", platform=("Solana", "solana"), address=MINT), now=NOW)
+def sol_coin(symbol: str = "DOG2", address: str = MINT) -> nc.NewCoin:
+    return nc.parse_listing(cmc_row(2, symbol, platform=("Solana", "solana"), address=address), now=NOW)
 
 
 # ---------------------------------------------------------------------------
@@ -118,28 +148,81 @@ def test_a_coin_without_a_checkable_contract_is_data_missing_never_clean():
 
 
 # ---------------------------------------------------------------------------
-# EVM screen (GoPlus + DexScreener)
+# Live provider replies (trimmed, 2026-10-05): established coins are not red-flagged, scams are
+# ---------------------------------------------------------------------------
+
+
+def _live(symbol, chain, address, security, dex):
+    platform = {"ethereum": ("Ethereum", "ethereum"), "base": ("Base", "base"), "bsc": ("BNB Smart Chain (BEP20)", "bnb"),
+                "solana": ("Solana", "solana")}[chain]
+    c = nc.parse_listing(cmc_row(9, symbol, platform=platform, address=address), now=NOW)
+    return nc.assess(c, security=security, pairs=nc_pairs(dex, chain, address), copies=1, now=NOW)
+
+
+def nc_pairs(payload, chain, address):
+    dex_chain = next(d for key, _g, d, _a in nc.CHAINS if key == chain)
+    same = (lambda a: a.lower() == address.lower()) if chain != "solana" else (lambda a: a == address)
+    return [p for p in (payload or {}).get("pairs") or [] if p.get("chainId") == dex_chain
+            and same(p["baseToken"]["address"])]
+
+
+def _goplus(name):
+    return next(iter(fixture(name)["result"].values()))
+
+
+def test_live_pepe_and_brett_are_not_red_flagged_but_carry_their_warnings():
+    pepe = _live("PEPE", "ethereum", "0x6982508145454Ce325dDbE47a25d4ec3d2311933",
+                 {"goplus": _goplus("pepe_goplus"), "honeypot": fixture("pepe_honeypot")}, fixture("pepe_dex"))
+    assert pepe.verdict == nc.NO_RED_FLAG and not pepe.reasons(nc.FAIL)
+    assert pepe.status(nc.SELLABILITY) == nc.WARN                    # blacklist and pause powers exist
+    assert pepe.status(nc.LIQUIDITY) == nc.WARN                      # LP sits in a contract: not verifiable
+    brett = _live("BRETT", "base", "0x532f27101965dd16442E59d40670FaF5eBB142E4",
+                  {"goplus": _goplus("brett_goplus"), "honeypot": fixture("brett_honeypot")}, fixture("brett_dex"))
+    assert brett.verdict == nc.NO_RED_FLAG and brett.status(nc.SELLABILITY) == nc.PASS
+
+
+def test_live_unlaunched_token_held_by_one_wallet_is_a_heavy_risk():
+    card = _live("X", "bsc", "0x8819581bD88352BF4F9cD377B3BddeE35c46f2cc",
+                 {"goplus": _goplus("bsc_unlaunched_goplus"), "honeypot": None}, {"pairs": []})
+    assert card.verdict == nc.HEAVY_RISK and "%100" in card.reasons(nc.FAIL)[0]
+    assert card.status(nc.SELLABILITY) == nc.UNKNOWN                 # no pool: nothing to simulate
+
+
+def test_live_bonk_is_not_red_flagged_and_mint_freeze_authority_is():
+    bonk = _live("Bonk", "solana", "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", fixture("bonk_rugcheck"),
+                 fixture("bonk_dex"))
+    assert bonk.verdict == nc.NO_RED_FLAG and not bonk.reasons(nc.FAIL)
+    scam = fixture("mint_freeze_rugcheck")
+    card = _live("MPN", "solana", scam["mint"], scam, {"pairs": []})
+    assert card.verdict == nc.HEAVY_RISK
+    assert {"cüzdan dondurulabilir (freeze yetkisi açık)", "yeni token basılabilir (mint yetkisi açık)"} <= set(
+        card.reasons(nc.FAIL))
+
+
+# ---------------------------------------------------------------------------
+# EVM screen (GoPlus + honeypot.is simulation + DexScreener)
 # ---------------------------------------------------------------------------
 
 
 def test_a_clean_evm_token_has_no_red_flag_and_every_critical_group_checked():
-    card = nc.assess(coin(), security=clean_evm(), pairs=pairs(), copies=1, now=NOW)
+    card = nc.assess(coin(), security=evm(), pairs=pairs(), copies=1, now=NOW)
     assert card.verdict == nc.NO_RED_FLAG
     assert all(card.status(g) == nc.PASS for g in nc.CRITICAL)
     assert card.liquidity_usd == 250_000.0
 
 
-@pytest.mark.parametrize("override, reason", [
-    ({"is_honeypot": "1"}, "honeypot"),
-    ({"sell_tax": "0.15"}, "satış vergisi %15"),
-    ({"is_mintable": "1"}, "yeni token basılabilir"),
-    ({"owner_change_balance": "1"}, "bakiyeleri değiştirebilir"),
-    ({"slippage_modifiable": "1"}, "vergi sonradan artırılabilir"),
-    ({"is_open_source": "0"}, "kaynak kodu doğrulanmamış"),
-    ({"creator_percent": "0.25"}, "yaratıcı payı %25"),
+@pytest.mark.parametrize("security, reason", [
+    (evm(sim=clean_sim(honeypotResult={"isHoneypot": True})), "satış simülasyonu başarısız"),
+    (evm(sim=clean_sim(simulationResult={"buyTax": 0, "sellTax": 15, "transferTax": 0})), "satış vergisi %15"),
+    (evm(goplus=clean_goplus(is_honeypot="1")), "GoPlus: honeypot"),
+    (evm(goplus=clean_goplus(is_mintable="1")), "yeni token basılabilir"),
+    (evm(goplus=clean_goplus(owner_change_balance="1")), "bakiyeleri değiştirebilir"),
+    (evm(goplus=clean_goplus(slippage_modifiable="1")), "vergi sonradan artırılabilir"),
+    (evm(goplus=clean_goplus(is_open_source="0")), "kaynak kodu doğrulanmamış"),
+    (evm(goplus=clean_goplus(creator_percent="0.25")), "yaratıcı payı %25"),
 ])
-def test_each_known_scam_pattern_is_a_heavy_risk(override, reason):
-    card = nc.assess(coin(), security=clean_evm(**override), pairs=pairs(), copies=1, now=NOW)
+def test_each_known_scam_pattern_is_a_heavy_risk(security, reason):
+    card = nc.assess(coin(), security=security, pairs=pairs(), copies=1, now=NOW)
     assert card.verdict == nc.HEAVY_RISK
     assert any(reason in text for text in card.reasons(nc.FAIL))
 
@@ -150,41 +233,49 @@ def test_holder_concentration_counts_wallets_but_not_pools_locks_or_burns():
                {"address": "0x000000000000000000000000000000000000dead", "balance": "100000", "is_locked": 0},
                {"address": "0x" + "44" * 20, "balance": "90000", "is_locked": 0, "is_contract": 1, "tag": "Pool"},
                {"address": "0x" + "55" * 20, "balance": "50000", "is_locked": 0, "is_contract": 0, "tag": ""}]
-    card = nc.assess(coin(), security=clean_evm(holders=holders), pairs=pairs(), copies=1, now=NOW)
+    card = nc.assess(coin(), security=evm(goplus=clean_goplus(holders=holders)), pairs=pairs(), copies=1, now=NOW)
     assert card.status(nc.HOLDERS) == nc.PASS and "%5" in card.groups[nc.HOLDERS][0].text
     whales = [{"address": "0x" + f"{k:02x}" * 20, "balance": "60000", "is_locked": 0, "is_contract": 0, "tag": ""}
               for k in range(1, 11)]
-    card = nc.assess(coin(), security=clean_evm(holders=whales), pairs=pairs(), copies=1, now=NOW)
+    card = nc.assess(coin(), security=evm(goplus=clean_goplus(holders=whales)), pairs=pairs(), copies=1, now=NOW)
     assert card.verdict == nc.HEAVY_RISK and "ilk 10 cüzdan arzın %60" in card.reasons(nc.FAIL)[0]
 
 
-def test_unlocked_liquidity_is_a_rug_risk():
-    lp = [{"address": "0x" + "22" * 20, "balance": "700", "is_locked": 0},
-          {"address": "0x" + "23" * 20, "balance": "300", "is_locked": 1}]
-    card = nc.assess(coin(), security=clean_evm(lp_holders=lp), pairs=pairs(), copies=1, now=NOW)
-    assert card.verdict == nc.HEAVY_RISK and "çekilebilir" in card.reasons(nc.FAIL)[0]
+def test_lp_in_wallets_is_a_rug_risk_lp_in_contracts_only_a_warning():
+    wallets = [{"address": "0x" + "22" * 20, "balance": "700", "is_locked": 0, "is_contract": 0},
+               {"address": "0x" + "23" * 20, "balance": "300", "is_locked": 1, "is_contract": 1}]
+    card = nc.assess(coin(), security=evm(goplus=clean_goplus(lp_holders=wallets)), pairs=pairs(), copies=1, now=NOW)
+    assert card.verdict == nc.HEAVY_RISK and "cüzdanlarda; çekilebilir" in card.reasons(nc.FAIL)[0]
+    contract = [{"address": "0x" + "24" * 20, "balance": "990", "is_locked": 0, "is_contract": 1}]
+    card = nc.assess(coin(), security=evm(goplus=clean_goplus(lp_holders=contract)), pairs=pairs(), copies=1, now=NOW)
+    assert card.status(nc.LIQUIDITY) == nc.WARN and card.verdict == nc.NO_RED_FLAG
+    assert "kilit doğrulanamadı" in " ".join(card.reasons(nc.WARN))
 
 
 @pytest.mark.parametrize("security, dex, error", [
-    (None, pairs(), False),                                         # GoPlus does not know the token
-    (clean_evm(sell_tax=""), pairs(), False),                       # a blank critical field
-    (clean_evm(is_mintable=None), pairs(), False),
-    (clean_evm(holders=None), pairs(), False),
-    (clean_evm(lp_holders=[]), pairs(), False),
-    (clean_evm(), None, False),                                     # DexScreener unreachable
-    (clean_evm(), [], False),                                       # no DEX pool
-    (clean_evm(), pairs(), True),                                   # security provider unreachable
-    (clean_evm(sell_tax="7"), pairs(), False),                      # outside 0..1: not trusted
-    (clean_evm(cannot_sell_all=None), pairs(), False),              # every red-flag field must be present
-    (clean_evm(buy_tax=""), pairs(), False),
-    (clean_evm(slippage_modifiable=None), pairs(), False),
-    (clean_evm(personal_slippage_modifiable="?"), pairs(), False),
-    (clean_evm(hidden_owner=None), pairs(), False),
-    (clean_evm(can_take_back_ownership=""), pairs(), False),
-    (clean_evm(selfdestruct=None), pairs(), False),
-    (clean_evm(holders=[]), pairs(), False),                        # no holder evidence is not 0%
-    (clean_evm(holders=[{"address": "0x000000000000000000000000000000000000dead", "balance": "1"}]),
+    (evm(goplus=None), pairs(), False),                             # GoPlus does not know the token
+    (evm(sim=None), pairs(), False),                                # no pool to simulate (404)
+    (evm(sim=clean_sim(simulationSuccess=False)), pairs(), False),  # the simulation itself failed
+    (evm(sim=clean_sim(honeypotResult={})), pairs(), False),
+    (evm(sim=clean_sim(simulationResult={"buyTax": 0, "sellTax": 0})), pairs(), False),
+    (evm(sim=clean_sim(simulationResult={"buyTax": "abc", "sellTax": 0, "transferTax": 0})), pairs(), False),
+    (evm(sim=clean_sim(simulationResult={"buyTax": 150, "sellTax": 0, "transferTax": 0})), pairs(), False),
+    (evm(goplus=clean_goplus(is_honeypot=None)), pairs(), False),   # every red-flag field must be present
+    (evm(goplus=clean_goplus(slippage_modifiable=None)), pairs(), False),
+    (evm(goplus=clean_goplus(personal_slippage_modifiable="?")), pairs(), False),
+    (evm(goplus=clean_goplus(is_mintable=None)), pairs(), False),
+    (evm(goplus=clean_goplus(hidden_owner=None)), pairs(), False),
+    (evm(goplus=clean_goplus(can_take_back_ownership="")), pairs(), False),
+    (evm(goplus=clean_goplus(selfdestruct=None)), pairs(), False),
+    (evm(goplus=clean_goplus(holders=None)), pairs(), False),
+    (evm(goplus=clean_goplus(holders=[])), pairs(), False),         # no holder evidence is not 0%
+    (evm(goplus=clean_goplus(holders=[{"address": "0x000000000000000000000000000000000000dead", "balance": "1"}])),
      pairs(), False),                                               # nothing left to count
+    (evm(goplus=clean_goplus(lp_holders=[])), pairs(), False),
+    (evm(goplus=clean_goplus(is_in_dex="0")), pairs(), False),
+    (evm(), None, False),                                           # DexScreener unreachable
+    (evm(), [], False),                                             # no DEX pool
+    (evm(), pairs(), True),                                         # security provider unreachable
 ])
 def test_missing_or_untrusted_data_is_never_a_clean_result(security, dex, error):
     card = nc.assess(coin(), security=security, pairs=dex, copies=1, now=NOW, security_error=error)
@@ -192,18 +283,18 @@ def test_missing_or_untrusted_data_is_never_a_clean_result(security, dex, error)
 
 
 def test_market_signals_from_dex_pairs():
-    card = nc.assess(coin(), security=clean_evm(), pairs=pairs(buys=80, sells=0), copies=1, now=NOW)
+    card = nc.assess(coin(), security=evm(), pairs=pairs(buys=80, sells=0), copies=1, now=NOW)
     assert card.verdict == nc.HEAVY_RISK and "hiç satış yok" in card.reasons(nc.FAIL)[0]
-    card = nc.assess(coin(), security=clean_evm(), pairs=pairs(liquidity=5_000.0), copies=1, now=NOW)
+    card = nc.assess(coin(), security=evm(), pairs=pairs(liquidity=5_000.0), copies=1, now=NOW)
     assert card.verdict == nc.HEAVY_RISK
-    card = nc.assess(coin(volume=60_000_000.0), security=clean_evm(), pairs=pairs(age_days=0.5), copies=2, now=NOW)
+    card = nc.assess(coin(volume=60_000_000.0), security=evm(), pairs=pairs(age_days=0.5), copies=2, now=NOW)
     assert card.verdict == nc.NO_RED_FLAG                            # warnings, not red flags
     warnings = " ".join(card.reasons(nc.WARN))
     assert "1 günden genç" in warnings and "240 katı" in warnings and "taklit" in warnings
 
 
 def test_a_contract_symbol_that_differs_from_cmc_is_flagged():
-    card = nc.assess(coin(), security=clean_evm(token_symbol="OTHER"), pairs=pairs(), copies=1, now=NOW)
+    card = nc.assess(coin(), security=evm(goplus=clean_goplus(token_symbol="OTHER")), pairs=pairs(), copies=1, now=NOW)
     assert "sembol" in " ".join(card.reasons(nc.WARN))
 
 
@@ -226,18 +317,60 @@ def test_a_clean_solana_token_and_its_pool_vault_is_not_a_whale():
     ({"token": {"mintAuthority": "Auth", "freezeAuthority": None, "supply": 10**12}}, "mint yetkisi açık"),
     ({"token": {"mintAuthority": None, "freezeAuthority": "Auth", "supply": 10**12}}, "freeze yetkisi açık"),
     ({"rugged": True}, "rug pull olmuş"),
-    ({"markets": [{"pubkey": "P", "lp": {"lpLocked": 20, "lpTotalSupply": 100}}]}, "çekilebilir"),
-    ({"risks": [{"name": "Top 10 holders high ownership", "level": "danger"}]}, "cüzdan yoğunlaşması"),
+    ({"risks": [{"name": "Large Amount of LP Unlocked", "level": "danger"}]}, "kilitsiz"),
+    ({"risks": [{"name": "Single holder ownership", "level": "danger"}]}, "yoğunlaşması"),
+    ({"risks": [{"name": "Low Liquidity", "level": "danger"}]}, "düşük likidite"),
     ({"transferFee": {"pct": 25}}, "transfer ücreti %25"),
+    ({"creatorBalance": 250_000_000_000}, "yaratıcı payı %25"),
 ])
 def test_solana_scam_patterns(override, reason):
     card = nc.assess(sol_coin(), security=clean_solana(**override), pairs=sol_pairs(), copies=1, now=NOW)
     assert card.verdict == nc.HEAVY_RISK and any(reason in t for t in card.reasons(nc.FAIL))
 
 
+def test_solana_lp_lock_is_weighted_by_liquidity_and_never_a_red_flag_on_its_own():
+    markets = [{"marketType": "raydium", "lp": {"lpMint": "LpA1111111111111111111111111111111111111111",
+                                                "lpLocked": 20, "lpTotalSupply": 100, "quoteUSD": 50.0, "baseUSD": 50.0}},
+               {"marketType": "orca", "lp": {"lpMint": nc.SYSTEM_PROGRAM, "lpLocked": 0, "lpTotalSupply": 999,
+                                             "quoteUSD": 900_000.0, "baseUSD": 900_000.0}}]
+    card = nc.assess(sol_coin(), security=clean_solana(markets=markets), pairs=sol_pairs(), copies=1, now=NOW)
+    assert card.status(nc.LIQUIDITY) == nc.WARN and card.verdict == nc.NO_RED_FLAG   # orca has no LP to lock
+    curve = [{"marketType": "pump_fun", "lp": {"lpMint": nc.SYSTEM_PROGRAM, "lpLocked": 1, "lpTotalSupply": 1,
+                                               "quoteUSD": 30_000.0, "baseUSD": 30_000.0}}]
+    no_dex_liquidity = [{**sol_pairs()[0], "liquidity": None}]
+    card = nc.assess(sol_coin(), security=clean_solana(markets=curve, totalMarketLiquidity=60_000.0),
+                     pairs=no_dex_liquidity, copies=1, now=NOW)
+    assert card.verdict == nc.NO_RED_FLAG and card.liquidity_usd == 60_000.0       # RugCheck's figure as fallback
+
+
+def test_unmeasurable_lp_data_is_unknown_once_it_is_material():
+    good = {"marketType": "raydium", "lp": {"lpMint": "LpA1111111111111111111111111111111111111111", "lpLocked": 99,
+                                            "lpTotalSupply": 100, "quoteUSD": 5_000.0, "baseUSD": 5_000.0}}
+    broken = {"marketType": "raydium", "lp": {"lpMint": "LpB1111111111111111111111111111111111111111", "lpLocked": None,
+                                              "lpTotalSupply": 100, "quoteUSD": 500_000.0, "baseUSD": 500_000.0}}
+    card = nc.assess(sol_coin(), security=clean_solana(markets=[good, broken]), pairs=sol_pairs(), copies=1, now=NOW)
+    assert card.verdict == nc.DATA_MISSING                                   # the broken pool holds most liquidity
+    dust = {**broken, "lp": {**broken["lp"], "quoteUSD": 1.0, "baseUSD": 1.0}}
+    card = nc.assess(sol_coin(), security=clean_solana(markets=[good, dust]), pairs=sol_pairs(), copies=1, now=NOW)
+    assert card.verdict == nc.NO_RED_FLAG                                    # a dust pool cannot hide a rug
+    no_size = {**good, "lp": {**good["lp"], "quoteUSD": None}}
+    card = nc.assess(sol_coin(), security=clean_solana(markets=[good, no_size]), pairs=sol_pairs(), copies=1, now=NOW)
+    assert card.verdict == nc.DATA_MISSING
+    lp = [{"address": "0x000000000000000000000000000000000000dead", "balance": "900", "is_locked": 0},
+          {"address": "0x" + "25" * 20, "balance": "100", "is_locked": 0}]               # is_contract missing
+    card = nc.assess(coin(), security=evm(goplus=clean_goplus(lp_holders=lp)), pairs=pairs(), copies=1, now=NOW)
+    assert card.verdict == nc.DATA_MISSING
+    lp[1]["balance"], lp[0]["balance"] = "5", "995"
+    card = nc.assess(coin(), security=evm(goplus=clean_goplus(lp_holders=lp)), pairs=pairs(), copies=1, now=NOW)
+    assert card.verdict == nc.NO_RED_FLAG                                    # 0.5% unclassified is immaterial
+
+
 def test_solana_missing_authorities_or_lp_data_is_data_missing():
-    for override in ({"token": None}, {"markets": []}, {"topHolders": None}, {"topHolders": []},
-                     {"token": {"mintAuthority": None, "freezeAuthority": None}}):
+    only_concentrated = [{"marketType": "meteoraDlmm", "lp": {"lpMint": nc.SYSTEM_PROGRAM, "lpLocked": 0,
+                                                              "lpTotalSupply": 0, "quoteUSD": 1.0, "baseUSD": 1.0}}]
+    for override in ({"token": None}, {"markets": []}, {"markets": only_concentrated}, {"topHolders": None},
+                     {"topHolders": []}, {"token": {"mintAuthority": None, "freezeAuthority": None}},
+                     {"creatorBalance": None}, {"creatorBalance": "unknown"}):
         card = nc.assess(sol_coin(), security=clean_solana(**override), pairs=sol_pairs(), copies=1, now=NOW)
         assert card.verdict == nc.DATA_MISSING, override
     assert nc.assess(sol_coin(), security=None, pairs=sol_pairs(), copies=1, now=NOW).verdict == nc.DATA_MISSING
@@ -299,6 +432,10 @@ def test_providers_refuse_unusable_replies():
         providers.dex_pairs("ethereum", EVM)
     providers = nc.SecurityProviders(session=Session(Response(404, None)))
     assert providers.rugcheck(MINT) is None
+    assert providers.honeypot("base", EVM) is None                     # no pair to simulate
+    session = Session(Response(200, clean_sim()))
+    assert nc.SecurityProviders(session=session).honeypot("base", EVM)["simulationSuccess"] is True
+    assert session.calls[0][1] == {"address": EVM, "chainID": "8453"}
     other = pairs(chain="bsc") + pairs() + [{"chainId": "ethereum", "baseToken": {"address": "0x" + "cd" * 20}}]
     providers = nc.SecurityProviders(session=Session(Response(200, {"pairs": other})))
     assert len(providers.dex_pairs("ethereum", EVM.upper().replace("0X", "0x"))) == 1
@@ -325,11 +462,14 @@ class FakeCmc:
 class FakeProviders:
     def __init__(self):
         self.calls = 0
-        self.security = clean_evm()
+        self.security = clean_goplus()
 
     def goplus(self, chain, address):
         self.calls += 1
         return self.security
+
+    def honeypot(self, chain, address):
+        return clean_sim()
 
     def rugcheck(self, mint):
         self.calls += 1
@@ -361,7 +501,7 @@ def test_a_scan_screens_new_coins_once_and_records_first_sight(tmp_path):
     events = _events(tmp_path)
     assert [e["event"] for e in events] == ["FIRST_SEEN", "FIRST_SEEN"]
     assert all(e["can_authorize_trade"] is False and e["schema"] == nc.SCHEMA for e in events)
-    providers.security = clean_evm(is_honeypot="1")
+    providers.security = clean_goplus(is_honeypot="1")
     scanner.scan(NOW + 7 * 3_600)                                                 # re-checked: verdict changed
     assert [e["event"] for e in _events(tmp_path)].count("VERDICT") == 1
     again = nc.NewCoinsScanner(FakeCmc(rows), providers, Ledger(tmp_path / "ledger.jsonl"), sleep=lambda s: None)
@@ -442,7 +582,7 @@ def test_a_rate_limited_provider_stops_further_look_ups_this_scan(tmp_path):
     providers.goplus = limited
     snap = scanner.scan(NOW)
     assert providers.calls == 1 and snap["counts"][nc.DATA_MISSING] == 2
-    providers.goplus = lambda chain, address: clean_evm()
+    providers.goplus = lambda chain, address: clean_goplus()
     assert scanner.scan(NOW + 60)["counts"][nc.NO_RED_FLAG] == 2              # failures were not cached
 
 
@@ -457,3 +597,16 @@ def test_missed_horizons_are_never_backfilled_with_a_later_price(tmp_path):
     assert scanner.cmc.price_calls == []                                      # no price was even asked for
     assert scanner.record_outcomes(NOW + 90 * 86_400 + 3_600) == 1
     assert {e["days"]: e for e in _events(tmp_path) if e["event"] == "OUTCOME"}[90]["status"] == "OK"
+
+
+def test_records_from_the_superseded_v1_screen_never_shadow_v2(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append({"id": "FIRST_SEEN:1", "event": "FIRST_SEEN", "cmc_id": 1, "schema": "new-coins/v1",
+                   "verdict": nc.DATA_MISSING, "at": NOW - 86_400, "price": 0.001})
+    scanner = nc.NewCoinsScanner(FakeCmc([cmc_row(1, "AAA")]), FakeProviders(), ledger, sleep=lambda s: None)
+    scanner.scan(NOW)
+    first = [e for e in _events(tmp_path) if e["event"] == "FIRST_SEEN"]
+    assert [e["id"] for e in first] == ["FIRST_SEEN:1", "FIRST_SEEN:v2:1"]
+    assert first[-1]["schema"] == nc.SCHEMA and first[-1]["verdict"] == nc.NO_RED_FLAG
+    scanner.cmc.quotes = {1: 0.002}
+    assert scanner.record_outcomes(NOW + 6 * 86_400) == 0                     # v1's earlier sight is ignored

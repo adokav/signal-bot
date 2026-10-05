@@ -1,0 +1,139 @@
+{
+ "pairs": [
+  {
+   "baseToken": {
+    "address": "0x532f27101965dd16442E59d40670FaF5eBB142E4",
+    "name": "Brett",
+    "symbol": "BRETT"
+   },
+   "chainId": "base",
+   "dexId": "uniswap",
+   "liquidity": {
+    "base": 84025412,
+    "quote": 307.8447,
+    "usd": 1316169.22
+   },
+   "pairAddress": "0xBA3F945812a83471d709BCe9C3CA699A19FB46f7",
+   "pairCreatedAt": 1709041137000,
+   "quoteToken": {
+    "address": "0x4200000000000000000000000000000000000006",
+    "name": "Wrapped Ether",
+    "symbol": "WETH"
+   },
+   "txns": {
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 72,
+     "sells": 50
+    },
+    "h6": {
+     "buys": 18,
+     "sells": 15
+    },
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    }
+   },
+   "volume": {
+    "h1": 0,
+    "h24": 23863.08,
+    "h6": 6009.57,
+    "m5": 0
+   }
+  },
+  {
+   "baseToken": {
+    "address": "0x532f27101965dd16442E59d40670FaF5eBB142E4",
+    "name": "Brett",
+    "symbol": "BRETT"
+   },
+   "chainId": "base",
+   "dexId": "aerodrome",
+   "liquidity": {
+    "base": 79735626,
+    "quote": 152.3518,
+    "usd": 878967.6
+   },
+   "pairAddress": "0x4e829F8A5213c42535AB84AA40BD4aDCCE9cBa02",
+   "quoteToken": {
+    "address": "0x4200000000000000000000000000000000000006",
+    "name": "Wrapped Ether",
+    "symbol": "WETH"
+   },
+   "txns": {
+    "h1": {
+     "buys": 21,
+     "sells": 23
+    },
+    "h24": {
+     "buys": 584,
+     "sells": 448
+    },
+    "h6": {
+     "buys": 186,
+     "sells": 156
+    },
+    "m5": {
+     "buys": 0,
+     "sells": 6
+    }
+   },
+   "volume": {
+    "h1": 15569.61,
+    "h24": 233878.59,
+    "h6": 92857.66,
+    "m5": 2120.73
+   }
+  },
+  {
+   "baseToken": {
+    "address": "0x532f27101965dd16442E59d40670FaF5eBB142E4",
+    "name": "Brett",
+    "symbol": "BRETT"
+   },
+   "chainId": "base",
+   "dexId": "pancakeswap",
+   "liquidity": {
+    "base": 29368419,
+    "quote": 14.2791,
+    "usd": 209983.1
+   },
+   "pairAddress": "0x75CC10fdcEa4b7D13c115ABB08240ac9c9Be6f2f",
+   "pairCreatedAt": 1723526243000,
+   "quoteToken": {
+    "address": "0x4200000000000000000000000000000000000006",
+    "name": "Wrapped Ether",
+    "symbol": "WETH"
+   },
+   "txns": {
+    "h1": {
+     "buys": 1,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 10,
+     "sells": 4
+    },
+    "h6": {
+     "buys": 5,
+     "sells": 1
+    },
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    }
+   },
+   "volume": {
+    "h1": 0,
+    "h24": 1.53,
+    "h6": 0.35,
+    "m5": 0
+   }
+  }
+ ],
+ "schemaVersion": "1.0.0"
+}

@@ -1,0 +1,41 @@
+{
+ "contractCode": {
+  "hasProxyCalls": false,
+  "isProxy": false,
+  "openSource": true,
+  "rootOpenSource": true
+ },
+ "flags": [],
+ "honeypotResult": {
+  "isHoneypot": false
+ },
+ "pair": {
+  "chainId": "8453",
+  "createdAtTimestamp": "1709041137",
+  "creationTxHash": "0x0e29d8efff98b9925091ad05882f2c00296a5ed060d174ea4f5c21ac26763733",
+  "liquidity": 1654597.6963856642,
+  "pair": {
+   "address": "0xBA3F945812a83471d709BCe9C3CA699A19FB46f7",
+   "name": "Uniswap V3: WETH-BRETT",
+   "token0": "0x4200000000000000000000000000000000000006",
+   "token1": "0x532f27101965dd16442E59d40670FaF5eBB142E4",
+   "type": "UniswapV3"
+  },
+  "reserves0": "307844729716502684320",
+  "reserves1": "84025412119772082872956712",
+  "router": "0x2626664c2603336E57B271c5C0b26F421741e481"
+ },
+ "simulationResult": {
+  "buyGas": "219385",
+  "buyTax": 0,
+  "sellGas": "146703",
+  "sellTax": 0,
+  "transferTax": 0
+ },
+ "simulationSuccess": true,
+ "summary": {
+  "flags": [],
+  "risk": "low",
+  "riskLevel": 1
+ }
+}
