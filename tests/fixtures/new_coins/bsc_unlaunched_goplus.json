@@ -1,0 +1,52 @@
+{
+ "code": 1,
+ "message": "OK",
+ "result": {
+  "0x8819581bd88352bf4f9cd377b3bddee35c46f2cc": {
+   "anti_whale_modifiable": "0",
+   "buy_tax": "",
+   "can_take_back_ownership": "0",
+   "cannot_buy": "0",
+   "creator_address": "0x8c85e8cbc34b63948ec8dcb875b78a942608d91f",
+   "creator_balance": "0.000000000000035278",
+   "creator_percent": "0.000000",
+   "dex": [],
+   "external_call": "0",
+   "hidden_owner": "0",
+   "holder_count": "1",
+   "holders": [
+    {
+     "address": "0x8c85e8cbc34b63948ec8dcb875b78a942608d91f",
+     "balance": "1000000000",
+     "is_contract": 0,
+     "is_locked": 0,
+     "percent": "1.000000000000000000",
+     "tag": ""
+    }
+   ],
+   "honeypot_with_same_creator": "0",
+   "is_anti_whale": "0",
+   "is_blacklisted": "0",
+   "is_honeypot": "0",
+   "is_in_dex": "0",
+   "is_mintable": "0",
+   "is_open_source": "1",
+   "is_proxy": "0",
+   "is_whitelisted": "0",
+   "lp_holders": [],
+   "owner_balance": "0",
+   "owner_change_balance": "0",
+   "owner_percent": "0",
+   "personal_slippage_modifiable": "0",
+   "selfdestruct": "0",
+   "sell_tax": "",
+   "slippage_modifiable": "0",
+   "token_name": "\u5e01\u5b89\u7687\u5e1d",
+   "token_symbol": "\u5e01\u5b89\u7687\u5e1d",
+   "total_supply": "1000000000",
+   "trading_cooldown": "0",
+   "transfer_pausable": "0",
+   "transfer_tax": ""
+  }
+ }
+}

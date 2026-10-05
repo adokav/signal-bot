@@ -7,6 +7,19 @@ Kod: `acce_unified/new_coins.py`. Bot: `/new` ve paneldeki "🆕 Yeni Coinler (C
 - Her coin bir dolandırıcılık taramasından geçiyor.
 - MEXC yeni listeleme radarı kapatıldı (`UNIFIED_LISTING_RADAR_ENABLED=0`). Kodu şimdilik duruyor.
 
+**Sürüm 2 (2026-10-05, aynı gün):**
+- İlk sürüm (v1) yayına girdiği gün sağlayıcıların gerçek cevaplarıyla denendi. Bu ortamın ağ izni o gün açıldı.
+- Gerçek cevaplar belgelerden farklı çıktı:
+  - GoPlus vergi alanlarını boş bırakıyor ve `cannot_sell_all` alanını hiç göndermiyor.
+  - Birçok havuzun LP tokeni yok: Uniswap V3/V4 ve Solana'daki yoğunlaşmış likidite havuzları.
+  - LP tokenleri bazen token kontratının kendisinde duruyor.
+- Bu yüzden v1 PEPE, BRETT ve BONK gibi yerleşik coinleri ya ❔ ya da yanlışlıkla ❌ sayıyordu.
+- v2 bu farklara göre düzeltildi:
+  - Satılabilirlik gerçek bir alım-satım simülasyonundan (honeypot.is) ölçülüyor.
+  - Havuz kilidinde kırmızı bayrak, LP'nin çoğunun sıradan cüzdanlarda olması.
+  - Solana'da RugCheck'in hesap etiketleri kullanılıyor.
+- Ayarlar yalnızca cevapların biçimine göre yapıldı, hiçbir coinin sonucuna bakılmadı. v1 kaydı değerlendirilmeyecek.
+
 ## Bu tarama nedir, ne değildir
 
 - **Nedir:** Bilinen dolandırıcılık kalıplarını arar:
@@ -31,8 +44,9 @@ Kod: `acce_unified/new_coins.py`. Bot: `/new` ve paneldeki "🆕 Yeni Coinler (C
 |---|---|---|
 | CoinMarketCap `listings/latest` (`sort=date_added`) | En yeni 200 coin: eklenme zamanı, zincir ve kontrat adresi, fiyat, hacim, arz, etiketler | `CMC_API_KEY` |
 | CoinMarketCap `quotes/latest` | 7, 30 ve 90 gün sonraki fiyat | `CMC_API_KEY` |
-| GoPlus `token_security` | EVM zincirleri: honeypot, vergi, yetkiler, cüzdanlar, havuz kilidi | yok |
-| RugCheck `tokens/{mint}/report` | Solana: basım ve dondurma yetkisi, cüzdanlar, havuz kilidi, rug işareti | yok |
+| GoPlus `token_security` | EVM zincirleri: honeypot işareti, satış yetkileri, kontrat yetkileri, cüzdanlar, havuz kilidi | yok |
+| honeypot.is `IsHoneypot` | EVM zincirleri: gerçek alım-satım simülasyonu, alım/satış/transfer vergisi | yok |
+| RugCheck `tokens/{mint}/report` | Solana: basım ve dondurma yetkisi, cüzdanlar, hesap etiketleri (havuz, kilit, yaratıcı), havuz kilidi, risk listesi, rug işareti, piyasa likiditesi | yok |
 | DexScreener `tokens/{adres}` | Bütün zincirler: DEX likiditesi, havuz yaşı, 24 saatlik alış ve satış sayısı | yok |
 
 **CMC anahtarı:**
@@ -56,10 +70,10 @@ Her kontrolün sonucu ✅ geçti, ⚠️ dikkat, ❌ kırmızı bayrak ya da ❔
 
 | Grup | ❌ kırmızı bayrak | ⚠️ dikkat |
 |---|---|---|
-| Satılabilirlik | Honeypot. Tamamı satılamıyor. Alım ya da satış vergisi ≥ %10. Vergi sonradan artırılabilir ya da cüzdana özel vergi konabilir. Solana'da dondurma (freeze) yetkisi açık ya da transfer ücreti ≥ %10. 24 saatte en az 20 alış var ama hiç satış yok. | Vergi ≥ %5. Transfer durdurulabilir. Kara liste yetkisi var. İşlem bekleme süresi var. |
+| Satılabilirlik | Simülasyonda satış başarısız (honeypot). Simülasyonda alım, satış ya da transfer vergisi ≥ %10. GoPlus honeypot diyor. Vergi sonradan artırılabilir ya da cüzdana özel vergi konabilir. Solana'da dondurma (freeze) yetkisi açık ya da transfer ücreti ≥ %10. 24 saatte en az 20 alış var ama hiç satış yok. | Vergi ≥ %5. Transfer durdurulabilir. Kara liste yetkisi var. İşlem bekleme süresi var. |
 | Yetkiler | Kaynak kodu doğrulanmamış. Yeni token basılabilir. Sahip bakiyeleri değiştirebilir. Gizli sahip var. Sahiplik geri alınabilir. Kontrat kendini yok edebilir. | Proxy (kod değiştirilebilir). Dış kontrata bağımlı. Solana'da isim ve sembol değiştirilebilir. |
-| Dağılım | İlk 10 cüzdan ≥ %50 (EVM). Yaratıcı ya da sahip payı ≥ %20. RugCheck'in kendi yoğunlaşma uyarısı "danger" seviyesinde. | İlk 10 cüzdan ≥ %30. Yaratıcı payı ≥ %5. İlk 10'da en az 3 birbirine bağlı (insider) hesap. |
-| Likidite | Havuzun %50'den azı kilitli ya da yakılmış. DEX likiditesi < 10.000 $. RugCheck "rug pull olmuş" diyor. | Havuzun %90'dan azı kilitli. Likidite < 50.000 $. En eski havuz 1 günden genç. |
+| Dağılım | İlk 10 cüzdan ≥ %50 (EVM; borsa cüzdanları dahil). Yaratıcı ya da sahip payı ≥ %20. Solana'da RugCheck'in kendi yoğunlaşma uyarısı "danger" seviyesinde. | İlk 10 cüzdan ≥ %30. Yaratıcı payı ≥ %5. İlk 10'da en az 3 birbirine bağlı (insider) hesap. |
+| Likidite | EVM'de LP'nin (V2 tokeni ya da V3/V4 pozisyonu) en az %50'si sıradan cüzdanlarda: çekilebilir. DEX likiditesi < 10.000 $. Solana'da RugCheck "rug pull olmuş" ya da "LP kilitsiz"/"düşük likidite" ("danger") diyor. | LP'nin %90'ından azı kilitli ya da yakılmış; geri kalanı kontratlarda, kilit doğrulanamıyor. Likidite < 50.000 $. En eski havuz 1 günden genç. |
 | Kimlik | — | Kontrattaki sembol CMC'dekiyle aynı değil. Aynı sembolde başka bir yeni coin var (taklit olabilir). |
 | Hacim | — | 24 saatlik hacim likiditenin 50 katından fazla (şişirilmiş hacim olabilir). |
 | Arz | — | Dolaşımdaki arz toplamın %20'sinden az. |
@@ -67,10 +81,18 @@ Her kontrolün sonucu ✅ geçti, ⚠️ dikkat, ❌ kırmızı bayrak ya da ❔
 **Cüzdan payları ham miktarlardan hesaplanır.** Pay, tutulan miktarın toplam arza oranıdır. Böylece bir sağlayıcının yüzde birimi (0,1 mi, %10 mu) yanlış okunamaz.
 
 Hesaba girmeyen hesaplar:
-- havuz hesapları;
-- kilitli hesaplar;
+- havuz hesapları (EVM'de GoPlus'ın havuz adresleri; Solana'da RugCheck'in AMM etiketli hesapları);
+- kilitli hesaplar (Solana'da RugCheck'in LOCKER etiketli hesapları);
 - yakma adresleri;
 - etiketli kontratlar (havuz, kilit kontratı).
+
+**Solana havuz kilidi:**
+- Yalnızca LP tokeni olan havuzlarda ölçülür. pump.fun bağlanma eğrisi de buna dahildir.
+- Sonuç, havuzların likiditesine göre ağırlıklandırılır.
+- Yoğunlaşmış likidite havuzlarında (Orca, Meteora DLMM…) kilitlenecek LP tokeni yoktur; bu havuzlar hesaba girmez.
+- Bizim hesabımız en fazla ⚠️ verir. ❌, RugCheck'in kendi risk listesinden gelir.
+
+**Likidite yedeği:** DexScreener bir havuzun likiditesini vermiyorsa, örneğin pump.fun eğrisinde, RugCheck'in ölçtüğü piyasa likiditesi kullanılır.
 
 ## Karar
 
@@ -81,7 +103,10 @@ Hesaba girmeyen hesaplar:
 **Hata ve sınır durumları:**
 - Sağlayıcıya ulaşılamazsa, cevap bozuksa ya da bir alan boşsa o kontrol ❔ olur.
 - **Zorunlu alanlar:** Kırmızı bayrak üretebilen her alan gelmeden grup ✅ olamaz.
-  - Satılabilirlik: honeypot, tamamı satılamama, alım vergisi, satış vergisi, vergi değiştirme, cüzdana özel vergi.
+  - Satılabilirlik (EVM):
+    - Başarılı bir alım-satım simülasyonu: honeypot sonucu ile alım, satış ve transfer vergisi.
+    - GoPlus'ta honeypot, vergi değiştirme ve cüzdana özel vergi alanları.
+    - DEX'te havuzu olmayan bir token simüle edilemez; sonuç ❔ olur.
   - Yetkiler: kaynak kodu, basım, bakiye değiştirme, gizli sahip, sahipliği geri alma, kendini yok etme.
   - Dağılım: en az bir sayılabilen cüzdan. Boş liste ❔ olur.
 - Eklenme zamanı şimdiden sonra olan bir CMC satırı taramaya alınmaz.
@@ -96,6 +121,8 @@ Hesaba girmeyen hesaplar:
 
 **Kayıt:** `/data/new_coins_ledger.jsonl` (yalnızca ekleme yapılır, fsync).
 - **`FIRST_SEEN`:** Her coinin ilk görüldüğü andaki kararı, grupları ve fiyatı.
+  - Kayıt kimlikleri şema etiketini taşır (`FIRST_SEEN:v2:…`, `OUTCOME:v2:…`).
+  - Böylece v1 kayıtları v2'nin ilk görülmelerini ve sonuçlarını hiçbir zaman gölgelemez.
 - **`VERDICT`:** Kararın sonradan değiştiği an.
 - **`OUTCOME`:** 7, 30 ve 90 gün sonraki fiyat. Her vade, vadesinden sonraki 1 gün içinde ölçülür.
   - O pencerede CMC'ye sorulduysa ama fiyat yoksa `NO_QUOTE` yazılır. Sorulduğunu bir `QUOTE_GAP` kaydı kanıtlar.
@@ -103,9 +130,9 @@ Hesaba girmeyen hesaplar:
   - Kaçırılan bir vade, sonraki bir fiyatla asla doldurulmaz. Sıfır da yazılmaz.
 - Her kayıt `trial` ve `can_authorize_trade: false` taşır.
 
-**Ön-kayıt:** Trial `3deff6cb87ad4e38`, `research/trials/registry.jsonl`. Hiçbir kayıt oluşmadan, 2026-10-05'te yapıldı.
-- Birleşmemiş ilk taslak `71a4ac3276e13694` incelemede iki noktada değişti: zorunlu alanlar eklendi ve kaçırılan vadeler artık doldurulmuyor.
-- Bu değişiklik de henüz hiçbir kayıt yokken yapıldı.
+**Ön-kayıt:** Trial `49aa03675513c906` (`new-coins/v2`), `research/trials/registry.jsonl`. Hiçbir v2 kaydı ve hiçbir sonuç oluşmadan, 2026-10-05'te yapıldı.
+- Yerini aldığı v1 trial'ı `3deff6cb87ad4e38` değerlendirilmeyecek. Neden yukarıda, "Sürüm 2" başlığında.
+- v1'in birleşmemiş taslağı `71a4ac3276e13694` incelemede değişmişti. O değişiklik de henüz hiçbir kayıt yokken yapıldı.
 - **İddia:** İlk görüldüğünde AĞIR RİSK olan coinler, BARİZ KIRMIZI BAYRAK YOK olanlardan daha sık çöker.
   - Çöküş: 30 günde −%90 ya da daha kötü, veya fiyat yok.
 - **Zaman:** 2027-04-05'ten önce değerlendirilmez.
@@ -122,12 +149,19 @@ Hesaba girmeyen hesaplar:
 
 ## Bilinen sınırlar
 
-- **Sağlayıcı cevapları canlıda doğrulanmadı.** Kod yazılırken bu ortamdan CMC, GoPlus, RugCheck ve DexScreener'a erişilemedi. Ayrıştırıcılar belgelere göre yazıldı ve örnek veriyle test edildi.
-  - Bir alan beklenenden farklı gelirse sonuç ❔ olur, ✅ olmaz.
-  - İlk dağıtımdan sonra `/new` çıktısı kontrol edilmeli.
-- **Solana'da havuz hesapları her zaman ayrılamayabilir.** Bu yüzden kendi hesabımız Solana'da en fazla ⚠️ verir. ❌, RugCheck'in kendi yoğunlaşma uyarısından gelir.
-- **Uniswap v3 tarzı havuzlarda kilit verisi çoğu zaman yok.** Bu havuzlarda likidite NFT pozisyonlarıyla tutulur. Bu yüzden bu coinler ❔ VERİ EKSİK olur.
-- **EVM'de borsa cüzdanları ayrılmıyor.** Arzı bir borsada tutulan bir coin yanlışlıkla ❌ alabilir. Bu hata temkinli yöndedir.
+- **Sağlayıcı cevaplarının doğrulanma durumu:**
+  - GoPlus, honeypot.is, RugCheck ve DexScreener 2026-10-05'te gerçek cevaplarla doğrulandı.
+  - Kırpılmış gerçek cevaplar `tests/fixtures/new_coins/` altında, regresyon testi olarak duruyor:
+    - PEPE ve BRETT: kırmızı bayrak yok.
+    - Henüz piyasaya çıkmamış, tek cüzdanlık BSC tokeni: ❌.
+    - BONK: kırmızı bayrak yok.
+    - Basım ve dondurma yetkisi açık bir pump tokeni: ❌.
+  - CoinMarketCap cevabı bu ortamda anahtar olmadığı için denenemedi. CMC alanları belgelere göre okunuyor; ilk canlı `/new` çıktısı kontrol edilmeli.
+- **EVM'de LP kontratlarda duruyorsa kilit doğrulanamıyor.** Örnekler: GoPlus'ın etiketlemediği kilit kontratları, token kontratının kendisi, pozisyon yöneticileri. Sonuç ⚠️ olur.
+  - Dolandırıcı LP'yi kendi kontrol ettiği bir kontrata koyarsa bu tarama onu yakalamaz.
+- **EVM'de borsa cüzdanları ayrılmıyor.** Arzı borsalarda tutulan bir coinde ilk 10 cüzdan payı yüksek görünür. Yerleşik coinlerde %33–35 civarında, yani ⚠️. %50'yi aşarsa yanlışlıkla ❌ alabilir; bu hata temkinli yöndedir.
+- **Solana'da kendi cüzdan ve kilit hesabımız en fazla ⚠️ verir.** ❌, RugCheck'in kendi risk listesinden gelir.
+- **pump.fun bağlanma eğrisindeki küçük tokenler** çoğunlukla 10.000 $'ın altında likiditeyle ❌ alır. Bu doğru bir risk işaretidir.
 - **CMC'nin arz verisi çoğu yeni coinde projenin kendi beyanıdır.** Bu yüzden arz kontrolü kritik değildir.
 - **Kapsam sınırı:** Bir taramada en yeni 200 coin okunur. 72 saatte 200'den fazla coin eklenirse eskileri pencereden düşer.
 - **Kırmızı bayrağı olmayan bir proje de çökebilir.** Pazarlama ile yükselip sonra satış baskısıyla düşmek kontrat hilesi gerektirmez. Bu tarama yalnızca bilinen tuzakları eler.

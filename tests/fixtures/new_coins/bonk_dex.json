@@ -1,0 +1,140 @@
+{
+ "pairs": [
+  {
+   "baseToken": {
+    "address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+    "name": "Bonk",
+    "symbol": "Bonk"
+   },
+   "chainId": "solana",
+   "dexId": "orca",
+   "liquidity": {
+    "base": 73183056853,
+    "quote": 1260.1401,
+    "usd": 431644.72
+   },
+   "pairAddress": "5zpyutJu9ee6jFymDGoK7F6S5Kczqtc9FomP3ueKuyA9",
+   "pairCreatedAt": 1671980424000,
+   "quoteToken": {
+    "address": "So11111111111111111111111111111111111111112",
+    "name": "Wrapped SOL",
+    "symbol": "SOL"
+   },
+   "txns": {
+    "h1": {
+     "buys": 101,
+     "sells": 125
+    },
+    "h24": {
+     "buys": 5592,
+     "sells": 5998
+    },
+    "h6": {
+     "buys": 1515,
+     "sells": 1080
+    },
+    "m5": {
+     "buys": 6,
+     "sells": 15
+    }
+   },
+   "volume": {
+    "h1": 8030.93,
+    "h24": 531285.45,
+    "h6": 112126.18,
+    "m5": 853
+   }
+  },
+  {
+   "baseToken": {
+    "address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+    "name": "Bonk",
+    "symbol": "Bonk"
+   },
+   "chainId": "solana",
+   "dexId": "meteora",
+   "liquidity": {
+    "base": 24585421466,
+    "quote": 175216,
+    "usd": 269442.04
+   },
+   "pairAddress": "31p1hptjhFo6ZD8oBqkfutNXQKGGPyi7YcEAfsyKW777",
+   "pairCreatedAt": 1752767469000,
+   "quoteToken": {
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "name": "USD Coin",
+    "symbol": "USDC"
+   },
+   "txns": {
+    "h1": {
+     "buys": 14,
+     "sells": 53
+    },
+    "h24": {
+     "buys": 355,
+     "sells": 440
+    },
+    "h6": {
+     "buys": 106,
+     "sells": 168
+    },
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    }
+   },
+   "volume": {
+    "h1": 8759.34,
+    "h24": 147829.71,
+    "h6": 58245.07,
+    "m5": 0
+   }
+  },
+  {
+   "baseToken": {
+    "address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+    "name": "Bonk",
+    "symbol": "Bonk"
+   },
+   "chainId": "solana",
+   "dexId": "meteora",
+   "liquidity": {
+    "base": 49045400093,
+    "quote": 366.2602,
+    "usd": 232049.12
+   },
+   "pairAddress": "AtcGozT6i1GR3wJAjVwRwmt7qbHqZrBUqKs2DcMAKoVe",
+   "pairCreatedAt": 1706213679000,
+   "quoteToken": {
+    "address": "So11111111111111111111111111111111111111112",
+    "name": "Wrapped SOL",
+    "symbol": "SOL"
+   },
+   "txns": {
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 184,
+     "sells": 168
+    },
+    "h6": {
+     "buys": 51,
+     "sells": 62
+    },
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    }
+   },
+   "volume": {
+    "h1": 0,
+    "h24": 66197.03,
+    "h6": 18648.5,
+    "m5": 0
+   }
+  }
+ ],
+ "schemaVersion": "1.0.0"
+}

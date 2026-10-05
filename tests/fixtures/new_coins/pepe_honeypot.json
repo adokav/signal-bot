@@ -1,0 +1,41 @@
+{
+ "contractCode": {
+  "hasProxyCalls": false,
+  "isProxy": false,
+  "openSource": true,
+  "rootOpenSource": true
+ },
+ "flags": [],
+ "honeypotResult": {
+  "isHoneypot": false
+ },
+ "pair": {
+  "chainId": "1",
+  "createdAtTimestamp": "1681492871",
+  "creationTxHash": "0x273894b35d8c30d32e1ffa22ee6aa320cc9f55f2adbba0583594ed47c031f6f6",
+  "liquidity": 32160357.590761498,
+  "pair": {
+   "address": "0xA43fe16908251ee70EF74718545e4FE6C5cCEc9f",
+   "name": "Uniswap V2: PEPE-WETH",
+   "token0": "0x6982508145454Ce325dDbE47a25d4ec3d2311933",
+   "token1": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+   "type": "UniswapV2"
+  },
+  "reserves0": "3656132170744321577064264988534",
+  "reserves1": "5935375550577750856008",
+  "router": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+ },
+ "simulationResult": {
+  "buyGas": "151216",
+  "buyTax": 0,
+  "sellGas": "105214",
+  "sellTax": 0,
+  "transferTax": 0
+ },
+ "simulationSuccess": true,
+ "summary": {
+  "flags": [],
+  "risk": "low",
+  "riskLevel": 1
+ }
+}

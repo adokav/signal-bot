@@ -31,6 +31,7 @@ CMC_QUOTES_URL = "https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/lat
 GOPLUS_URL = "https://api.gopluslabs.io/api/v1/token_security/{chain_id}"
 RUGCHECK_URL = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 DEXSCREENER_URL = "https://api.dexscreener.com/latest/dex/tokens/{address}"
+HONEYPOT_URL = "https://api.honeypot.is/v2/IsHoneypot"
 
 HOUR = 3_600
 DAY = 86_400
@@ -41,12 +42,15 @@ MAX_CHECKS_PER_SCAN = 40          # security look-ups per scan (provider rate li
 OUTCOME_DAYS = (7, 30, 90)
 OUTCOME_TOLERANCE_SECONDS = DAY   # a horizon is measured within a day of it, or it is MISSED (never backfilled)
 # Every field that can raise a red flag must be present before its group can pass.
-SELLABILITY_FIELDS = ("is_honeypot", "cannot_sell_all", "buy_tax", "sell_tax", "slippage_modifiable",
-                      "personal_slippage_modifiable")
+# GoPlus fields that must parse. Live replies (2026-10-05) leave buy_tax/sell_tax empty and omit
+# cannot_sell_all, so taxes and sellability come from an actual buy/sell simulation (honeypot.is).
+SELLABILITY_FIELDS = ("is_honeypot", "slippage_modifiable", "personal_slippage_modifiable")
+SIMULATION_FIELDS = ("buyTax", "sellTax", "transferTax")
 POWER_FIELDS = ("is_open_source", "is_mintable", "owner_change_balance", "hidden_owner",
                 "can_take_back_ownership", "selfdestruct")
 KEEP_PER_VERDICT = 20             # cards kept in the bot state per verdict (newest first); counts cover all
-SCHEMA = "new-coins/v1"
+SCHEMA = "new-coins/v2"
+SCHEMA_TAG = "v2"                 # in ledger ids, so v1 records never shadow v2 first sights or outcomes
 
 PASS, WARN, FAIL, UNKNOWN = "PASS", "WARN", "FAIL", "UNKNOWN"
 ICON = {PASS: "✅", WARN: "⚠️", FAIL: "❌", UNKNOWN: "❔"}
@@ -61,8 +65,9 @@ GROUPS = (*CRITICAL, VOLUME, SUPPLY)
 # Rules of thumb (not learned from data; docs/NEW_COINS.md).
 TAX_FAIL, TAX_WARN = Decimal("0.10"), Decimal("0.05")
 TOP10_FAIL, TOP10_WARN = Decimal("0.50"), Decimal("0.30")
+LP_WALLET_FAIL = Decimal("0.50")  # LP held by plain wallets (not locked, burned or in a contract) can be pulled
 CREATOR_FAIL, CREATOR_WARN = Decimal("0.20"), Decimal("0.05")
-LP_LOCK_FAIL, LP_LOCK_WARN = Decimal("0.50"), Decimal("0.90")
+LP_LOCK_WARN = Decimal("0.90")
 LIQUIDITY_FAIL_USD, LIQUIDITY_WARN_USD = 10_000.0, 50_000.0
 YOUNG_POOL_SECONDS = DAY
 NO_SELLS_MIN_BUYS = 20
@@ -71,7 +76,7 @@ CIRCULATING_WARN = 0.20
 
 # Chains the screen can check: (key, GoPlus chain id or "rugcheck", DexScreener chain id, CMC names/slugs).
 CHAINS = (
-    ("solana", "rugcheck", "solana", ("solana",)),
+    ("solana", "rugcheck", "solana", ("solana",)),   # honeypot.is chain id = the GoPlus id for EVM chains
     ("bsc", "56", "bsc", ("bnb smart chain (bep20)", "bnb smart chain", "bnb", "bsc", "binance smart chain",
                            "binance-smart-chain")),
     ("base", "8453", "base", ("base",)),
@@ -92,10 +97,12 @@ BURN_ADDRESSES = frozenset({"0x0000000000000000000000000000000000000000", "0x000
 # Forward evaluation, pre-registered before the screen produced any record (research/trials/registry.jsonl).
 # A change to a threshold, a critical group or the verdict rule needs a new SCHEMA and a new trial.
 TRIAL_FAMILY = "new_coin_security_screen_forward"
-TRIAL_DATASET = {"source": "coinmarketcap listings/latest by date_added; GoPlus (EVM), RugCheck (Solana), "
-                           "DexScreener; outcomes from CoinMarketCap quotes",
-                 "forward_from": "2026-10-05", "kind": "live forward record (/data/new_coins_ledger.jsonl)"}
-TRIAL = "3deff6cb87ad4e38"
+TRIAL_DATASET = {"source": "coinmarketcap listings/latest by date_added; GoPlus and a honeypot.is buy/sell "
+                           "simulation (EVM), RugCheck (Solana), DexScreener; outcomes from CoinMarketCap quotes",
+                 "forward_from": "2026-10-05", "kind": "live forward record (/data/new_coins_ledger.jsonl)",
+                 "supersedes": "3deff6cb87ad4e38 (new-coins/v1, never evaluated: recalibrated on live provider "
+                               "replies the day it shipped, before any outcome)"}
+TRIAL = "49aa03675513c906"
 
 
 def trial_params() -> dict[str, Any]:
@@ -105,12 +112,20 @@ def trial_params() -> dict[str, Any]:
                                                           "group -> VERI_EKSIK; else BAYRAK_YOK",
         "thresholds": {"tax_fail": str(TAX_FAIL), "tax_warn": str(TAX_WARN), "top10_fail": str(TOP10_FAIL),
                        "top10_warn": str(TOP10_WARN), "creator_fail": str(CREATOR_FAIL),
-                       "creator_warn": str(CREATOR_WARN), "lp_lock_fail": str(LP_LOCK_FAIL),
+                       "creator_warn": str(CREATOR_WARN),
                        "lp_lock_warn": str(LP_LOCK_WARN), "liquidity_fail_usd": LIQUIDITY_FAIL_USD,
                        "liquidity_warn_usd": LIQUIDITY_WARN_USD, "young_pool_seconds": YOUNG_POOL_SECONDS,
-                       "no_sells_min_buys": NO_SELLS_MIN_BUYS, "solana_top10": "WARN only; FAIL from RugCheck risks"},
-        "required_fields": {"sellability": list(SELLABILITY_FIELDS), "powers": list(POWER_FIELDS),
+                       "no_sells_min_buys": NO_SELLS_MIN_BUYS, "lp_wallet_fail": str(LP_WALLET_FAIL)},
+        "required_fields": {"sellability": list(SELLABILITY_FIELDS) + [f"simulation.{k}" for k in SIMULATION_FIELDS]
+                            + ["simulation.isHoneypot"], "powers": list(POWER_FIELDS),
                             "holders": "at least one counted holder"},
+        "lp_rule": {"evm": "FAIL if >= 50% of LP is held by plain wallets; PASS if >= 90% locked or burned; "
+                           "else WARN (contract-held, unverifiable)",
+                    "solana": "liquidity-weighted lock over LP-token pools and bonding curves; PASS >= 90%, else "
+                              "WARN; FAIL only from RugCheck risks or its rug flag"},
+        "holders_rule": {"evm": "top 10 excluding locked, burn, pair and tagged contracts; exchanges included",
+                         "solana": "top 10 excluding RugCheck AMM/LOCKER accounts, WARN at most; FAIL from RugCheck "
+                                   "holder risks or a creator share >= 20%"},
         "outcome_days": list(OUTCOME_DAYS),
         "outcome_rule": "price measured within 1 day after the horizon; past that the horizon is MISSED, or "
                         "NO_QUOTE if CMC was asked inside the window and had no price; never backfilled",
@@ -342,6 +357,14 @@ class SecurityProviders:
         entry = result.get(address.lower()) or result.get(address)
         return entry if isinstance(entry, Mapping) else None
 
+    def honeypot(self, chain: str, address: str) -> Mapping[str, Any] | None:
+        """honeypot.is buy/sell simulation; None when it has no pair for the token (404)."""
+
+        chain_id = next(g for key, g, _d, _a in CHAINS if key == chain)
+        payload = self.http.get("honeypot", HONEYPOT_URL, params={"address": address, "chainID": chain_id},
+                                not_found_ok=True)
+        return payload if isinstance(payload, Mapping) else None
+
     def rugcheck(self, mint: str) -> Mapping[str, Any] | None:
         payload = self.http.get("rugcheck", RUGCHECK_URL.format(mint=mint), not_found_ok=True)
         return payload if isinstance(payload, Mapping) else None
@@ -437,39 +460,23 @@ def _share(part: Any, whole: Any) -> Decimal | None:
     return a / b
 
 
-def screen_evm(card: Card, entry: Mapping[str, Any] | None) -> None:
-    """GoPlus token_security for an EVM token."""
+def _sim_tax(value: Any) -> Decimal | None:
+    """A honeypot.is tax in percent (0..100) as a fraction; anything else is not trusted."""
 
+    number = _dec(value)
+    return number / 100 if number is not None and 0 <= number <= 100 else None
+
+
+def screen_evm(card: Card, entry: Mapping[str, Any] | None, simulation: Mapping[str, Any] | None = None) -> None:
+    """GoPlus token_security (contract powers, holders, LP) and a honeypot.is buy/sell simulation."""
+
+    _screen_sellability(card, entry, simulation)
     if entry is None:
-        for group in (SELLABILITY, POWERS, HOLDERS):
+        for group in (POWERS, HOLDERS):
             card.add(group, UNKNOWN, "güvenlik verisi bulunamadı")
+        card.add(LIQUIDITY, UNKNOWN, "havuz kilidi bilinmiyor")
         return
     coin = card.coin
-    honeypot, cannot_sell = _flag(entry.get("is_honeypot")), _flag(entry.get("cannot_sell_all"))
-    buy_tax, sell_tax = _fraction(entry.get("buy_tax")), _fraction(entry.get("sell_tax"))
-    if honeypot:
-        card.add(SELLABILITY, FAIL, "honeypot: alınıyor ama satılamıyor")
-    if cannot_sell:
-        card.add(SELLABILITY, FAIL, "tamamı satılamıyor")
-    for label, tax in (("alım", buy_tax), ("satış", sell_tax)):
-        if tax is not None and tax >= TAX_FAIL:
-            card.add(SELLABILITY, FAIL, f"{label} vergisi {_pct(tax)}")
-        elif tax is not None and tax >= TAX_WARN:
-            card.add(SELLABILITY, WARN, f"{label} vergisi {_pct(tax)}")
-    for key, status, text in (("slippage_modifiable", FAIL, "vergi sonradan artırılabilir"),
-                              ("personal_slippage_modifiable", FAIL, "cüzdana özel vergi konabilir"),
-                              ("transfer_pausable", WARN, "transfer durdurulabilir"),
-                              ("is_blacklisted", WARN, "kara liste yetkisi var"),
-                              ("trading_cooldown", WARN, "işlem bekleme süresi var")):
-        if _flag(entry.get(key)):
-            card.add(SELLABILITY, status, text)
-    parsed = {"buy_tax": buy_tax, "sell_tax": sell_tax,
-              **{k: _flag(entry.get(k)) for k in SELLABILITY_FIELDS if k not in ("buy_tax", "sell_tax")}}
-    if any(parsed[k] is None for k in SELLABILITY_FIELDS):
-        card.add(SELLABILITY, UNKNOWN, "satılabilirlik doğrulanamadı")
-    elif not card.groups.get(SELLABILITY):
-        card.add(SELLABILITY, PASS, f"honeypot yok, vergi {_pct(buy_tax)}/{_pct(sell_tax)}")
-
     required = {k: _flag(entry.get(k)) for k in POWER_FIELDS}
     if required["is_open_source"] is False:
         card.add(POWERS, FAIL, "kaynak kodu doğrulanmamış")
@@ -500,7 +507,7 @@ def screen_evm(card: Card, entry: Mapping[str, Any] | None) -> None:
         if not shares or any(s is None for s in shares):
             card.add(HOLDERS, UNKNOWN, "cüzdan payları okunamadı")
         else:
-            _holder_findings(card, sum(shares, Decimal(0)), "havuz, kilitli ve yakılmış hesaplar hariç")
+            _holder_findings(card, sum(shares, Decimal(0)), "borsa cüzdanları dahil")
     for key, label in (("creator_percent", "yaratıcı"), ("owner_percent", "sahip")):
         share = _fraction(entry.get(key))
         if share is not None and share >= CREATOR_FAIL:
@@ -508,20 +515,82 @@ def screen_evm(card: Card, entry: Mapping[str, Any] | None) -> None:
         elif share is not None and share >= CREATOR_WARN:
             card.add(HOLDERS, WARN, f"{label} payı {_pct(share)}")
 
-    lp_holders = entry.get("lp_holders") if isinstance(entry.get("lp_holders"), list) else None
-    lp_total = entry.get("lp_total_supply")
-    if _flag(entry.get("is_in_dex")) and lp_holders and _dec(lp_total):
-        parts = [_share(h.get("balance"), lp_total) for h in lp_holders if isinstance(h, Mapping)
-                 and (_flag(h.get("is_locked")) or str(h.get("address") or "").lower() in BURN_ADDRESSES)]
-        if any(p is None for p in parts):
-            card.add(LIQUIDITY, UNKNOWN, "havuz kilidi okunamadı")
-        else:
-            _lock_findings(card, sum(parts, Decimal(0)))
-    else:
-        card.add(LIQUIDITY, UNKNOWN, "havuz kilidi bilinmiyor")
+    _evm_lp_lock(card, entry)
     symbol = str(entry.get("token_symbol") or "").strip()
     if symbol and symbol.upper() != coin.symbol.upper():
         card.add(IDENTITY, WARN, "kontrattaki sembol CMC'dekiyle aynı değil")
+
+
+def _screen_sellability(card: Card, entry: Mapping[str, Any] | None, simulation: Mapping[str, Any] | None) -> None:
+    """Sellability passes only on a successful buy/sell simulation and complete GoPlus sell-side flags."""
+
+    sim_ok = isinstance(simulation, Mapping) and simulation.get("simulationSuccess") is True
+    result = simulation.get("simulationResult") if sim_ok and isinstance(simulation.get("simulationResult"),
+                                                                          Mapping) else {}
+    taxes = {k: _sim_tax(result.get(k)) for k in SIMULATION_FIELDS}
+    verdict = simulation.get("honeypotResult") if sim_ok and isinstance(simulation.get("honeypotResult"),
+                                                                         Mapping) else {}
+    is_honeypot = verdict.get("isHoneypot") if isinstance(verdict.get("isHoneypot"), bool) else None
+    if is_honeypot:
+        card.add(SELLABILITY, FAIL, "honeypot: satış simülasyonu başarısız")
+    for key, label in (("buyTax", "alım"), ("sellTax", "satış"), ("transferTax", "transfer")):
+        tax = taxes[key]
+        if tax is not None and tax >= TAX_FAIL:
+            card.add(SELLABILITY, FAIL, f"{label} vergisi {_pct(tax)}")
+        elif tax is not None and tax >= TAX_WARN:
+            card.add(SELLABILITY, WARN, f"{label} vergisi {_pct(tax)}")
+    flags = {k: _flag((entry or {}).get(k)) for k in SELLABILITY_FIELDS}
+    if flags["is_honeypot"]:
+        card.add(SELLABILITY, FAIL, "GoPlus: honeypot")
+    for key, status, text in (("slippage_modifiable", FAIL, "vergi sonradan artırılabilir"),
+                              ("personal_slippage_modifiable", FAIL, "cüzdana özel vergi konabilir"),
+                              ("transfer_pausable", WARN, "transfer durdurulabilir"),
+                              ("is_blacklisted", WARN, "kara liste yetkisi var"),
+                              ("trading_cooldown", WARN, "işlem bekleme süresi var")):
+        if _flag((entry or {}).get(key)):
+            card.add(SELLABILITY, status, text)
+    if not sim_ok or is_honeypot is None or any(t is None for t in taxes.values()):
+        card.add(SELLABILITY, UNKNOWN, "alım-satım simülasyonu yapılamadı")
+    elif entry is None or any(v is None for v in flags.values()):
+        card.add(SELLABILITY, UNKNOWN, "satış yetkileri doğrulanamadı")
+    elif not card.groups.get(SELLABILITY):
+        card.add(SELLABILITY, PASS, f"simülasyonda alım-satım çalıştı, vergi {_pct(taxes['buyTax'])}/"
+                                    f"{_pct(taxes['sellTax'])}")
+
+
+def _evm_lp_lock(card: Card, entry: Mapping[str, Any]) -> None:
+    """LP (V2 tokens or V3/V4 positions) held by plain wallets can be pulled: that is the red flag.
+
+    Locked or burned LP passes. LP held by contracts (lockers GoPlus does not
+    tag, the token contract itself, position managers) cannot be verified and
+    is a warning, never a pass.
+    """
+
+    lp_holders = entry.get("lp_holders") if isinstance(entry.get("lp_holders"), list) else None
+    lp_total = entry.get("lp_total_supply")
+    if not _flag(entry.get("is_in_dex")) or not lp_holders or _dec(lp_total) is None:
+        card.add(LIQUIDITY, UNKNOWN, "havuz kilidi bilinmiyor")
+        return
+    safe, wallets = [], []
+    for h in lp_holders:
+        if not isinstance(h, Mapping):
+            continue
+        share = _share(h.get("balance"), lp_total)
+        if share is None:
+            card.add(LIQUIDITY, UNKNOWN, "havuz kilidi okunamadı")
+            return
+        if _flag(h.get("is_locked")) or str(h.get("address") or "").lower() in BURN_ADDRESSES:
+            safe.append(share)
+        elif _flag(h.get("is_contract")) is False:
+            wallets.append(share)
+    safe_share, wallet_share = sum(safe, Decimal(0)), sum(wallets, Decimal(0))
+    if wallet_share >= LP_WALLET_FAIL:
+        card.add(LIQUIDITY, FAIL, f"havuzun {_pct(wallet_share)}'ı cüzdanlarda; çekilebilir (rug riski)")
+    elif safe_share >= LP_LOCK_WARN:
+        card.add(LIQUIDITY, PASS, f"havuzun {_pct(safe_share)}'ı kilitli/yakılmış")
+    else:
+        card.add(LIQUIDITY, WARN, f"havuzun {_pct(safe_share)}'ı kilitli/yakılmış; geri kalanı kontratlarda, "
+                                  "kilit doğrulanamadı")
 
 
 def screen_solana(card: Card, report: Mapping[str, Any] | None) -> None:
@@ -561,48 +630,62 @@ def screen_solana(card: Card, report: Mapping[str, Any] | None) -> None:
         card.add(IDENTITY, WARN, "kontrattaki sembol CMC'dekiyle aynı değil")
 
     supply = token.get("supply") if token else None
+    known = report.get("knownAccounts") if isinstance(report.get("knownAccounts"), Mapping) else {}
+    pools = {a for a, v in known.items() if isinstance(v, Mapping) and str(v.get("type")) in ("AMM", "LOCKER")}
     holders = report.get("topHolders") if isinstance(report.get("topHolders"), list) else None
     if holders is None or _dec(supply) is None:
         card.add(HOLDERS, UNKNOWN, "cüzdan dağılımı bilinmiyor")
     else:
-        pools = _strings(report.get("markets"))
         counted = [h for h in holders if isinstance(h, Mapping)
                    and not ({str(h.get("owner") or ""), str(h.get("address") or "")} & pools)]
         shares = [_share(h.get("amount"), supply) for h in counted[:10]]
         if not shares or any(s is None for s in shares):
-            card.add(HOLDERS, UNKNOWN, "cüzdan payları okunamadı")
+            card.add(HOLDERS, UNKNOWN, "cüzdan payları okunamadı (arzın hepsi havuzda olabilir)")
         else:
             top10 = sum(shares, Decimal(0))
             status = WARN if top10 >= TOP10_WARN else PASS     # FAIL comes from RugCheck's own risk list
-            card.add(HOLDERS, status, f"ilk 10 cüzdan {_pct(top10)} (havuz hesapları ayrılamamış olabilir)")
+            card.add(HOLDERS, status, f"ilk 10 cüzdan {_pct(top10)} (havuzlar hariç)")
         if sum(1 for h in counted[:10] if h.get("insider") is True) >= 3:
             card.add(HOLDERS, WARN, "ilk 10 cüzdanda birbirine bağlı (insider) hesaplar")
+    creator = _share(report.get("creatorBalance"), supply) if report.get("creatorBalance") is not None else None
+    if creator is not None and creator >= CREATOR_FAIL:
+        card.add(HOLDERS, FAIL, f"yaratıcı payı {_pct(creator)}")
+    elif creator is not None and creator >= CREATOR_WARN:
+        card.add(HOLDERS, WARN, f"yaratıcı payı {_pct(creator)}")
     _rugcheck_risks(card, report.get("risks"))
+    _solana_lp_lock(card, report.get("markets"))
 
-    markets = report.get("markets") if isinstance(report.get("markets"), list) else None
-    locks = []
-    for market in markets or []:
+
+SYSTEM_PROGRAM = "11111111111111111111111111111111"
+
+
+def _solana_lp_lock(card: Card, markets: Any) -> None:
+    """Liquidity-weighted LP lock over pools that have an LP token (or a bonding curve).
+
+    Concentrated-liquidity pools (Orca, Meteora DLMM…) have no LP token to
+    lock and are left out. Our own figure is at most a warning; a red flag
+    comes from RugCheck's risk list ("LP unlocked") or its rug flag.
+    """
+
+    weighted, weight = Decimal(0), Decimal(0)
+    for market in markets if isinstance(markets, list) else []:
         lp = market.get("lp") if isinstance(market, Mapping) and isinstance(market.get("lp"), Mapping) else None
-        if lp is not None:
-            locks.append(_share(lp.get("lpLocked"), lp.get("lpTotalSupply")))
-    if not locks or any(s is None for s in locks):
-        card.add(LIQUIDITY, UNKNOWN, "havuz kilidi bilinmiyor")
-    else:
-        _lock_findings(card, min(locks))
-
-
-def _strings(value: Any, depth: int = 0) -> set[str]:
-    """Every address-like string in a provider structure (pool vaults, LP mints, authorities)."""
-
-    if depth > 4:
-        return set()
-    if isinstance(value, str):
-        return {value} if SOLANA_ADDRESS.match(value) else set()
-    if isinstance(value, Mapping):
-        return set().union(*(_strings(v, depth + 1) for v in value.values())) if value else set()
-    if isinstance(value, list):
-        return set().union(*(_strings(v, depth + 1) for v in value)) if value else set()
-    return set()
+        if lp is None:
+            continue
+        curve = str(market.get("marketType") or "") == "pump_fun"
+        if str(lp.get("lpMint") or SYSTEM_PROGRAM) == SYSTEM_PROGRAM and not curve:
+            continue
+        share = _share(lp.get("lpLocked"), lp.get("lpTotalSupply"))
+        usd = (_dec(lp.get("quoteUSD")) or Decimal(0)) + (_dec(lp.get("baseUSD")) or Decimal(0))
+        if share is None or usd <= 0:
+            continue
+        weighted, weight = weighted + share * usd, weight + usd
+    if weight <= 0:
+        card.add(LIQUIDITY, UNKNOWN, "havuz kilidi ölçülemiyor (LP tokeni olan havuz yok)")
+        return
+    locked = weighted / weight
+    status = PASS if locked >= LP_LOCK_WARN else WARN
+    card.add(LIQUIDITY, status, f"LP tokenli havuzların {_pct(locked)}'ı kilitli/yakılmış (likiditeye göre)")
 
 
 # RugCheck risk names (English, untrusted) mapped to our groups by keyword; the text shown is ours.
@@ -642,16 +725,8 @@ def _holder_findings(card: Card, top10: Decimal, note: str) -> None:
         card.add(HOLDERS, PASS, f"ilk 10 cüzdan {_pct(top10)} ({note})")
 
 
-def _lock_findings(card: Card, locked: Decimal) -> None:
-    if locked < LP_LOCK_FAIL:
-        card.add(LIQUIDITY, FAIL, f"havuzun yalnızca {_pct(locked)}'ı kilitli/yakılmış; çekilebilir")
-    elif locked < LP_LOCK_WARN:
-        card.add(LIQUIDITY, WARN, f"havuzun {_pct(locked)}'ı kilitli/yakılmış")
-    else:
-        card.add(LIQUIDITY, PASS, f"havuzun {_pct(locked)}'ı kilitli/yakılmış")
-
-
-def screen_market(card: Card, pairs: Sequence[Mapping[str, Any]] | None, *, now: int) -> None:
+def screen_market(card: Card, pairs: Sequence[Mapping[str, Any]] | None, *, now: int,
+                  fallback_usd: float | None = None) -> None:
     """DexScreener liquidity, pool age and buy/sell counts; CMC volume against liquidity."""
 
     coin = card.coin
@@ -663,6 +738,8 @@ def screen_market(card: Card, pairs: Sequence[Mapping[str, Any]] | None, *, now:
         liquidity = [_finite((p.get("liquidity") or {}).get("usd")) if isinstance(p.get("liquidity"), Mapping)
                      else None for p in pairs]
         known = [v for v in liquidity if v is not None and v >= 0]
+        if not known and fallback_usd is not None and fallback_usd >= 0:
+            known = [fallback_usd]                         # e.g. a pump.fun curve DexScreener does not price
         if not known:
             card.add(LIQUIDITY, UNKNOWN, "DEX likiditesi okunamadı")
         else:
@@ -731,8 +808,11 @@ def assess(coin: NewCoin, *, security: Mapping[str, Any] | None, pairs: Sequence
     elif coin.chain == "solana":
         screen_solana(card, security)
     else:
-        screen_evm(card, security)
-    screen_market(card, pairs, now=now)
+        bundle = security if isinstance(security, Mapping) else {}
+        screen_evm(card, bundle.get("goplus"), bundle.get("honeypot"))
+    fallback = (_finite(security.get("totalMarketLiquidity"))
+                if coin.chain == "solana" and isinstance(security, Mapping) else None)
+    screen_market(card, pairs, now=now, fallback_usd=fallback)
     return card
 
 
@@ -758,10 +838,18 @@ class NewCoinsScanner:
         if budget[0] <= 0:
             return (cached[1], cached[2], cached[3]) if cached else None
         budget[0] -= 1
-        security_error = False
+        security_error, retry = False, False
         try:
-            security = (self.providers.rugcheck(coin.address) if coin.chain == "solana"
-                        else self.providers.goplus(coin.chain, coin.address))
+            if coin.chain == "solana":
+                security: Any = self.providers.rugcheck(coin.address)
+            else:
+                security = {"goplus": self.providers.goplus(coin.chain, coin.address)}
+                try:
+                    security["honeypot"] = self.providers.honeypot(coin.chain, coin.address)
+                except NewCoinsDataError as exc:     # sellability stays unknown; try again next scan
+                    security["honeypot"], retry = None, True
+                    if "http 429" in str(exc):
+                        budget[0] = 0
         except NewCoinsDataError as exc:
             security, security_error = None, True
             if "http 429" in str(exc):
@@ -773,7 +861,7 @@ class NewCoinsScanner:
             if "http 429" in str(exc):
                 budget[0] = 0
         self.sleep(1.0)                                    # stay well inside the free rate limits
-        if not security_error and pairs is not None:       # a failed look-up is retried next scan
+        if not security_error and not retry and pairs is not None:   # a failed look-up is retried next scan
             self._cache[key] = (now, security, pairs, False)
         return security, pairs, security_error
 
@@ -817,12 +905,14 @@ class NewCoinsScanner:
                 "schema": SCHEMA, "trial": TRIAL, "can_authorize_trade": False}
         if self._verdicts is None:
             self._verdicts = {r["cmc_id"]: r.get("verdict") for r in self.ledger.records()
-                              if r.get("event") in ("FIRST_SEEN", "VERDICT") and "cmc_id" in r}
+                              if r.get("event") in ("FIRST_SEEN", "VERDICT") and "cmc_id" in r
+                              and r.get("schema") == SCHEMA}
         previous = self._verdicts.get(coin.cmc_id)
         if previous is None:
-            self.ledger.append({"id": f"FIRST_SEEN:{coin.cmc_id}", "event": "FIRST_SEEN", **base})
+            self.ledger.append({"id": f"FIRST_SEEN:{SCHEMA_TAG}:{coin.cmc_id}", "event": "FIRST_SEEN", **base})
         elif previous != summary["verdict"]:
-            self.ledger.append({"id": f"VERDICT:{coin.cmc_id}:{now}", "event": "VERDICT", "previous": previous,
+            self.ledger.append({"id": f"VERDICT:{SCHEMA_TAG}:{coin.cmc_id}:{now}", "event": "VERDICT",
+                                "previous": previous,
                                 **base})
         self._verdicts[coin.cmc_id] = summary["verdict"]
 
@@ -839,9 +929,9 @@ class NewCoinsScanner:
         for record in self.ledger.records():
             if record.get("event") == "FIRST_SEEN" and record.get("schema") == SCHEMA:
                 first[record["cmc_id"]] = record
-            elif record.get("event") == "OUTCOME":
+            elif record.get("event") == "OUTCOME" and record.get("schema") == SCHEMA:
                 done.add((record["cmc_id"], record["days"]))
-            elif record.get("event") == "QUOTE_GAP":
+            elif record.get("event") == "QUOTE_GAP" and record.get("schema") == SCHEMA:
                 gaps.add((record["cmc_id"], record["days"]))
         due = [(cid, d) for cid, r in first.items() for d in OUTCOME_DAYS
                if (cid, d) not in done and now >= int(r["at"]) + d * DAY]
@@ -857,7 +947,8 @@ class NewCoinsScanner:
             start, price = first[cid].get("price"), prices.get(cid)
             if late <= OUTCOME_TOLERANCE_SECONDS:
                 if price is None:
-                    self.ledger.append({"id": f"QUOTE_GAP:{cid}:{days}", "event": "QUOTE_GAP", "cmc_id": cid,
+                    self.ledger.append({"id": f"QUOTE_GAP:{SCHEMA_TAG}:{cid}:{days}", "event": "QUOTE_GAP",
+                                        "cmc_id": cid,
                                         "days": days, "at": now, "schema": SCHEMA, "trial": TRIAL,
                                         "can_authorize_trade": False})
                     continue                               # ask again until the window closes
@@ -866,7 +957,8 @@ class NewCoinsScanner:
                 status, price = ("NO_QUOTE" if (cid, days) in gaps else "MISSED"), None
             recorded += 1
             self.ledger.append({
-                "id": f"OUTCOME:{cid}:{days}", "event": "OUTCOME", "cmc_id": cid, "days": days, "at": now,
+                "id": f"OUTCOME:{SCHEMA_TAG}:{cid}:{days}", "event": "OUTCOME", "cmc_id": cid, "days": days,
+                "at": now,
                 "horizon_at": horizon, "late_hours": round(late / HOUR, 1), "status": status, "price": price,
                 "return_pct": ((price / start - 1.0) * 100.0) if price and start else None,
                 "verdict_at_first_sight": first[cid].get("verdict"), "schema": SCHEMA, "trial": TRIAL,

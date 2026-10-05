@@ -308,7 +308,7 @@ güncellenenler belirtildi.
       VERİ EKSİK ya da BARİZ KIRMIZI BAYRAK YOK. Güvenilirlik ya da getiri
       iddiası yok.
     - İsabet henüz ölçülmedi. İleriye dönük kayıt ön-kayıtlı (trial
-      `3deff6cb87ad4e38`); değerlendirme 2027-04-05'ten önce yapılmaz.
+      `49aa03675513c906`, v2: aynı gün gerçek sağlayıcı cevaplarıyla yeniden ayarlandı); değerlendirme 2027-04-05'ten önce yapılmaz.
 
 ## Kesin çizgiler
 
