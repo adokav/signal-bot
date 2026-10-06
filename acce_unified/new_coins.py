@@ -948,7 +948,7 @@ def build_reference(rows: Sequence[Any], *, now: int) -> Reference:
     by_symbol: dict[str, list[Established]] = {}
     by_name: dict[str, list[Established]] = {}
     by_address: dict[str, Established] = {}
-    parsed = 0
+    seen: set[int] = set()
     for position, row in enumerate(rows or []):
         if not isinstance(row, Mapping):
             continue
@@ -956,20 +956,22 @@ def build_reference(rows: Sequence[Any], *, now: int) -> Reference:
             cmc_id = int(row["id"])
         except (KeyError, TypeError, ValueError):
             continue
+        symbol, name = _norm_symbol(row.get("symbol")), _norm_name(row.get("name"))
+        if cmc_id in seen or symbol is None or name is None:
+            continue                                   # a duplicate or nameless row adds nothing to compare with
+        seen.add(cmc_id)
         rank = row.get("cmc_rank")
         rank = rank if isinstance(rank, int) and not isinstance(rank, bool) and rank > 0 else position + 1
         entry = Established(cmc_id, rank)
-        parsed += 1
-        for index, key in ((by_symbol, _norm_symbol(row.get("symbol"))), (by_name, _norm_name(row.get("name")))):
-            if key:
-                index.setdefault(key, []).append(entry)
+        by_symbol.setdefault(symbol, []).append(entry)
+        by_name.setdefault(name, []).append(entry)
         platform = row.get("platform") if isinstance(row.get("platform"), Mapping) else None
         chain = chain_of(platform)
         key = _address_key(chain, valid_address(chain, platform.get("token_address")) if platform else None)
         if key:
             by_address.setdefault(key, entry)
-    if parsed < REFERENCE_MIN:
-        raise NewCoinsDataError(f"cmc reference too short ({parsed})")
+    if len(seen) < REFERENCE_MIN:                      # count distinct usable coins, not rows
+        raise NewCoinsDataError(f"cmc reference too short ({len(seen)})")
     return Reference(now, {k: tuple(v) for k, v in by_symbol.items()},
                      {k: tuple(v) for k, v in by_name.items()}, by_address)
 
@@ -1002,17 +1004,21 @@ def _dex_links(pairs: Sequence[Mapping[str, Any]]) -> bool:
 
 def screen_identity(card: Card, reference: Reference | None, *, urls: Any = None,
                     pairs: Sequence[Mapping[str, Any]] | None = None) -> None:
-    """Lookalikes of CMC's 500 largest coins and missing project links. Adds PASS or WARN only.
+    """Lookalikes of CMC's 500 largest coins and missing project links.
 
-    A CMC listing is checked against its CMC links (``urls``); an address the
-    user sent (/check) against DexScreener's project profile (``pairs``) and
-    is PASS only when it is one of the established coins' own contracts.
+    A CMC listing keeps its pre-registered identity evidence (its contract is
+    registered on CMC and matches the contract's symbol); these checks only
+    add PASS or WARN to it, so they never move it between verdicts. An address
+    the user sent (/check) has no other identity evidence: without the
+    reference its identity group is UNKNOWN (never a green card), with it the
+    address is PASS only when it is one of the established coins' own
+    contracts. Links come from CMC (``urls``) or DexScreener's profile (``pairs``).
     """
 
     coin = card.coin
     own = reference.own(coin.chain, coin.address) if reference else None
     if reference is None:
-        card.add(IDENTITY, WARN, "taklit kontrolü yapılamadı (CMC listesi yok)")
+        card.add(IDENTITY, WARN if coin.listed else UNKNOWN, "taklit kontrolü yapılamadı (CMC listesi yok)")
     elif own is not None and (not coin.listed or own.cmc_id == coin.cmc_id):
         if not coin.listed:
             card.add(IDENTITY, PASS, f"CMC'de kayıtlı coin (#{own.rank})")

@@ -661,6 +661,17 @@ def test_the_reference_indexes_symbol_name_and_contract_and_refuses_a_short_list
         nc.build_reference(reference_rows(100), now=NOW)                                  # a cut list is not used
 
 
+@pytest.mark.parametrize("rows", [
+    [{"id": 1, "symbol": "AAA", "name": "Aaa", "cmc_rank": 1}] * 450,                     # one coin, repeated
+    [{"id": k, "symbol": "", "name": f"Coin {k}"} for k in range(450)],                    # no symbols
+    [{"id": k, "symbol": f"C{k}", "name": "  "} for k in range(450)],                      # no names
+    reference_rows(399) + [dict(r) for r in reference_rows(399)],                          # 399 coins, twice
+])
+def test_the_reference_counts_distinct_usable_coins_not_rows(rows):
+    with pytest.raises(nc.NewCoinsDataError, match="too short"):
+        nc.build_reference(rows, now=NOW)
+
+
 def _verdict_cards():
     clean = nc.assess(coin(), security=evm(), pairs=pairs(), copies=1, now=NOW)
     heavy = nc.assess(coin(), security=evm(goplus=clean_goplus(is_mintable="1")), pairs=pairs(), copies=1, now=NOW)
@@ -796,14 +807,20 @@ def _named(chain, address=EVM, **kw):
 
 
 def test_check_places_an_evm_address_on_its_one_supported_chain():
-    checker, providers, _ = _checker(_named("base") + _named("pulsechain"))        # an Ethereum copy chain
+    checker, providers, _ = _checker(_named("base") + _named("pulsechain"), reference=True)   # a copy chain
     card, note = checker.check(None, EVM)
     assert note is None and card.coin.chain == "base" and card.coin.listed is False
     assert card.verdict == nc.NO_RED_FLAG and card.coin.cmc_id == 0 and card.coin.volume_24h == 50_000
-    identity = [f.text for f in card.groups[nc.IDENTITY]]
-    assert identity == ["taklit kontrolü yapılamadı (CMC listesi yok)",
-                        "kimlik doğrulanamadı: adresi resmi kaynaktan teyit et",
-                        "DexScreener'da site/sosyal hesap kaydı yok"]
+    identity = [(f.status, f.text) for f in card.groups[nc.IDENTITY]]
+    assert identity == [(nc.WARN, "kimlik doğrulanamadı: adresi resmi kaynaktan teyit et"),
+                        (nc.WARN, "DexScreener'da site/sosyal hesap kaydı yok")]
+
+
+def test_check_without_the_lookalike_reference_is_never_a_green_card():
+    checker, _, _ = _checker(_named("base"))                                      # no CMC reference yet
+    card, _ = checker.check(None, EVM)
+    assert card.status(nc.IDENTITY) == nc.UNKNOWN and card.verdict == nc.DATA_MISSING
+    assert "taklit kontrolü yapılamadı (CMC listesi yok)" in card.reasons(nc.UNKNOWN)
 
 
 @pytest.mark.parametrize("found,reason", [
@@ -841,7 +858,7 @@ def test_check_of_an_established_contract_is_identified_and_a_lookalike_is_warne
 
 
 def test_check_caches_results_and_spaces_fresh_look_ups():
-    checker, providers, times = _checker(_named("base"))
+    checker, providers, times = _checker(_named("base"), reference=True)
     first, _ = checker.check(None, EVM)
     again, note = checker.check(None, EVM.upper().replace("0X", "0x"))
     assert again is first and "önbellek" in note and providers.dex_calls == 1
@@ -862,7 +879,7 @@ def test_check_of_a_solana_mint_uses_rugcheck_and_never_calls_a_poolless_token_c
 
 
 def test_the_check_view_escapes_provider_text_and_is_not_a_trade_call():
-    checker, _, _ = _checker(_named("base"))
+    checker, _, _ = _checker(_named("base"), reference=True)
     card, _ = checker.check(None, EVM)
     text = nc.render_check(card, now=NOW + 60, note="1 dk önceki kontrol (önbellek)")
     assert "<b>Dog</b>" not in text and "&lt;b&gt;Dog&lt;/b&gt;" in text

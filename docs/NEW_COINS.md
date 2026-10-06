@@ -112,11 +112,11 @@ Hesaba girmeyen hesaplar:
 - **Taklit kontrolü:** CMC'nin piyasa değerine göre ilk 500 coini günde bir kez okunur.
   - Yeni coinin sembolü ya da adı bunlardan biriyle aynıysa ⚠️ "CMC #30 ile aynı sembol: taklit ya da köprü olabilir".
   - Sembolde `$` ve boşluklar, adda büyük/küçük harf ve noktalama yok sayılır ("$WIF" = "WIF").
-  - Liste 400 coinden kısa gelirse kullanılmaz; eksik liste kontrolü sessizce zayıflatırdı.
+  - Listede adı ve sembolü olan en az 400 farklı coin yoksa liste kullanılmaz. Tekrarlanan ya da adsız satırlar sayılmaz; eksik liste kontrolü sessizce zayıflatırdı.
   - Liste iki günden eskiyse kullanılmaz; kart "taklit kontrolü yapılamadı" der.
 - **Köken:** CMC'nin proje bilgisinde web sitesi ya da sosyal hesap yoksa ⚠️.
   - CMC cevap vermezse ya da cevap bozuksa "proje bilgisi okunamadı" yazılır. Bu "bağlantı yok" demek değildir.
-- **Neden yalnız ⚠️:** Bu kontroller ileriye dönük test ön-kayda alındıktan sonra eklendi. Taklit ya da eksik sosyal hesabın çöküşü öngördüğüne dair kanıt yok. ❌ verselerdi kararı değiştirip testi sıfırlarlardı. Uyarılar kayda (`warnings`) yazılır; ileride ayrı bir test için kullanılabilir.
+- **Neden yalnız ⚠️ (CMC coinlerinde):** Bir CMC coininin kimlik kanıtı ön-kayıtlı kontroldür: kontratı CMC'de kayıtlı ve kontrattaki sembolle uyumlu. Bu yeni kontroller o kanıtın üstüne yalnız uyarı ekler; çalışamadıklarında kırmızı bayrak gizlemiş olmazlar ve kart bunu açıkça yazar. Ayrıca bu kontroller ileriye dönük test ön-kayda alındıktan sonra eklendi. Taklit ya da eksik sosyal hesabın çöküşü öngördüğüne dair kanıt yok. ❌ verselerdi kararı değiştirip testi sıfırlarlardı. Uyarılar kayda (`warnings`) yazılır; ileride ayrı bir test için kullanılabilir.
 
 ## /check: tek adres kontrolü
 
@@ -129,6 +129,7 @@ Hesaba girmeyen hesaplar:
 - **Tarama:** `/new` ile aynı kontroller ve aynı karar kuralı. Farklar:
   - Ad, sembol, fiyat ve hacim DexScreener'dan gelir. Arz verisi yoktur (❔, kritik değil).
   - **Kimlik:** Adres CMC'nin ilk 500 coininden birinin ana kontratıysa ✅ "CMC'de kayıtlı coin (#30)". Değilse ⚠️ "kimlik doğrulanamadı: adresi resmi kaynaktan teyit et"; yerleşik bir coinin sembolünü ya da adını taşıyorsa ayrıca taklit uyarısı.
+  - **CMC listesi yoksa kimlik ❔ olur ve sonuç VERİ EKSİK'tir.** `/check` adresinin başka bir kimlik kanıtı yoktur; taklit kontrolü yapılamadan ✅ verilmez. Liste, yeni coin taraması tarafından kurulur: `NEW_COINS_ENABLED=1` ve `CMC_API_KEY` gerekir. Bot yeni açıldığında ilk tarama bitene kadar (birkaç dakika) `/check` VERİ EKSİK der.
   - **Köken:** DexScreener'da proje profili (site ya da sosyal hesap) yoksa ⚠️. Bu zayıf bir işarettir; profil ücretlidir.
 - **Kayıt:** `/check` sonuçları ileriye dönük kayda **girmez**. Tokeni kullanıcı seçtiği için sonuçları taramanın isabetini ölçmez.
 - **Sınırlar:** Aynı adresin sonucu 10 dakika saklanır. Yeni sorgular arasında en az 10 saniye olur (ücretsiz sağlayıcı sınırları).
