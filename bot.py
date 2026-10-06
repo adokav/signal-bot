@@ -120,6 +120,9 @@ NEW_COINS = new_coins.NewCoinsScanner(
     TrendLedger(Path(os.getenv("NEW_COINS_LEDGER_FILE", str(STATE_FILE.parent / "new_coins_ledger.jsonl")))),
     window_hours=max(1, int(os.getenv("NEW_COINS_WINDOW_HOURS", str(new_coins.WINDOW_HOURS)))),
 )
+# /check runs in the Telegram thread: its own HTTP session; the scanner's lookalike reference is only read.
+CHECKER = new_coins.AddressChecker(new_coins.SecurityProviders(timeout=CONFIG.request_timeout_seconds),
+                                   reference=NEW_COINS.current_reference)
 APP = Flask(__name__)
 HTTP = requests.Session()
 LOCK = threading.RLock()
@@ -147,6 +150,7 @@ COMMANDS = [
     {"command": "tactical", "description": "BTC ve ETH giriş/stop radarı"},
     {"command": "longs", "description": "MEXC Likit 100 Long İlk 3"},
     {"command": "new", "description": "CoinMarketCap yeni coinler: dolandırıcılık taraması"},
+    {"command": "check", "description": "Kontrat adresiyle anında dolandırıcılık taraması: /check <adres>"},
     {"command": "radar", "description": "Radara giren long sinyalleri ve stop durumu"},
     {"command": "d1", "description": "D1 döngü: gölge pozisyonlar, çıkış seviyesi ve acil stop"},
     {"command": "status", "description": "Tarama sağlığı ve veri durumu"},
@@ -264,7 +268,8 @@ def panel_keyboard() -> dict[str, Any]:
         [{"text": "💧 Long İlk 3", "callback_data": "LONGS"}],
         [{"text": "📋 Radar kaydı", "callback_data": "RADAR"}],
         [{"text": "📈 D1 Döngü", "callback_data": "D1"}],
-        [{"text": "🆕 Yeni Coinler (CMC)", "callback_data": "NEW"}],
+        [{"text": "🆕 Yeni Coinler (CMC)", "callback_data": "NEW"},
+         {"text": "🔎 Kontrat Kontrol", "callback_data": "CHECK"}],
         [
             {"text": "📊 Durum", "callback_data": "STATUS"},
             {"text": "🔄 Şimdi Tara", "callback_data": "SCAN"},
@@ -964,10 +969,32 @@ def _command(text: str) -> str:
         "/start": "PANEL", "/panel": "PANEL", "/tactical": "TACTICAL",
         "/btceth": "TACTICAL", "/longs": "LONGS", "/new": "NEW",
         "/listings": "NEW", "/status": "STATUS", "/scan": "SCAN", "/radar": "RADAR", "/d1": "D1",
+        "/check": "CHECK",
     }.get(token, token.lstrip("/").upper())
 
 
-def handle(action: str) -> None:
+def check_address(text: str) -> None:
+    """/check <address>: the new-coin screen for one address the user sends (not in the forward record)."""
+
+    parsed = new_coins.parse_check(text)
+    if parsed is None:
+        send(new_coins.CHECK_USAGE, keyboard=panel_keyboard())
+        return
+    send("🔎 Kontrol ediliyor…")
+    try:
+        card, note = CHECKER.check(*parsed)
+    except Exception as exc:                         # only the error type reaches the chat, never provider text
+        log.warning("Kontrat kontrolü hatası: %s", _safe_error(exc))
+        send(f"Kontrol yapılamadı ({type(exc).__name__}); biraz sonra yeniden dene.", keyboard=panel_keyboard())
+        return
+    if card is None:
+        send(str(note), keyboard=panel_keyboard())
+    else:
+        send(new_coins.render_check(card, now=int(time.time()), note=note), keyboard=panel_keyboard(),
+             html_mode=True)
+
+
+def handle(action: str, text: str = "") -> None:
     snapshot = _snapshot()
     if action == "TACTICAL":
         refreshed = tactical_scan_once(emit_alerts=False)
@@ -978,6 +1005,8 @@ def handle(action: str) -> None:
         send(format_longs(snapshot), keyboard=panel_keyboard())
     elif action == "NEW":
         send(format_new(), keyboard=panel_keyboard(), html_mode=True)
+    elif action == "CHECK":
+        check_address(text)
     elif action == "RADAR":
         with LOCK:
             rows = [dict(e) for e in STATE.get("radar_log") or []]
@@ -1039,10 +1068,12 @@ def telegram_loop() -> None:
                 chat = str((message.get("chat") or {}).get("id") or "")
                 if chat != CHAT_ID:
                     continue
-                action = str(callback.get("data") or "") or _command(str(message.get("text") or ""))
+                # A button press carries no arguments: the message it belongs to is the bot's own text.
+                text = "" if callback else str(message.get("text") or "")
+                action = str(callback.get("data") or "") or _command(text)
                 if callback.get("id"):
                     _api("answerCallbackQuery", {"callback_query_id": callback["id"]})
-                handle(action)
+                handle(action, text)
             _save_state()
         except Exception as exc:
             log.warning("Telegram polling hatası: %s", exc)
