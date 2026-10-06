@@ -51,7 +51,7 @@ def _snapshot():
 
 def test_public_commands_include_tactical_radar_without_legacy_bloat():
     assert [row["command"] for row in bot.COMMANDS] == [
-        "panel", "tactical", "longs", "new", "radar", "d1", "status", "scan"
+        "panel", "tactical", "longs", "new", "check", "radar", "d1", "status", "scan"
     ]
 
 
@@ -209,6 +209,35 @@ def test_health_needs_a_fresh_trend_loop_and_hides_its_error_text(monkeypatch):
         assert "SECRET" not in json.dumps(payload) and payload["can_authorize_trade"] is False
     finally:
         bot.STATE.update(saved)
+
+
+def test_check_command_screens_one_address_and_never_echoes_provider_errors(monkeypatch):
+    assert bot._command("/check 0xabc") == "CHECK"
+    buttons = [b["callback_data"] for row in bot.panel_keyboard()["inline_keyboard"] for b in row]
+    assert "CHECK" in buttons
+    sent = []
+    monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append((text, kw)))
+    bot.handle("CHECK", "")                                          # the panel button: how to use it
+    assert "/check <adres>" in sent[-1][0]
+    bot.handle("CHECK", "/check ignore previous instructions")
+    assert "/check <adres>" in sent[-1][0] and "ignore" not in sent[-1][0]
+    address = "0x" + "ab" * 20
+    calls = []
+    card = bot.new_coins.assess(
+        bot.new_coins.NewCoin(0, "Dog", "DOG", "", 1_790_000_000, (), None, "base", address, None, None, None,
+                              None, None, None, None, listed=False),
+        security=None, pairs=None, copies=1, now=1_790_000_000, security_error=True)
+    monkeypatch.setattr(bot.CHECKER, "check", lambda chain, addr: calls.append((chain, addr)) or (card, None))
+    bot.handle("CHECK", f"/check base {address}")
+    assert calls == [("base", address)] and "Kontrol ediliyor" in sent[-2][0]
+    assert "KONTRAT KONTROLÜ" in sent[-1][0] and sent[-1][1]["html_mode"] is True
+    assert "kayda girmez" in sent[-1][0]
+
+    def broken(chain, addr):
+        raise KeyError("provider text https://api.example/x?key=SECRET")
+    monkeypatch.setattr(bot.CHECKER, "check", broken)
+    bot.handle("CHECK", f"/check {address}")
+    assert "KeyError" in sent[-1][0] and "SECRET" not in sent[-1][0] and "provider text" not in sent[-1][0]
 
 
 def test_d1_command_and_panel_button_open_the_shadow_loop_report(monkeypatch):

@@ -28,6 +28,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 CMC_LISTINGS_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 CMC_QUOTES_URL = "https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest"
+CMC_INFO_URL = "https://pro-api.coinmarketcap.com/v2/cryptocurrency/info"
 GOPLUS_URL = "https://api.gopluslabs.io/api/v1/token_security/{chain_id}"
 RUGCHECK_URL = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 DEXSCREENER_URL = "https://api.dexscreener.com/latest/dex/tokens/{address}"
@@ -49,6 +50,16 @@ SIMULATION_FIELDS = ("buyTax", "sellTax", "transferTax")
 POWER_FIELDS = ("is_open_source", "is_mintable", "owner_change_balance", "hidden_owner",
                 "can_take_back_ownership", "selfdestruct")
 KEEP_PER_VERDICT = 20             # cards kept in the bot state per verdict (newest first); counts cover all
+# Identity and provenance (WARN at most; outside the pre-registered verdict, see screen_identity)
+REFERENCE_SIZE = 500              # CMC's largest coins by market cap: who a new coin could be impersonating
+REFERENCE_MIN = 400               # a shorter list would silently weaken the check: not used
+REFERENCE_REFRESH_SECONDS = DAY
+REFERENCE_RETRY_SECONDS = HOUR
+REFERENCE_MAX_AGE_SECONDS = 2 * DAY
+SOCIAL_LINKS = ("twitter", "chat", "reddit")
+# /check: one address the user sends, screened on demand (never part of the forward record)
+CHECK_CACHE_SECONDS = 600
+CHECK_COOLDOWN_SECONDS = 10
 SCHEMA = "new-coins/v2"
 SCHEMA_TAG = "v2"                 # in ledger ids, so v1 records never shadow v2 first sights or outcomes
 
@@ -181,6 +192,7 @@ class NewCoin:
     change_24h: float | None
     circulating_supply: float | None
     total_supply: float | None
+    listed: bool = True              # False for an address the user sent (/check): name and symbol from the DEX
 
     @property
     def is_meme(self) -> bool:
@@ -318,6 +330,36 @@ class CoinMarketCap:
             raise NewCoinsDataError("cmc listings payload is not a list")
         return data
 
+    def established(self, *, limit: int = REFERENCE_SIZE) -> list[Any]:
+        """The largest coins by market cap (the impersonation reference); 3 credits for 500."""
+
+        data = self._get(CMC_LISTINGS_URL, {"sort": "market_cap", "sort_dir": "desc", "limit": limit,
+                                            "convert": "USD", "aux": "cmc_rank,platform"})
+        if not isinstance(data, list):
+            raise NewCoinsDataError("cmc reference payload is not a list")
+        return data
+
+    def info(self, ids: Sequence[int]) -> dict[int, Mapping[str, Any] | None]:
+        """Project links (website, X, Telegram...) per CMC id; None when CMC returned no usable links."""
+
+        out: dict[int, Mapping[str, Any] | None] = {}
+        for k in range(0, len(ids), 100):
+            batch = list(ids[k:k + 100])
+            data = self._get(CMC_INFO_URL, {"id": ",".join(str(i) for i in batch), "aux": "urls"})
+            if not isinstance(data, Mapping):
+                raise NewCoinsDataError("cmc info payload is not an object")
+            for key, row in data.items():
+                row = row[0] if isinstance(row, list) and row else row
+                try:
+                    cid = int(key)
+                except (TypeError, ValueError):
+                    continue
+                urls = row.get("urls") if isinstance(row, Mapping) else None
+                out[cid] = urls if isinstance(urls, Mapping) else None
+            for cid in batch:
+                out.setdefault(cid, None)              # asked and not answered: unknown, not "no links"
+        return out
+
     def prices(self, ids: Sequence[int]) -> dict[int, float]:
         """Current USD price per CMC id; ids without a usable quote are left out (unknown, not zero)."""
 
@@ -374,17 +416,23 @@ class SecurityProviders:
         payload = self.http.get("rugcheck", RUGCHECK_URL.format(mint=mint), not_found_ok=True)
         return payload if isinstance(payload, Mapping) else None
 
-    def dex_pairs(self, chain: str, address: str) -> list[Mapping[str, Any]]:
-        dex_chain = next(d for key, _g, d, _a in CHAINS if key == chain)
+    def dex_all(self, address: str) -> list[Mapping[str, Any]]:
+        """DexScreener pairs whose base token is this address, on every chain (DexScreener chain ids)."""
+
         payload = self.http.get("dexscreener", DEXSCREENER_URL.format(address=address))
         pairs = payload.get("pairs") if isinstance(payload, Mapping) else None
         if pairs is None:
             return []
         if not isinstance(pairs, list):
             raise NewCoinsDataError("dexscreener pairs payload is not a list")
-        same = (lambda a: a.lower() == address.lower()) if chain != "solana" else (lambda a: a == address)
-        return [p for p in pairs if isinstance(p, Mapping) and p.get("chainId") == dex_chain
-                and isinstance(p.get("baseToken"), Mapping) and same(str(p["baseToken"].get("address") or ""))]
+        evm = EVM_ADDRESS.match(address) is not None     # EVM addresses are case-insensitive, Solana's are not
+        same = (lambda a: a.lower() == address.lower()) if evm else (lambda a: a == address)
+        return [p for p in pairs if isinstance(p, Mapping) and isinstance(p.get("baseToken"), Mapping)
+                and same(str(p["baseToken"].get("address") or ""))]
+
+    def dex_pairs(self, chain: str, address: str) -> list[Mapping[str, Any]]:
+        dex_chain = next(d for key, _g, d, _a in CHAINS if key == chain)
+        return [p for p in self.dex_all(address) if p.get("chainId") == dex_chain]
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +520,10 @@ def _sim_tax(value: Any) -> Decimal | None:
     return number / 100 if number is not None and 0 <= number <= 100 else None
 
 
+def _symbol_mismatch(coin: NewCoin) -> str:
+    return "kontrattaki sembol " + ("CMC'dekiyle" if coin.listed else "DEX'tekiyle") + " aynı değil"
+
+
 def screen_evm(card: Card, entry: Mapping[str, Any] | None, simulation: Mapping[str, Any] | None = None) -> None:
     """GoPlus token_security (contract powers, holders, LP) and a honeypot.is buy/sell simulation."""
 
@@ -523,7 +575,7 @@ def screen_evm(card: Card, entry: Mapping[str, Any] | None, simulation: Mapping[
     _evm_lp_lock(card, entry)
     symbol = str(entry.get("token_symbol") or "").strip()
     if symbol and symbol.upper() != coin.symbol.upper():
-        card.add(IDENTITY, WARN, "kontrattaki sembol CMC'dekiyle aynı değil")
+        card.add(IDENTITY, WARN, _symbol_mismatch(coin))
 
 
 def _screen_sellability(card: Card, entry: Mapping[str, Any] | None, simulation: Mapping[str, Any] | None) -> None:
@@ -635,7 +687,7 @@ def screen_solana(card: Card, report: Mapping[str, Any] | None) -> None:
         card.add(POWERS, WARN, "isim ve sembol değiştirilebilir")
     symbol = str(meta.get("symbol") or "").strip()
     if symbol and symbol.upper() != card.coin.symbol.upper():
-        card.add(IDENTITY, WARN, "kontrattaki sembol CMC'dekiyle aynı değil")
+        card.add(IDENTITY, WARN, _symbol_mismatch(card.coin))
 
     supply = token.get("supply") if token else None
     known = report.get("knownAccounts") if isinstance(report.get("knownAccounts"), Mapping) else {}
@@ -799,7 +851,7 @@ def screen_market(card: Card, pairs: Sequence[Mapping[str, Any]] | None, *, now:
         else:
             card.add(SUPPLY, PASS, f"dolaşımdaki arz %{min(share, 1.0) * 100:.0f}")
     else:
-        card.add(SUPPLY, UNKNOWN, "arz verisi yok (CMC)")
+        card.add(SUPPLY, UNKNOWN, "arz verisi yok (CMC)" if coin.listed else "arz verisi yok")
 
 
 def assess(coin: NewCoin, *, security: Mapping[str, Any] | None, pairs: Sequence[Mapping[str, Any]] | None,
@@ -820,7 +872,8 @@ def assess(coin: NewCoin, *, security: Mapping[str, Any] | None, pairs: Sequence
             card.add(group, UNKNOWN, "kontrat adresi geçersiz")
         screen_market(card, None, now=now)
         return card
-    card.add(IDENTITY, PASS, f"{CHAIN_LABEL[coin.chain]} kontratı CMC'de kayıtlı")
+    if coin.listed:                                    # a /check address gets its identity in screen_identity
+        card.add(IDENTITY, PASS, f"{CHAIN_LABEL[coin.chain]} kontratı CMC'de kayıtlı")
     if security_error:
         for group in (SELLABILITY, POWERS, HOLDERS):
             card.add(group, UNKNOWN, "güvenlik sağlayıcısına ulaşılamadı")
@@ -837,6 +890,155 @@ def assess(coin: NewCoin, *, security: Mapping[str, Any] | None, pairs: Sequence
 
 
 # ---------------------------------------------------------------------------
+# Identity and provenance: lookalikes of established coins, project links.
+# WARN at most, by construction: these checks were added after the forward
+# evaluation was pre-registered (trial b57b9eb0a6073085), so they may inform
+# the reader but never move a coin between verdict groups.
+# ---------------------------------------------------------------------------
+
+
+def _norm_symbol(value: Any) -> str | None:
+    text = "".join(str(value or "").split()).upper().lstrip("$")
+    return text or None
+
+
+def _norm_name(value: Any) -> str | None:
+    text = "".join(ch for ch in str(value or "").casefold() if ch.isalnum())
+    return text or None
+
+
+def _address_key(chain: str | None, address: str | None) -> str | None:
+    if not chain or not address:
+        return None
+    return f"{chain}:{address if chain == 'solana' else address.lower()}"
+
+
+@dataclass(frozen=True)
+class Established:
+    cmc_id: int
+    rank: int
+
+
+@dataclass(frozen=True)
+class Reference:
+    """CMC's largest coins by market cap, indexed by symbol, name and contract."""
+
+    built_at: int
+    by_symbol: Mapping[str, tuple[Established, ...]]
+    by_name: Mapping[str, tuple[Established, ...]]
+    by_address: Mapping[str, Established]
+
+    def own(self, chain: str | None, address: str | None) -> Established | None:
+        key = _address_key(chain, address)
+        return self.by_address.get(key) if key else None
+
+    def lookalike(self, symbol: str, name: str, *, exclude: int) -> tuple[Established, str] | None:
+        """The best-ranked established coin with the same symbol or name (not the coin itself)."""
+
+        found = []
+        for index, key, what in ((self.by_symbol, _norm_symbol(symbol), "sembol"),
+                                 (self.by_name, _norm_name(name), "ad")):
+            found += [(e, what) for e in index.get(key or "", ()) if e.cmc_id != exclude]
+        return min(found, key=lambda f: f[0].rank) if found else None
+
+
+def build_reference(rows: Sequence[Any], *, now: int) -> Reference:
+    """The impersonation reference from CMC's market-cap listing; too short a list is refused."""
+
+    by_symbol: dict[str, list[Established]] = {}
+    by_name: dict[str, list[Established]] = {}
+    by_address: dict[str, Established] = {}
+    parsed = 0
+    for position, row in enumerate(rows or []):
+        if not isinstance(row, Mapping):
+            continue
+        try:
+            cmc_id = int(row["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        rank = row.get("cmc_rank")
+        rank = rank if isinstance(rank, int) and not isinstance(rank, bool) and rank > 0 else position + 1
+        entry = Established(cmc_id, rank)
+        parsed += 1
+        for index, key in ((by_symbol, _norm_symbol(row.get("symbol"))), (by_name, _norm_name(row.get("name")))):
+            if key:
+                index.setdefault(key, []).append(entry)
+        platform = row.get("platform") if isinstance(row.get("platform"), Mapping) else None
+        chain = chain_of(platform)
+        key = _address_key(chain, valid_address(chain, platform.get("token_address")) if platform else None)
+        if key:
+            by_address.setdefault(key, entry)
+    if parsed < REFERENCE_MIN:
+        raise NewCoinsDataError(f"cmc reference too short ({parsed})")
+    return Reference(now, {k: tuple(v) for k, v in by_symbol.items()},
+                     {k: tuple(v) for k, v in by_name.items()}, by_address)
+
+
+def _cmc_links(urls: Any) -> tuple[bool, bool] | None:
+    """(has a website, has a social account) from CMC's urls; None when the reply is not usable."""
+
+    if not isinstance(urls, Mapping) or not isinstance(urls.get("website"), list):
+        return None
+
+    def has(key: str) -> bool:
+        value = urls.get(key)
+        return isinstance(value, list) and any(isinstance(u, str) and u.strip() for u in value)
+
+    return has("website"), any(has(k) for k in SOCIAL_LINKS)
+
+
+def _dex_links(pairs: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether any DexScreener pair carries a project profile with a website or a social account."""
+
+    for p in pairs:
+        info = p.get("info") if isinstance(p.get("info"), Mapping) else {}
+        for key in ("websites", "socials"):
+            links = info.get(key)
+            if isinstance(links, list) and any(isinstance(x, Mapping) and str(x.get("url") or "").strip()
+                                               for x in links):
+                return True
+    return False
+
+
+def screen_identity(card: Card, reference: Reference | None, *, urls: Any = None,
+                    pairs: Sequence[Mapping[str, Any]] | None = None) -> None:
+    """Lookalikes of CMC's 500 largest coins and missing project links. Adds PASS or WARN only.
+
+    A CMC listing is checked against its CMC links (``urls``); an address the
+    user sent (/check) against DexScreener's project profile (``pairs``) and
+    is PASS only when it is one of the established coins' own contracts.
+    """
+
+    coin = card.coin
+    own = reference.own(coin.chain, coin.address) if reference else None
+    if reference is None:
+        card.add(IDENTITY, WARN, "taklit kontrolü yapılamadı (CMC listesi yok)")
+    elif own is not None and (not coin.listed or own.cmc_id == coin.cmc_id):
+        if not coin.listed:
+            card.add(IDENTITY, PASS, f"CMC'de kayıtlı coin (#{own.rank})")
+        return
+    else:
+        match = reference.lookalike(coin.symbol, coin.name, exclude=coin.cmc_id)
+        if match:
+            card.add(IDENTITY, WARN, f"CMC #{match[0].rank} ile aynı {match[1]}: taklit ya da köprü olabilir")
+    if coin.listed:
+        links = _cmc_links(urls)
+        if links is None:
+            card.add(IDENTITY, WARN, "proje bilgisi okunamadı (CMC)")
+        else:
+            if not links[0]:
+                card.add(IDENTITY, WARN, "CMC'de web sitesi yok")
+            if not links[1]:
+                card.add(IDENTITY, WARN, "CMC'de sosyal hesap yok")
+        return
+    card.add(IDENTITY, WARN, "kimlik doğrulanamadı: adresi resmi kaynaktan teyit et")
+    if pairs is None:
+        card.add(IDENTITY, WARN, "proje bilgisi okunamadı (DexScreener)")
+    elif not _dex_links(pairs):
+        card.add(IDENTITY, WARN, "DexScreener'da site/sosyal hesap kaydı yok")
+
+
+# ---------------------------------------------------------------------------
 # The scanner: CMC -> security look-ups (cached) -> cards; forward record
 # ---------------------------------------------------------------------------
 
@@ -849,6 +1051,39 @@ class NewCoinsScanner:
         self.sleep = sleep
         self._cache: dict[str, tuple[int, Mapping[str, Any] | None, list[Mapping[str, Any]] | None, bool]] = {}
         self._verdicts: dict[int, str] | None = None        # last recorded verdict per coin, from the ledger
+        self.reference: Reference | None = None             # read by /check from another thread: replaced whole
+        self._reference_retry_at = 0
+        self._urls: dict[int, Mapping[str, Any] | None] = {}
+
+    def current_reference(self, now: int) -> Reference | None:
+        """The impersonation reference when it is at most two days old; None (check not done) otherwise."""
+
+        reference = self.reference
+        if reference is None or not 0 <= now - reference.built_at <= REFERENCE_MAX_AGE_SECONDS:
+            return None
+        return reference
+
+    def _refresh_reference(self, now: int) -> None:
+        reference = self.reference
+        if reference is not None and 0 <= now - reference.built_at < REFERENCE_REFRESH_SECONDS:
+            return                                     # a clock that went back refreshes rather than freezes
+        if now < self._reference_retry_at:
+            return
+        try:
+            self.reference = build_reference(self.cmc.established(), now=now)
+        except NewCoinsDataError:                          # keep the last list until it is two days old
+            self._reference_retry_at = now + REFERENCE_RETRY_SECONDS
+
+    def _fetch_links(self, ids: Sequence[int]) -> None:
+        """CMC project links, once per coin; a failed call is retried on the next scan."""
+
+        missing = [i for i in ids if i not in self._urls]
+        if not missing:
+            return
+        try:
+            self._urls.update(self.cmc.info(missing))
+        except NewCoinsDataError:
+            return
 
     def _lookup(self, coin: NewCoin, now: int, budget: list[int]) -> tuple[Any, Any, bool] | None:
         key = f"{coin.chain}:{coin.address}"
@@ -889,6 +1124,9 @@ class NewCoinsScanner:
         rows = self.cmc.newest()
         coins = [c for c in (parse_listing(r, now=now) for r in rows) if c is not None]
         coins = [c for c in coins if now - c.date_added <= self.window]
+        self._refresh_reference(now)
+        reference = self.current_reference(now)
+        self._fetch_links([c.cmc_id for c in coins])
         symbols: dict[str, int] = {}
         for coin in coins:
             symbols[coin.symbol.upper()] = symbols.get(coin.symbol.upper(), 0) + 1
@@ -904,10 +1142,13 @@ class NewCoinsScanner:
                 security, pairs, error = looked
                 card = assess(coin, security=security, pairs=pairs, copies=symbols[coin.symbol.upper()],
                               now=now, security_error=error)
+                screen_identity(card, reference, urls=self._urls.get(coin.cmc_id))
                 self._record(card, now)
             cards.append(card)
         live = {f"{c.chain}:{c.address}" for c in coins}
         self._cache = {k: v for k, v in self._cache.items() if k in live}
+        ids = {c.cmc_id for c in coins}
+        self._urls = {k: v for k, v in self._urls.items() if k in ids}
         counts = {v: sum(1 for c in cards if c.verdict == v) for v in (NO_RED_FLAG, HEAVY_RISK, DATA_MISSING)}
         kept = [c for v in (NO_RED_FLAG, HEAVY_RISK, DATA_MISSING)
                 for c in [c for c in cards if c.verdict == v][:KEEP_PER_VERDICT]]
@@ -984,6 +1225,143 @@ class NewCoinsScanner:
                 "verdict_at_first_sight": first[cid].get("verdict"), "schema": SCHEMA, "trial": TRIAL,
                 "can_authorize_trade": False})
         return recorded
+
+
+# ---------------------------------------------------------------------------
+# /check: one contract address the user sends, through the same screen
+# ---------------------------------------------------------------------------
+
+CHAIN_ALIASES = {"solana": "solana", "sol": "solana", "ethereum": "ethereum", "eth": "ethereum", "bsc": "bsc",
+                 "bnb": "bsc", "base": "base", "arbitrum": "arbitrum", "arb": "arbitrum", "polygon": "polygon",
+                 "matic": "polygon", "pol": "polygon", "avalanche": "avalanche", "avax": "avalanche",
+                 "optimism": "optimism", "op": "optimism"}
+DEX_CHAIN = {d: key for key, _g, d, _a in CHAINS}
+CHECK_NOTE = ("Bu kontrol ileriye dönük kayda girmez: tokeni sen seçtin. Ad ve sembol DEX verisidir; aynı adı "
+              "taşıyan başka tokenler olabilir.")
+CHECK_USAGE = ("🔎 Kontrat kontrolü: /check <adres>\n"
+               "EVM'de zinciri de yazabilirsin: /check base 0x…\n"
+               "Zincirler: solana, ethereum, bsc, base, arbitrum, polygon, avalanche, optimism\n"
+               "Mesajdan yalnızca adres okunur; başka metin yok sayılır.")
+
+
+def parse_check(text: str) -> tuple[str | None, str] | None:
+    """(chain or None, address) from "/check [chain] <address>"; None for anything else.
+
+    The message is untrusted text: only a well-formed address and a known
+    chain name are taken from it, nothing else is read or echoed.
+    """
+
+    parts = str(text or "").split()
+    if parts and parts[0].startswith("/"):
+        parts = parts[1:]
+    if len(parts) == 1:
+        chain, raw = None, parts[0]
+    elif len(parts) == 2:
+        chain, raw = CHAIN_ALIASES.get(parts[0].lower()), parts[1]
+        if chain is None:
+            return None
+    else:
+        return None
+    if SOLANA_ADDRESS.match(raw) and chain in (None, "solana"):
+        return "solana", raw
+    if EVM_ADDRESS.match(raw) and chain != "solana":
+        return chain, raw
+    return None
+
+
+def _coin_from_dex(chain: str, address: str, pairs: Sequence[Mapping[str, Any]] | None, security: Any,
+                   now: int) -> NewCoin:
+    """A card subject for an address the user sent: market facts from DexScreener, never from CMC."""
+
+    pairs = list(pairs or [])
+    base = next((p["baseToken"] for p in pairs if isinstance(p.get("baseToken"), Mapping)), None)
+    if base is None and isinstance(security, Mapping):
+        if chain == "solana":
+            base = security.get("tokenMeta") if isinstance(security.get("tokenMeta"), Mapping) else None
+        else:
+            entry = security.get("goplus") if isinstance(security.get("goplus"), Mapping) else {}
+            base = {"name": entry.get("token_name"), "symbol": entry.get("token_symbol")}
+    base = base or {}
+    created = [c / 1000.0 for c in (_finite(p.get("pairCreatedAt")) for p in pairs) if c is not None and c > 0]
+
+    def liquidity(p: Mapping[str, Any]) -> float:
+        value = _finite((p.get("liquidity") or {}).get("usd")) if isinstance(p.get("liquidity"), Mapping) else None
+        return value if value is not None else -1.0
+
+    best = max(pairs, key=liquidity) if pairs else {}
+    volumes = [_finite((p.get("volume") or {}).get("h24")) for p in pairs if isinstance(p.get("volume"), Mapping)]
+    volumes = [v for v in volumes if v is not None and v >= 0]
+    change = best.get("priceChange") if isinstance(best.get("priceChange"), Mapping) else {}
+    return NewCoin(
+        cmc_id=0, name=str(base.get("name") or "?")[:60], symbol=str(base.get("symbol") or "?")[:20], slug="",
+        date_added=int(min(created)) if created else now, tags=(), platform=None, chain=chain, address=address,
+        price=_positive(best.get("priceUsd")), volume_24h=sum(volumes) if volumes else None,
+        market_cap=_finite(best.get("marketCap")), fdv=_finite(best.get("fdv")), change_24h=_finite(change.get("h24")),
+        circulating_supply=None, total_supply=None, listed=False)
+
+
+class AddressChecker:
+    """The screen for one address on demand (/check).
+
+    Never part of the forward record: the user picks these tokens, so their
+    outcomes would not measure the screen. Results are cached for 10 minutes
+    and fresh look-ups are spaced by 10 seconds (free provider limits).
+    """
+
+    def __init__(self, providers: SecurityProviders, *, reference: Callable[[int], Reference | None],
+                 clock: Callable[[], float] = time.time) -> None:
+        self.providers, self.reference, self.clock = providers, reference, clock
+        self._cache: dict[str, tuple[int, Card]] = {}
+        self._last = 0
+
+    def check(self, chain: str | None, address: str) -> tuple[Card | None, str | None]:
+        """(card, note) on success; (None, reason) when the address cannot be placed on one chain."""
+
+        now = int(self.clock())
+        if chain is None and SOLANA_ADDRESS.match(address):
+            chain = "solana"                           # a base58 address can only be a Solana mint here
+        key = f"{chain or '*'}:{address if chain == 'solana' else address.lower()}"
+        self._cache = {k: v for k, v in self._cache.items() if 0 <= now - v[0] < CHECK_CACHE_SECONDS}
+        if key in self._cache:
+            at, card = self._cache[key]
+            return card, f"{max(1, (now - at) // 60)} dk önceki kontrol (önbellek)"
+        if 0 <= now - self._last < CHECK_COOLDOWN_SECONDS:
+            return None, f"Çok sık: {CHECK_COOLDOWN_SECONDS} saniye sonra yeniden dene."
+        self._last = now
+        try:
+            found: list[Mapping[str, Any]] | None = self.providers.dex_all(address)
+        except NewCoinsDataError:
+            found = None
+        if chain is None:
+            if found is None:
+                return None, "DexScreener okunamadı; zinciri de yaz: /check base 0x…"
+            chains = sorted({DEX_CHAIN[str(p.get("chainId"))] for p in found if str(p.get("chainId")) in DEX_CHAIN})
+            if not chains:
+                return None, "Desteklenen bir zincirde DEX havuzu bulunamadı; zinciri yaz: /check bsc 0x…"
+            if len(chains) > 1:
+                labels = ", ".join(CHAIN_LABEL[c] for c in chains)
+                return None, f"Bu adres birden çok zincirde var ({labels}); zinciri yaz: /check <zincir> <adres>"
+            chain = chains[0]
+        dex_chain = next(d for k, _g, d, _a in CHAINS if k == chain)
+        pairs = None if found is None else [p for p in found if p.get("chainId") == dex_chain]
+        security: Any = None
+        security_error = False
+        try:
+            if chain == "solana":
+                security = self.providers.rugcheck(address)
+            else:
+                security = {"goplus": self.providers.goplus(chain, address)}
+                try:
+                    security["honeypot"] = self.providers.honeypot(chain, address)
+                except NewCoinsDataError:
+                    security["honeypot"] = None        # sellability stays unknown
+        except NewCoinsDataError:
+            security, security_error = None, True
+        coin = _coin_from_dex(chain, address, pairs, security, now)
+        card = assess(coin, security=security, pairs=pairs, copies=1, now=now, security_error=security_error)
+        screen_identity(card, self.reference(now), pairs=pairs)
+        self._cache[key] = (now, card)
+        return card, None
 
 
 def card_payload(card: Card) -> dict[str, Any]:
@@ -1084,6 +1462,39 @@ def render(snapshot: Mapping[str, Any] | None, *, now: int, error: str | None = 
     if base_rate:
         lines.append(f"<i>{esc(base_rate)}</i>")
     lines.append(esc("Araştırma taramasıdır: emir yetkisi yok, karar senin."))
+    text = "\n".join(lines)
+    return text if len(text) <= 4000 else text[:3990] + "\n…"
+
+
+def render_check(card: Card, *, now: int, note: str | None = None) -> str:
+    """One /check card: every finding with its own mark (HTML; provider text escaped)."""
+
+    from .long_alerts import _num, esc
+
+    coin = card.coin
+    verdict = card.verdict
+    head = {HEAVY_RISK: f"❌ <b>{VERDICT_LABEL[HEAVY_RISK]} · uzak dur</b>",
+            DATA_MISSING: f"❔ <b>{VERDICT_LABEL[DATA_MISSING]}</b> <i>(eksik veri güvenli sayılmaz)</i>",
+            NO_RED_FLAG: f"✅ <b>{VERDICT_LABEL[NO_RED_FLAG]}</b> <i>(güvenilir demek değildir)</i>"}[verdict]
+    rows = []
+    for group in GROUPS:
+        findings = card.groups.get(group) or [Finding(UNKNOWN, "kontrol edilmedi")]
+        for k, finding in enumerate(findings[:6]):
+            rows.append(f"{group if k == 0 else '':<15}{ICON.get(finding.status, '❔')} {finding.text[:90]}")
+    pool_age = max(0, now - coin.date_added)
+    age = ("havuz yaşı bilinmiyor" if coin.date_added >= now else f"en eski havuz {pool_age // DAY} gün önce"
+           if pool_age >= 2 * DAY else f"en eski havuz {_ago(pool_age)} önce")
+    lines = [f"🔎 <b>KONTRAT KONTROLÜ</b> · {esc(CHAIN_LABEL.get(str(coin.chain), '?'))}",
+             f"<b>{esc(coin.name[:28])} ({esc(coin.symbol[:12])})</b>",
+             f"<code>{esc(str(coin.address))}</code>", head, "<pre>" + esc("\n".join(rows)) + "</pre>",
+             esc(f"Fiyat {'$' + _num(coin.price) if coin.price else '?'} · 24s "
+                 f"{'%{:+.0f}'.format(coin.change_24h) if coin.change_24h is not None else '?'} · "
+                 f"hacim {_usd(coin.volume_24h)} · FDV {_usd(coin.fdv)} · likidite {_usd(card.liquidity_usd)} · "
+                 f"{age}")]
+    if note:
+        lines.append(f"<i>{esc(note)}</i>")
+    lines += [f"<i>{esc(CHECK_NOTE)}</i>", f"<i>{esc(DISCLAIMER)}</i>",
+              esc("Araştırma taramasıdır: emir yetkisi yok, karar senin.")]
     text = "\n".join(lines)
     return text if len(text) <= 4000 else text[:3990] + "\n…"
 

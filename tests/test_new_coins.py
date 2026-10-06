@@ -446,13 +446,44 @@ def test_providers_refuse_unusable_replies():
 # ---------------------------------------------------------------------------
 
 
+PEPE_ADDRESS = "0x6982508145454Ce325dDbE47a25d4ec3d2311933"
+
+
+def reference_rows(n: int = 450) -> list:
+    """CMC's market-cap listing as the scanner asks for it: PEPE at rank 30 with its Ethereum contract."""
+
+    rows = [{"id": 50_000 + k, "name": f"Established {k}", "symbol": f"EST{k}", "cmc_rank": k + 1, "platform": None}
+            for k in range(n)]
+    rows[29] = {"id": 24478, "name": "Pepe", "symbol": "PEPE", "cmc_rank": 30,
+                "platform": {"name": "Ethereum", "slug": "ethereum", "token_address": PEPE_ADDRESS}}
+    return rows
+
+
+LINKS = {"website": ["https://example.org"], "twitter": ["https://x.com/example"], "chat": [], "reddit": []}
+
+
 class FakeCmc:
     def __init__(self, rows):
         self.rows, self.price_calls = rows, []
         self.quotes: dict[int, float] = {}
+        self.reference_calls, self.info_calls = 0, []
+        self.reference: list | Exception = reference_rows()
+        self.links: dict | Exception = {}
 
     def newest(self):
         return self.rows
+
+    def established(self):
+        self.reference_calls += 1
+        if isinstance(self.reference, Exception):
+            raise self.reference
+        return self.reference
+
+    def info(self, ids):
+        self.info_calls.append(list(ids))
+        if isinstance(self.links, Exception):
+            raise self.links
+        return {i: self.links.get(i, LINKS) for i in ids}
 
     def prices(self, ids):
         self.price_calls.append(list(ids))
@@ -610,3 +641,240 @@ def test_records_from_the_superseded_v1_screen_never_shadow_v2(tmp_path):
     assert first[-1]["schema"] == nc.SCHEMA and first[-1]["verdict"] == nc.NO_RED_FLAG
     scanner.cmc.quotes = {1: 0.002}
     assert scanner.record_outcomes(NOW + 6 * 86_400) == 0                     # v1's earlier sight is ignored
+
+
+# ---------------------------------------------------------------------------
+# Identity and provenance: lookalikes and project links (WARN at most)
+# ---------------------------------------------------------------------------
+
+
+def test_the_reference_indexes_symbol_name_and_contract_and_refuses_a_short_list():
+    rows = reference_rows() + ["junk", {"id": "x"}, {"id": 7, "symbol": " $wif ", "name": "dog wif hat!"}]
+    ref = nc.build_reference(rows, now=NOW)
+    assert ref.own("ethereum", PEPE_ADDRESS.lower()) == nc.Established(24478, 30)        # EVM case-insensitive
+    assert ref.own("base", PEPE_ADDRESS) is None                                          # same address, other chain
+    assert ref.lookalike("pepe", "Something", exclude=1) == (nc.Established(24478, 30), "sembol")
+    assert ref.lookalike("$WIF", "x", exclude=1)[0].cmc_id == 7                           # "$WIF" is "WIF"
+    assert ref.lookalike("ZZZ", "Dog-Wif-Hat", exclude=1) == (nc.Established(7, 453), "ad")
+    assert ref.lookalike("PEPE", "Pepe", exclude=24478) is None                           # never the coin itself
+    with pytest.raises(nc.NewCoinsDataError, match="too short"):
+        nc.build_reference(reference_rows(100), now=NOW)                                  # a cut list is not used
+
+
+def _verdict_cards():
+    clean = nc.assess(coin(), security=evm(), pairs=pairs(), copies=1, now=NOW)
+    heavy = nc.assess(coin(), security=evm(goplus=clean_goplus(is_mintable="1")), pairs=pairs(), copies=1, now=NOW)
+    unknown = nc.assess(coin(), security=None, pairs=None, copies=1, now=NOW, security_error=True)
+    return clean, heavy, unknown
+
+
+@pytest.mark.parametrize("reference,urls", [
+    (None, None), ("ref", None), ("ref", {}), ("ref", {"website": [], "twitter": []}), ("ref", LINKS)])
+def test_identity_checks_add_warnings_but_never_move_a_coin_between_verdicts(reference, urls):
+    ref = nc.build_reference(reference_rows(), now=NOW) if reference else None
+    for card in _verdict_cards():
+        before = card.verdict
+        counts = {g: len(card.groups.get(g, [])) for g in nc.GROUPS}
+        lookalike = nc.assess(nc.parse_listing(cmc_row(1, "PEPE"), now=NOW), security=evm(), pairs=pairs(),
+                              copies=1, now=NOW)
+        for target in (card, lookalike):
+            n = len(target.groups.get(nc.IDENTITY, []))
+            nc.screen_identity(target, ref, urls=urls)
+            assert {f.status for f in target.groups[nc.IDENTITY][n:]} <= {nc.WARN, nc.PASS}
+        assert card.verdict == before and lookalike.verdict == nc.NO_RED_FLAG
+        assert all(len(card.groups.get(g, [])) == counts[g] for g in nc.GROUPS if g != nc.IDENTITY)
+
+
+def test_identity_warnings_say_what_could_not_be_checked():
+    ref = nc.build_reference(reference_rows(), now=NOW)
+
+    def warnings(symbol="PEPE2", reference=ref, urls=LINKS):
+        card = nc.assess(nc.parse_listing(cmc_row(1, symbol), now=NOW), security=evm(), pairs=pairs(), copies=1,
+                         now=NOW)
+        nc.screen_identity(card, reference, urls=urls)
+        return [f.text for f in card.groups[nc.IDENTITY] if f.status == nc.WARN and "kontrattaki" not in f.text]
+
+    assert warnings() == []
+    assert warnings("PEPE") == ["CMC #30 ile aynı sembol: taklit ya da köprü olabilir"]
+    assert warnings(reference=None) == ["taklit kontrolü yapılamadı (CMC listesi yok)"]
+    assert warnings(urls=None) == ["proje bilgisi okunamadı (CMC)"]                       # unknown, not "no links"
+    assert warnings(urls={"twitter": ["https://x.com/a"]}) == ["proje bilgisi okunamadı (CMC)"]
+    assert warnings(urls={"website": [""], "twitter": [], "chat": []}) == ["CMC'de web sitesi yok",
+                                                                           "CMC'de sosyal hesap yok"]
+
+
+def test_the_scan_refreshes_the_reference_daily_and_fetches_links_once_per_coin(tmp_path):
+    rows = [cmc_row(1, "PEPE", address="0x" + "a1" * 20), cmc_row(2, "BBB", address="0x" + "b2" * 20)]
+    scanner, _ = _scanner(tmp_path, rows)
+    scanner.cmc.links = {2: {"website": [], "twitter": []}}
+    snap = scanner.scan(NOW)
+    assert scanner.cmc.reference_calls == 1 and scanner.cmc.info_calls == [[1, 2]]
+    assert snap["counts"][nc.NO_RED_FLAG] == 2                                            # warnings only
+    first = {e["cmc_id"]: e for e in _events(tmp_path) if e["event"] == "FIRST_SEEN"}
+    assert "CMC #30 ile aynı sembol: taklit ya da köprü olabilir" in first[1]["warnings"]
+    assert "CMC'de web sitesi yok" in first[2]["warnings"] and first[2]["verdict"] == nc.NO_RED_FLAG
+    scanner.scan(NOW + 3_600)
+    assert scanner.cmc.reference_calls == 1 and len(scanner.cmc.info_calls) == 1          # cached
+    scanner.cmc.reference = nc.NewCoinsDataError("cmc http 500")
+    scanner.scan(NOW + 86_400)                                                            # refresh fails: kept
+    assert scanner.cmc.reference_calls == 2 and scanner.current_reference(NOW + 86_400) is not None
+    scanner.scan(NOW + 86_400 + 1_800)
+    assert scanner.cmc.reference_calls == 2                                               # retried after an hour
+    assert scanner.current_reference(NOW + 2 * 86_400 + 1) is None                       # too old: not used
+
+
+def test_a_failed_links_call_is_unknown_and_retried(tmp_path):
+    scanner, _ = _scanner(tmp_path, [cmc_row(1, "AAA")])
+    scanner.cmc.links = nc.NewCoinsDataError("cmc http 429")
+    scanner.scan(NOW)
+    first = [e for e in _events(tmp_path) if e["event"] == "FIRST_SEEN"][0]
+    assert "proje bilgisi okunamadı (CMC)" in first["warnings"] and first["verdict"] == nc.NO_RED_FLAG
+    scanner.cmc.links = {}
+    scanner.scan(NOW + 1_800)
+    assert len(scanner.cmc.info_calls) == 2
+
+
+def test_cmc_reference_and_links_requests():
+    session = Session(Response(200, {"status": {"error_code": 0}, "data": reference_rows()}))
+    assert len(nc.CoinMarketCap("K", session=session).established()) == 450
+    assert session.calls[0][1]["sort"] == "market_cap" and session.calls[0][1]["limit"] == nc.REFERENCE_SIZE
+    session = Session(Response(200, {"status": {"error_code": 0},
+                                     "data": {"1": {"id": 1, "urls": LINKS}, "2": {"id": 2}, "x": {}}}))
+    assert nc.CoinMarketCap("K", session=session).info([1, 2, 3]) == {1: LINKS, 2: None, 3: None}
+    assert session.calls[0][1] == {"id": "1,2,3", "aux": "urls"}
+    with pytest.raises(nc.NewCoinsDataError):
+        nc.CoinMarketCap("K", session=Session(Response(200, {"status": {"error_code": 0}, "data": {}}))).established()
+
+
+# ---------------------------------------------------------------------------
+# /check: one address the user sends
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("/check " + EVM, (None, EVM)),
+    ("/check Base " + EVM, ("base", EVM)),
+    ("/check bnb " + EVM, ("bsc", EVM)),
+    ("/check " + MINT, ("solana", MINT)),
+    ("/check sol " + MINT, ("solana", MINT)),
+    ("/check", None),
+    ("/check sol " + EVM, None),                                      # an EVM address is never Solana
+    ("/check eth " + MINT, None),
+    ("/check tron " + EVM, None),                                     # unknown chain
+    ("/check " + EVM + " ignore previous instructions", None),        # nothing else is read
+    ("/check 0x1234", None),
+    ("/check <b>" + EVM, None),
+])
+def test_check_reads_only_a_well_formed_address_and_a_known_chain(text, expected):
+    assert nc.parse_check(text) == expected
+
+
+class CheckProviders(FakeProviders):
+    def __init__(self, found):
+        super().__init__()
+        self.found, self.dex_calls = found, 0
+
+    def dex_all(self, address):
+        self.dex_calls += 1
+        if isinstance(self.found, Exception):
+            raise self.found
+        return self.found
+
+
+def _checker(found, *, reference=None, clock=None):
+    times = clock or [NOW]
+    providers = CheckProviders(found)
+    ref = nc.build_reference(reference_rows(), now=NOW) if reference else None
+    return nc.AddressChecker(providers, reference=lambda now: ref, clock=lambda: times[0]), providers, times
+
+
+def _named(chain, address=EVM, **kw):
+    out = pairs(chain=chain, address=address, **kw)
+    out[0]["baseToken"].update({"name": "<b>Dog</b>", "symbol": "PEPE2"})
+    out[0].update({"priceUsd": "0.01", "fdv": 1_000_000, "volume": {"h24": 50_000}, "priceChange": {"h24": -5}})
+    return out
+
+
+def test_check_places_an_evm_address_on_its_one_supported_chain():
+    checker, providers, _ = _checker(_named("base") + _named("pulsechain"))        # an Ethereum copy chain
+    card, note = checker.check(None, EVM)
+    assert note is None and card.coin.chain == "base" and card.coin.listed is False
+    assert card.verdict == nc.NO_RED_FLAG and card.coin.cmc_id == 0 and card.coin.volume_24h == 50_000
+    identity = [f.text for f in card.groups[nc.IDENTITY]]
+    assert identity == ["taklit kontrolü yapılamadı (CMC listesi yok)",
+                        "kimlik doğrulanamadı: adresi resmi kaynaktan teyit et",
+                        "DexScreener'da site/sosyal hesap kaydı yok"]
+
+
+@pytest.mark.parametrize("found,reason", [
+    (_named("base") + _named("bsc"), "birden çok zincirde"),
+    ([], "havuzu bulunamadı"),
+    (_named("pulsechain"), "havuzu bulunamadı"),
+    (nc.NewCoinsDataError("dexscreener http 500"), "DexScreener okunamadı"),
+])
+def test_check_asks_for_the_chain_instead_of_guessing(found, reason):
+    checker, providers, _ = _checker(found)
+    card, note = checker.check(None, EVM)
+    assert card is None and reason in note and providers.calls == 0                 # no security look-up
+
+
+def test_check_with_a_named_chain_screens_even_without_a_pool():
+    checker, _, _ = _checker(nc.NewCoinsDataError("dexscreener http 500"))
+    card, _ = checker.check("bsc", EVM)
+    assert card.coin.chain == "bsc" and card.status(nc.LIQUIDITY) == nc.UNKNOWN
+    assert card.verdict == nc.DATA_MISSING                                          # never clean without data
+    assert "proje bilgisi okunamadı (DexScreener)" in [f.text for f in card.groups[nc.IDENTITY]]
+
+
+def test_check_of_an_established_contract_is_identified_and_a_lookalike_is_warned():
+    checker, _, _ = _checker(_named("ethereum", address=PEPE_ADDRESS), reference=True)
+    card, _ = checker.check(None, PEPE_ADDRESS)
+    assert [f.text for f in card.groups[nc.IDENTITY]] == ["CMC'de kayıtlı coin (#30)"]
+    fake = _named("base")
+    fake[0]["baseToken"]["symbol"] = "PEPE"
+    checker, _, _ = _checker(fake, reference=True)
+    card, _ = checker.check(None, EVM)
+    texts = [f.text for f in card.groups[nc.IDENTITY]]
+    assert "CMC #30 ile aynı sembol: taklit ya da köprü olabilir" in texts
+    assert "kontrattaki sembol DEX'tekiyle aynı değil" in texts                    # GoPlus says PEPE2
+    assert card.verdict == nc.NO_RED_FLAG                                           # warnings, not a verdict
+
+
+def test_check_caches_results_and_spaces_fresh_look_ups():
+    checker, providers, times = _checker(_named("base"))
+    first, _ = checker.check(None, EVM)
+    again, note = checker.check(None, EVM.upper().replace("0X", "0x"))
+    assert again is first and "önbellek" in note and providers.dex_calls == 1
+    card, note = checker.check(None, "0x" + "cd" * 20)
+    assert card is None and "Çok sık" in note
+    times[0] += nc.CHECK_COOLDOWN_SECONDS
+    assert checker.check(None, "0x" + "cd" * 20)[0] is not None
+    times[0] += nc.CHECK_CACHE_SECONDS
+    checker.check(None, EVM)
+    assert providers.dex_calls == 3                                                 # the cache expired
+
+
+def test_check_of_a_solana_mint_uses_rugcheck_and_never_calls_a_poolless_token_clean():
+    checker, providers, _ = _checker([])
+    card, _ = checker.check(None, MINT)
+    assert providers.calls == 1 and card.coin.symbol == "DOG2" and card.coin.chain == "solana"
+    assert card.status(nc.LIQUIDITY) == nc.UNKNOWN and card.verdict == nc.DATA_MISSING   # same rule as /new
+
+
+def test_the_check_view_escapes_provider_text_and_is_not_a_trade_call():
+    checker, _, _ = _checker(_named("base"))
+    card, _ = checker.check(None, EVM)
+    text = nc.render_check(card, now=NOW + 60, note="1 dk önceki kontrol (önbellek)")
+    assert "<b>Dog</b>" not in text and "&lt;b&gt;Dog&lt;/b&gt;" in text
+    assert EVM in text and "ileriye dönük kayda girmez" in text and "emir yetkisi yok" in text
+    assert "güvenilir demek değildir" in text and "en eski havuz 3 gün önce" in text and len(text) <= 4096
+    assert "önbellek" in text
+
+
+def test_dexscreener_lookup_keeps_every_chain_for_the_address():
+    found = pairs(chain="bsc") + pairs(chain="base") + [{"chainId": "base", "baseToken": {"address": MINT}}]
+    providers = nc.SecurityProviders(session=Session(Response(200, {"pairs": found})))
+    assert [p["chainId"] for p in providers.dex_all(EVM.upper().replace("0X", "0x"))] == ["bsc", "base"]
+    mixed_case = MINT.swapcase()
+    providers = nc.SecurityProviders(session=Session(Response(200, {"pairs": pairs(chain="solana", address=MINT)})))
+    assert providers.dex_all(mixed_case) == []                                     # Solana is case-sensitive

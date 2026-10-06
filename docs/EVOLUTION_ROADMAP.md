@@ -309,6 +309,9 @@ güncellenenler belirtildi.
       iddiası yok.
     - İsabet henüz ölçülmedi. İleriye dönük kayıt ön-kayıtlı (trial
       `b57b9eb0a6073085`, v2: aynı gün gerçek sağlayıcı cevaplarıyla yeniden ayarlandı); değerlendirme 2027-04-05'ten önce yapılmaz.
+    - 2026-10-06: `/check <adres>` ile istenen bir kontratın anında taranması;
+      taklit (CMC ilk 500 ile aynı ad/sembol) ve eksik site/sosyal hesap
+      uyarıları. Yalnız ⚠️: karar ve ön-kayıtlı test değişmedi.
 
 ## Kesin çizgiler
 
