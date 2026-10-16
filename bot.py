@@ -977,8 +977,10 @@ def altcoin_watch_tick(now: int | None = None) -> None:
     with LOCK:
         snapshot = STATE.get("altcoin_watch")
         retry_at = int(STATE.get("altcoin_watch_retry_at") or 0)
-        if retry_at and STATE.get("altcoin_watch_failed_keyed") is False and ALTCOIN_WATCH.gecko.keyed:
-            retry_at = 0                             # a CoinGecko key was added after a keyless failure: try now
+        # A CoinGecko key was added after a keyless failure: try now. A wait saved before the marker existed
+        # (None) is treated as keyless; at worst a keyed bot makes one extra attempt, then the marker is set.
+        if retry_at and STATE.get("altcoin_watch_failed_keyed") is not True and ALTCOIN_WATCH.gecko.keyed:
+            retry_at = 0
     errors = []
     if not altcoin_watch.fresh(snapshot, now=now, max_age=ALTCOIN_WATCH_REFRESH_SECONDS) and now >= retry_at:
         try:
