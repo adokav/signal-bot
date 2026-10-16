@@ -90,7 +90,7 @@ ALTCOIN_WATCH_ENABLED = os.getenv("ALTCOIN_WATCH_ENABLED", "1") == "1"
 ALTCOIN_WATCH_REFRESH_SECONDS = max(86_400, int(os.getenv("ALTCOIN_WATCH_REFRESH_SECONDS",
                                                           str(altcoin_watch.REFRESH_SECONDS))))
 ALTCOIN_WATCH_MAX_AGE_SECONDS = 2 * ALTCOIN_WATCH_REFRESH_SECONDS + 86_400
-ALTCOIN_WATCH_TICK_SECONDS = 6 * 3_600
+ALTCOIN_WATCH_TICK_SECONDS = 30 * 60
 COINGECKO_DEMO_API_KEY = os.getenv("COINGECKO_DEMO_API_KEY", "").strip()
 COINGECKO_PRO_API_KEY = os.getenv("COINGECKO_PRO_API_KEY", "").strip()
 
@@ -160,6 +160,8 @@ STATE: dict[str, Any] = {
     "new_coins_error": None,
     "altcoin_watch": None,
     "altcoin_watch_error": None,
+    "altcoin_watch_failures": 0,
+    "altcoin_watch_retry_at": 0,
 }
 
 COMMANDS = [
@@ -530,7 +532,7 @@ def format_status(snapshot: dict[str, Any] | None) -> str:
         new_coins.status_line(STATE.get("new_coins"), now=int(time.time()), enabled=NEW_COINS_ENABLED,
                               configured=CMC.configured, error=STATE.get("new_coins_error")),
         altcoin_watch.status_line(STATE.get("altcoin_watch"), now=int(time.time()), enabled=ALTCOIN_WATCH_ENABLED,
-                                  error=STATE.get("altcoin_watch_error")),
+                                  error=STATE.get("altcoin_watch_error"), keyed=ALTCOIN_WATCH.gecko.keyed),
         f"Ana hata: {error_text}",
         f"Taktik hata: {STATE.get('tactical_last_error') or 'yok'}",
         evidence_status_text(),
@@ -973,14 +975,25 @@ def altcoin_watch_tick(now: int | None = None) -> None:
     now = int(time.time()) if now is None else now
     with LOCK:
         snapshot = STATE.get("altcoin_watch")
+        retry_at = int(STATE.get("altcoin_watch_retry_at") or 0)
     errors = []
-    if not altcoin_watch.fresh(snapshot, now=now, max_age=ALTCOIN_WATCH_REFRESH_SECONDS):
+    if not altcoin_watch.fresh(snapshot, now=now, max_age=ALTCOIN_WATCH_REFRESH_SECONDS) and now >= retry_at:
         try:
             snapshot = ALTCOIN_WATCH.refresh(now)
             with LOCK:
                 STATE["altcoin_watch"] = snapshot
+                STATE["altcoin_watch_failures"], STATE["altcoin_watch_retry_at"] = 0, 0
         except Exception as exc:                     # the last snapshot stays and is shown as stale
             errors.append(_safe_error(exc))
+            # A keyless refresh can wait out rate limits for many minutes: count the delay from when it failed.
+            failed_at = max(now, int(time.time()))
+            with LOCK:                               # retry in 30 minutes, then doubling up to 6 hours
+                failures = int(STATE.get("altcoin_watch_failures") or 0) + 1
+                STATE["altcoin_watch_failures"] = failures
+                STATE["altcoin_watch_retry_at"] = altcoin_watch.next_attempt(failures, failed_at)
+    elif now < retry_at:
+        with LOCK:                                   # still waiting to retry: keep showing the last error
+            errors.append(str(STATE.get("altcoin_watch_error") or "").split("; ")[0] or "yenileme bekliyor")
     try:
         ALTCOIN_WATCH.record_outcomes(now)
     except Exception as exc:
@@ -1014,7 +1027,8 @@ def format_altcoin(text: str = "") -> str:
         return long_alerts.esc("Kullanım: /altcoin ya da /altcoin <sembol>")
     if query is None:
         return altcoin_watch.render(snapshot, now=now, error=error, enabled=ALTCOIN_WATCH_ENABLED,
-                                    max_age=ALTCOIN_WATCH_MAX_AGE_SECONDS)
+                                    max_age=ALTCOIN_WATCH_MAX_AGE_SECONDS, keyed=ALTCOIN_WATCH.gecko.keyed,
+                                    retry_at=int(STATE.get("altcoin_watch_retry_at") or 0))
     found = altcoin_watch.find(snapshot, query)
     if not found:
         return long_alerts.esc(f"{query[:20]} izleme evreninde yok (ilk {altcoin_watch.UNIVERSE_SIZE} altcoin) "

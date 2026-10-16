@@ -501,7 +501,7 @@ def test_the_coingecko_key_travels_in_a_header_and_rate_limits_are_retried():
     with pytest.raises(aw.AltcoinDataError) as err:
         leaky.markets(1)
     assert "CGSECRET" not in str(err.value) and "http" not in str(err.value)
-    limited = aw.CoinGecko(session=Session(*[Response(429)] * 4), sleep=lambda s: None)
+    limited = aw.CoinGecko(demo_key="K", session=Session(*[Response(429)] * 4), sleep=lambda s: None)
     with pytest.raises(aw.AltcoinDataError, match="http 429"):
         limited.markets(1)
     assert aw.CoinGecko(pro_key="P", session=Session()).base == aw.COINGECKO_PRO_URL
@@ -534,7 +534,7 @@ def test_the_view_escapes_untrusted_text_and_is_not_a_buy_list(tmp_path):
     assert "<script>" not in text and "&lt;B" in text and len(text) <= 4096
     assert "doğrulanmamış sıralama" in text and "Alım önerisi değildir" in text and "Emir yetkisi yok" in text
     assert "İNCELEME GEREKLİ" in text and "ELENDİ" in text
-    assert "Tarama güncel değil" in aw.render(snap, now=NOW + 30 * DAY)
+    assert "yenileme yapılamadı" in aw.render(snap, now=NOW + 30 * DAY)
     card = aw.render_card(aw.find(snap, "lendco")[0], now=NOW + 60, generated_at=NOW)
     assert "&lt;script&gt;" in card and "<script>" not in card
     assert "ATH günündeki piyasa değeri bilinmiyor" in card and "Elle bakılacaklar" in card
@@ -563,3 +563,35 @@ def test_the_card_says_when_the_price_is_at_its_ath_and_never_invents_an_ath_mar
     text = aw.render_card(aw.card_payload(card), now=NOW)
     assert "Fiyat ATH'de ya da üstünde" in text and "ATH günündeki piyasa değeri bilinmiyor" in text
     assert card.info["ath_cap_today_supply"] == pytest.approx(6.0e9)
+
+
+class LimitedResponse(Response):
+    def __init__(self, status=429, payload=None, retry_after=None):
+        super().__init__(status, payload)
+        self.headers = {} if retry_after is None else {"Retry-After": retry_after}
+
+
+def test_without_a_key_coingecko_goes_slowly_and_waits_out_rate_limits():
+    sleeps = []
+    responses = [LimitedResponse(retry_after="120"), LimitedResponse(retry_after="99999"), LimitedResponse(retry_after="x"),
+                 LimitedResponse(), LimitedResponse(), Response(200, [])]
+    gecko = aw.CoinGecko(session=Session(*responses), sleep=sleeps.append)
+    assert gecko.keyed is False and gecko.pace == 12.0
+    assert gecko.markets(1) == []                                         # five 429s waited out, then served
+    assert sleeps == [120.0, float(aw.MAX_RETRY_WAIT), 180.0, 240.0, 300.0, 12.0]   # Retry-After honoured, capped
+    keyed = aw.CoinGecko(demo_key="K", session=Session(LimitedResponse(retry_after="5"), Response(200, [])),
+                         sleep=sleeps.append)
+    keyed.markets(1)
+    assert sleeps[-2:] == [30.0, 2.5]                                     # never shorter than the backoff
+
+
+def test_a_failed_refresh_says_why_and_when_it_is_retried():
+    assert [aw.next_attempt(k, NOW) - NOW for k in (1, 2, 3, 4, 5, 9)] == [1800, 3600, 7200, 14400, 21600, 21600]
+    error = "AltcoinDataError: coingecko http 429"
+    text = aw.render(None, now=NOW, error=error, retry_at=NOW + 1800, keyed=False)
+    assert "İlk tarama yapılamadı" in text and "Sonraki deneme 12:30 UTC" in text
+    assert "COINGECKO_DEMO_API_KEY" in text and "Liste boş demek değildir" in text
+    assert "COINGECKO_DEMO_API_KEY" not in aw.render(None, now=NOW, error=error, keyed=True)
+    assert "İlk tarama sürüyor" in aw.render(None, now=NOW)
+    assert "CoinGecko anahtarı yok" in aw.status_line(None, now=NOW, enabled=True, error=error, keyed=False)
+    assert "anahtarı yok" not in aw.status_line(None, now=NOW, enabled=True, error=None, keyed=True)

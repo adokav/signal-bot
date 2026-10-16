@@ -287,6 +287,43 @@ def test_a_failed_altcoin_refresh_keeps_the_snapshot_and_redacts_the_key(monkeyp
     assert "CGSECRET" not in json.dumps(payload) and payload["can_authorize_trade"] is False
 
 
+def test_a_failed_altcoin_refresh_is_retried_sooner_then_less_often(monkeypatch):
+    monkeypatch.setattr(bot, "_save_state", lambda: None)
+    for key, value in (("altcoin_watch", None), ("altcoin_watch_error", None), ("altcoin_watch_failures", 0),
+                       ("altcoin_watch_retry_at", 0)):
+        monkeypatch.setitem(bot.STATE, key, value)
+    calls = []
+
+    def limited(now):
+        calls.append(now)
+        raise bot.altcoin_watch.AltcoinDataError("coingecko http 429")
+    monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", limited)
+    monkeypatch.setattr(bot.ALTCOIN_WATCH, "record_outcomes", lambda now: 0)
+    t = 1_800_000_000
+    bot.altcoin_watch_tick(t)
+    assert calls == [t] and bot.STATE["altcoin_watch_retry_at"] == t + 1800
+    bot.altcoin_watch_tick(t + 600)                                   # before the retry time: no new request
+    assert calls == [t] and "429" in bot.STATE["altcoin_watch_error"]
+    bot.altcoin_watch_tick(t + 1800)
+    assert calls == [t, t + 1800] and bot.STATE["altcoin_watch_retry_at"] == t + 1800 + 3600
+    clock = [1_700_000_000]
+    monkeypatch.setattr(bot.time, "time", lambda: clock[0])
+
+    def slow(now):                                                    # waits out rate limits for 50 minutes
+        clock[0] += 3000
+        raise bot.altcoin_watch.AltcoinDataError("coingecko http 429")
+    monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", slow)
+    bot.STATE["altcoin_watch_failures"], bot.STATE["altcoin_watch_retry_at"] = 0, 0
+    bot.altcoin_watch_tick(1_700_000_000)
+    assert bot.STATE["altcoin_watch_retry_at"] == 1_700_000_000 + 3000 + 1800     # from the failure, not the start
+    snapshot = {"generated_at": t + 5400, "cards": [], "counts": {}}
+    monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", lambda now: snapshot)
+    bot.STATE["altcoin_watch_retry_at"] = 0
+    bot.altcoin_watch_tick(t + 5400)
+    assert bot.STATE["altcoin_watch"] is snapshot and bot.STATE["altcoin_watch_failures"] == 0
+    assert bot.STATE["altcoin_watch_retry_at"] == 0 and bot.STATE["altcoin_watch_error"] is None
+
+
 def test_d1_command_and_panel_button_open_the_shadow_loop_report(monkeypatch):
     assert bot._command("/d1") == "D1"
     buttons = [b["callback_data"] for row in bot.panel_keyboard()["inline_keyboard"] for b in row]
