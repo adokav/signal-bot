@@ -985,10 +985,12 @@ def altcoin_watch_tick(now: int | None = None) -> None:
                 STATE["altcoin_watch_failures"], STATE["altcoin_watch_retry_at"] = 0, 0
         except Exception as exc:                     # the last snapshot stays and is shown as stale
             errors.append(_safe_error(exc))
+            # A keyless refresh can wait out rate limits for many minutes: count the delay from when it failed.
+            failed_at = max(now, int(time.time()))
             with LOCK:                               # retry in 30 minutes, then doubling up to 6 hours
                 failures = int(STATE.get("altcoin_watch_failures") or 0) + 1
                 STATE["altcoin_watch_failures"] = failures
-                STATE["altcoin_watch_retry_at"] = altcoin_watch.next_attempt(failures, now)
+                STATE["altcoin_watch_retry_at"] = altcoin_watch.next_attempt(failures, failed_at)
     elif now < retry_at:
         with LOCK:                                   # still waiting to retry: keep showing the last error
             errors.append(str(STATE.get("altcoin_watch_error") or "").split("; ")[0] or "yenileme bekliyor")
