@@ -324,6 +324,53 @@ def test_a_failed_altcoin_refresh_is_retried_sooner_then_less_often(monkeypatch)
     assert bot.STATE["altcoin_watch_retry_at"] == 0 and bot.STATE["altcoin_watch_error"] is None
 
 
+def test_adding_a_coingecko_key_skips_the_wait_left_by_a_keyless_failure(monkeypatch):
+    monkeypatch.setattr(bot, "_save_state", lambda: None)
+    for key, value in (("altcoin_watch", None), ("altcoin_watch_error", None), ("altcoin_watch_failures", 0),
+                       ("altcoin_watch_retry_at", 0), ("altcoin_watch_failed_keyed", None)):
+        monkeypatch.setitem(bot.STATE, key, value)
+    calls = []
+
+    def limited(now):
+        calls.append(now)
+        raise bot.altcoin_watch.AltcoinDataError("coingecko http 429")
+    monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", limited)
+    monkeypatch.setattr(bot.ALTCOIN_WATCH, "record_outcomes", lambda now: 0)
+    monkeypatch.setattr(bot.ALTCOIN_WATCH.gecko, "keyed", False)
+    t = 1_800_000_000
+    bot.altcoin_watch_tick(t)
+    assert bot.STATE["altcoin_watch_failed_keyed"] is False and bot.STATE["altcoin_watch_retry_at"] == t + 1800
+    bot.altcoin_watch_tick(t + 60)
+    assert calls == [t]                                               # still keyless: the wait holds
+    monkeypatch.setattr(bot.ALTCOIN_WATCH.gecko, "keyed", True)       # the user added a key (the bot restarts)
+    bot.altcoin_watch_tick(t + 120)
+    assert calls == [t, t + 120]                                      # tried at once
+    assert bot.STATE["altcoin_watch_failed_keyed"] is True
+    bot.altcoin_watch_tick(t + 180)
+    assert calls == [t, t + 120]                                      # a keyed failure keeps its backoff
+
+
+def test_a_wait_saved_by_the_previous_version_is_skipped_once_a_key_is_set(tmp_path, monkeypatch):
+    t = 1_800_000_000
+    state_file = tmp_path / "state.json"                              # written by the version before the marker
+    state_file.write_text(json.dumps({"altcoin_watch": None, "altcoin_watch_error": "AltcoinDataError: coingecko "
+                                      "http 429", "altcoin_watch_failures": 3, "altcoin_watch_retry_at": t + 4 * 3600}))
+    monkeypatch.setattr(bot, "STATE_FILE", state_file)
+    monkeypatch.setattr(bot, "_save_state", lambda: None)
+    for key, value in (("altcoin_watch", None), ("altcoin_watch_error", None), ("altcoin_watch_failures", 0),
+                       ("altcoin_watch_retry_at", 0), ("altcoin_watch_failed_keyed", None)):
+        monkeypatch.setitem(bot.STATE, key, value)
+    bot._load_state()
+    assert bot.STATE["altcoin_watch_retry_at"] == t + 4 * 3600 and bot.STATE["altcoin_watch_failed_keyed"] is None
+    snapshot = {"generated_at": t, "cards": [], "counts": {}}
+    calls = []
+    monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", lambda now: calls.append(now) or snapshot)
+    monkeypatch.setattr(bot.ALTCOIN_WATCH, "record_outcomes", lambda now: 0)
+    monkeypatch.setattr(bot.ALTCOIN_WATCH.gecko, "keyed", True)
+    bot.altcoin_watch_tick(t)
+    assert calls == [t] and bot.STATE["altcoin_watch"] is snapshot and bot.STATE["altcoin_watch_retry_at"] == 0
+
+
 def test_d1_command_and_panel_button_open_the_shadow_loop_report(monkeypatch):
     assert bot._command("/d1") == "D1"
     buttons = [b["callback_data"] for row in bot.panel_keyboard()["inline_keyboard"] for b in row]

@@ -162,6 +162,7 @@ STATE: dict[str, Any] = {
     "altcoin_watch_error": None,
     "altcoin_watch_failures": 0,
     "altcoin_watch_retry_at": 0,
+    "altcoin_watch_failed_keyed": None,
 }
 
 COMMANDS = [
@@ -976,6 +977,10 @@ def altcoin_watch_tick(now: int | None = None) -> None:
     with LOCK:
         snapshot = STATE.get("altcoin_watch")
         retry_at = int(STATE.get("altcoin_watch_retry_at") or 0)
+        # A CoinGecko key was added after a keyless failure: try now. A wait saved before the marker existed
+        # (None) is treated as keyless; at worst a keyed bot makes one extra attempt, then the marker is set.
+        if retry_at and STATE.get("altcoin_watch_failed_keyed") is not True and ALTCOIN_WATCH.gecko.keyed:
+            retry_at = 0
     errors = []
     if not altcoin_watch.fresh(snapshot, now=now, max_age=ALTCOIN_WATCH_REFRESH_SECONDS) and now >= retry_at:
         try:
@@ -983,6 +988,7 @@ def altcoin_watch_tick(now: int | None = None) -> None:
             with LOCK:
                 STATE["altcoin_watch"] = snapshot
                 STATE["altcoin_watch_failures"], STATE["altcoin_watch_retry_at"] = 0, 0
+                STATE["altcoin_watch_failed_keyed"] = None
         except Exception as exc:                     # the last snapshot stays and is shown as stale
             errors.append(_safe_error(exc))
             # A keyless refresh can wait out rate limits for many minutes: count the delay from when it failed.
@@ -991,6 +997,7 @@ def altcoin_watch_tick(now: int | None = None) -> None:
                 failures = int(STATE.get("altcoin_watch_failures") or 0) + 1
                 STATE["altcoin_watch_failures"] = failures
                 STATE["altcoin_watch_retry_at"] = altcoin_watch.next_attempt(failures, failed_at)
+                STATE["altcoin_watch_failed_keyed"] = ALTCOIN_WATCH.gecko.keyed
     elif now < retry_at:
         with LOCK:                                   # still waiting to retry: keep showing the last error
             errors.append(str(STATE.get("altcoin_watch_error") or "").split("; ")[0] or "yenileme bekliyor")

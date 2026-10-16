@@ -133,6 +133,7 @@ Kartta `/altcoin <sembol>` gösterilir:
   - Bekleme süresi durum dosyasında tutulur; bot yeniden başlasa da sağlayıcıya yüklenmez.
   - Menü hatayı, nedenini ve sonraki deneme saatini gösterir.
   - Anahtarsız 429'da menü, `COINGECKO_DEMO_API_KEY` eklenmesini önerir.
+  - Anahtarsızken başarısız olan bir taramadan sonra anahtar eklenirse bekleme atlanır; bot yeniden başlar başlamaz dener.
 - Bot yeniden başlarsa son tarama durum dosyasından okunur. Tarama bir haftadan eski değilse yeniden yapılmaz.
 - **Bir ana kaynak başarısız olursa tarama başarısız sayılır:** CoinGecko evreni ya da DefiLlama'nın eşleme, ücret, gelir veya hack verisi. Eksik verili bir liste yayınlanmaz; son tarama "güncel değil" uyarısıyla kalır.
 - Tek bir coinin çağrısı başarısız olursa yalnızca o coin ❔ olur.
