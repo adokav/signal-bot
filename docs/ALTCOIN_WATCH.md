@@ -63,7 +63,7 @@ Her kapı ✅ geçti, ⚠️ dikkat, ❌ kırmızı bayrak ya da ❔ bilinmiyor 
 |---|---|---|---|
 | **Arz** | Basılmış ama dolaşımda olmayan arz, dolaşımın en fazla %5'i | — | Bu pay %5'ten büyük: ne zaman açılacağı ücretsiz veride yok. Arz verisi eksik. |
 | **Faaliyet** | DefiLlama'da son 30 günde ücret geliri var | Eşleşen kayıtta 30 günlük ücret sıfır | DefiLlama'da eşleşen kayıt yok |
-| **Güvenlik** | Ana ağ coini (gaz tokeni ya da kontratsız coin); kontratta tehlikeli yetki yok | Son 180 günde net ≥ 1 milyon $ hack. EVM: honeypot, bakiye değiştirme, gizli sahip, kendini yok etme, sahipliği geri alma. Solana: dondurma yetkisi açık. | Kontrat verisi alınamadı ya da alan eksik. Token desteklenmeyen bir zincirde (TON, Tron, Sui…). |
+| **Güvenlik** | Ana ağ coini (gaz tokeni ya da kontratsız coin); kontratta tehlikeli yetki yok | Son 180 günde net ≥ 1 milyon $ hack. EVM: honeypot, bakiye değiştirme, gizli sahip, kendini yok etme, sahipliği geri alma. Solana: dondurma yetkisi açık. | Kontrat verisi alınamadı ya da alan eksik. Proxy kontrat: yetkiler uygulama kontratında, GoPlus okuyamıyor (AAVE, RENDER). Tokenin asıl zinciri desteklenmiyor (TON, Tron, Sui…). |
 | **Likidite** | Son 30 tam günün medyan hacmi ≥ 10 milyon $ | Medyan hacim < 10 milyon $ | Hacim serisi eksik |
 
 **Uyarılar (⚠️, kapıyı kapatmaz):**
@@ -72,6 +72,12 @@ Her kapı ✅ geçti, ⚠️ dikkat, ❌ kırmızı bayrak ya da ❔ bilinmiyor 
 - Solana'da basım yetkisi açık.
 
 Büyük yönetişim tokenlerinde basım fonksiyonu çoğu zaman yönetişim denetimindedir, ama GoPlus bunu ayırt edemez. Bu yüzden ❌ değil ⚠️.
+
+**Kontrat ve hack eşleme kuralları:**
+- **Yalnızca asıl zincirdeki kontrat kontrol edilir.** CoinGecko asıl platformu listede ilk sırada verir. Başka zincirdeki köprü kopyası farklı bir kontrattır ve farklı yetkileri vardır. Örneğin BONK'un asıl kontratı Solana'dadır; Ethereum kopyası kontrol edilmez.
+  - Asıl zinciri desteklenmeyen bir token, köprü kopyasından kontrol edilmez; ❔ olur.
+- **Ana ağ coini yalnızca zincirin kendisine yapılan saldırıyla elenir.** DefiLlama bazı uygulamaları zincirin üst kaydı altında tutar. Örnek: NEAR Intents, NEAR Protocol altında. Bir uygulamanın hack'i zincirin coinini tehlikeye atmaz.
+  - Tokenler ise kendi protokollerinin bütün hack'leriyle değerlendirilir.
 
 **Arz kapısı neden ❌ değil ❔ veriyor:** Kilitli arzın büyüklüğü biliniyor, ama açılış zamanı bilinmiyor. Zamanı bilinmeyen bir şeye "elendi" demek de, "geçti" demek de uydurma olur. Kartta kilitli pay yüzde olarak gösterilir.
 
@@ -166,6 +172,17 @@ Kartta `/altcoin <sembol>` gösterilir:
 - **Güç düşük:** 12 aylık pencereleri çakışan 13 aylık kohort, aşağı yukarı tek bir piyasa döngüsüdür. Hiçbir sonuç modülü otomatik olarak değiştirmez; değişiklik ayrı bir PR ve kullanıcı onayı ister.
 - **Değişiklik kuralı:** Evren, kapı, ölçü, sıralama ya da sonuç kuralı değişirse yeni şema ve yeni trial gerekir. Bir test bunu zorlar.
 
+## Canlı deneme (2026-10-16, anahtarsız CoinGecko)
+
+- **Süre:** Tarama 20 dakika sürdü; anahtarla birkaç dakikaya iner.
+- **Sonuç:** 150 coinden 21'i kapıları geçti, 122'si inceleme gerekli, 7'si elendi.
+- **İncelemeye kalma nedenleri:**
+  - 90 coin: dolaşım dışı arz %5'ten fazla;
+  - 26 coin: DefiLlama eşleşmesi yok;
+  - 6 coin: kontrat doğrulanamadı.
+- **Elenme nedenleri:** son 180 günde hack (THORChain, Raydium) ve 10 milyon doların altında hacim (KCS, XTZ, KAIA).
+- **Bu denemeden çıkan üç düzeltme:** asıl zincir kuralı, ana ağ coinlerinde zincir hack'i kuralı, proxy açıklaması. Üçü de veri eşlemesiyle ilgilidir, hiçbir coinin sonucuna bakılmadı. Ön-kayıt bu düzeltmelerden sonra yapıldı.
+
 ## Bilinen sınırlar
 
 - **Arz kapısı yalnızca üst sınırla çalışır.** Evrenin büyük kısmı ❔ olur, çünkü kilitli arzın açılış takvimi ücretsiz değil. Bu bir eksiklik değil, dürüstlüktür: zamanı bilinmeyen açılışı "yok" saymıyoruz.
@@ -176,6 +193,7 @@ Kartta `/altcoin <sembol>` gösterilir:
 - **Token sahibi geliri her protokolde raporlanmaz.** Raporlanmayan coin, net getiri ölçüsünde en sona konur. Sıfır gelirle "raporlanmamış" ayırt edilemiyor; ihtiyatlı taraf seçildi.
 - **Yakım ile emisyon birbirini götürürse** seyrelme sıfır görünür ve brüt emisyon cezalandırılmaz. Brüt emisyon ücretsiz veride yok.
 - **CoinGecko'nun toplam hacmi bütün borsaları kapsar;** sahte hacmi tam ayıklayamaz.
-- **Hack eşlemesi yalnızca DefiLlama'daki protokol bağlantısıyla yapılır.** Zincirin kendisine yapılan saldırılar ve köprü hack'leri ilgili coine her zaman bağlanmaz.
+- **Hack eşlemesi yalnızca DefiLlama'daki protokol bağlantısıyla yapılır.** Köprü hack'leri ilgili coine her zaman bağlanmaz.
+- **"Asıl platform ilk sırada" kuralı CoinGecko'nun gözlenen davranışıdır,** belgelenmiş bir garanti değildir. Denetlenen örneklerin hepsinde doğruydu: BONK, JUP, PYTH ve WIF'te Solana; AAVE, PEPE ve UNI'de Ethereum.
 - **BTC trend durumu (atlasın "ne zaman" katmanı) bu sürümde yok.** Bu modül "ne" sorusunu yanıtlar.
 - **Geçmişe dönük test yapılmadı ve dürüstçe yapılamaz.** Sağlayıcıların geçmiş verisi o gün bilinen veri değildir: takvimler revize edilir, gelir serileri sonradan doldurulur. İsabeti yalnızca ileriye dönük kayıt ölçer.

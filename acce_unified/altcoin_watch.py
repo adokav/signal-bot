@@ -97,7 +97,7 @@ TRIAL_DATASET = {"source": "CoinGecko markets, categories, coins/list platforms,
                            "dailyRevenue, dailyHoldersRevenue), hacks; GoPlus token_security (EVM), RugCheck "
                            "report (Solana)",
                  "forward_from": "2026-10-16", "kind": "live forward record (/data/altcoin_watch_ledger.jsonl)"}
-TRIAL = "6ae5ee55bfdd9c5e"
+TRIAL = "500fd0802593135c"
 
 
 def trial_params() -> dict[str, Any]:
@@ -112,10 +112,12 @@ def trial_params() -> dict[str, Any]:
             "activity": "DefiLlama fees mapped to the coin (chain gas token, protocol or parent) with 30-day "
                         "fees > 0; zero fees FAIL; not mapped REVIEW",
             "security": f"DefiLlama hack with stolen minus returned >= {HACK_MIN_USD:.0f} USD within "
-                        f"{HACK_FAIL_DAYS} days FAIL, within {HACK_WARN_DAYS} days WARN; GoPlus honeypot, "
-                        "balance change, hidden owner, selfdestruct, take-back ownership FAIL, mint/proxy/"
-                        "pause/blacklist WARN, missing fields REVIEW; Solana freeze authority FAIL, mint "
-                        "authority WARN; gas tokens and coins without a contract PASS; other chains REVIEW",
+                        f"{HACK_FAIL_DAYS} days FAIL, within {HACK_WARN_DAYS} days WARN (a chain's own coin "
+                        "counts only hacks whose target type is Chain); contract on the primary CoinGecko "
+                        "platform only (listed first): GoPlus honeypot, balance change, hidden owner, "
+                        "selfdestruct, take-back ownership FAIL, mint/proxy/pause/blacklist WARN, missing fields "
+                        "REVIEW; Solana freeze authority FAIL, mint authority WARN; gas tokens and coins without "
+                        "a contract PASS; a primary platform on another chain REVIEW",
             "liquidity": f"median of the last 30 complete daily CoinGecko volumes >= {VOLUME_MIN_USD:.0f} USD "
                          f"(at least {VOLUME_MIN_DAYS} days) else FAIL; no chart REVIEW",
             "deep_checks": f"security contract check, liquidity and dilution only for coins passing supply and "
@@ -472,10 +474,10 @@ def aggregate(rows: Sequence[Any], index: LlamaIndex) -> dict[str, Totals]:
     return out
 
 
-def hacks_by_gecko(rows: Sequence[Any], index: LlamaIndex) -> dict[str, list[tuple[int, float]]]:
-    """(date, stolen minus returned USD) per CoinGecko id, from protocol and parent links only."""
+def hacks_by_gecko(rows: Sequence[Any], index: LlamaIndex) -> dict[str, list[tuple[int, float, str]]]:
+    """(date, stolen minus returned USD, target type) per CoinGecko id, from protocol and parent links only."""
 
-    out: dict[str, list[tuple[int, float]]] = {}
+    out: dict[str, list[tuple[int, float, str]]] = {}
     for row in rows or []:
         if not isinstance(row, Mapping):
             continue
@@ -487,7 +489,8 @@ def hacks_by_gecko(rows: Sequence[Any], index: LlamaIndex) -> dict[str, list[tup
         parent = row.get("parentProtocolId") or index.protocol_parent.get(did)
         gecko = (index.parent_gecko.get(str(parent)) if parent else None) or index.protocol_gecko.get(did)
         if gecko:
-            out.setdefault(gecko, []).append((date, max(0.0, amount - returned)))
+            out.setdefault(gecko, []).append((date, max(0.0, amount - returned),
+                                              str(row.get("targetType") or "").strip().lower()))
     return out
 
 
@@ -555,9 +558,15 @@ def screen_activity(card: Card, fees: Totals | None) -> None:
         card.add(ACTIVITY, PASS, f"30 günde ${fees.d30:,.0f} ücret")
 
 
-def screen_hacks(card: Card, hacks: Sequence[tuple[int, float]], *, now: int) -> bool:
-    """Adds the hack finding; True when a recent hack eliminates the coin."""
+def screen_hacks(card: Card, hacks: Sequence[tuple[int, float, str]], *, now: int, native: bool = False) -> bool:
+    """Adds the hack finding; True when a recent hack eliminates the coin.
 
+    A chain's own coin counts only attacks on the chain itself: DefiLlama files
+    some applications under the chain's parent, and an application hack does
+    not compromise the chain's coin. A token counts every hack of its protocol.
+    """
+
+    hacks = [(date, net) for date, net, target in hacks if not native or target == "chain"]
     recent = [net for date, net in hacks if 0 <= now - date <= HACK_FAIL_DAYS * DAY and net >= HACK_MIN_USD]
     older = [net for date, net in hacks if HACK_FAIL_DAYS * DAY < now - date <= HACK_WARN_DAYS * DAY
              and net >= HACK_MIN_USD]
@@ -571,16 +580,21 @@ def screen_hacks(card: Card, hacks: Sequence[tuple[int, float]], *, now: int) ->
 
 def contract_of(gecko_id: str, platforms: Mapping[str, Mapping[str, str]], index: LlamaIndex
                 ) -> tuple[str, str | None, str | None]:
-    """("native", None, None) | ("token", chain, address) | ("unsupported", None, None)."""
+    """("native", None, None) | ("token", chain, address) | ("unsupported", None, None).
+
+    Only the coin's primary platform is checked: CoinGecko lists it first. A
+    bridged copy on another chain is a different contract with other powers,
+    so a token whose primary chain is unsupported is not checked elsewhere.
+    """
 
     plats = platforms.get(gecko_id)
     if gecko_id in index.gas_tokens or plats is not None and not plats:
         return "native", None, None
-    for key, chain in PLATFORMS:
-        address = (plats or {}).get(key)
-        if address:
-            return "token", chain, address.strip()
-    return "unsupported", None, None
+    if not plats:
+        return "unsupported", None, None
+    key, address = next(iter(plats.items()))
+    chain = dict(PLATFORMS).get(key)
+    return ("token", chain, address.strip()) if chain else ("unsupported", None, None)
 
 
 def screen_contract(card: Card, kind: str, chain: str | None, payload: Any, *, error: bool = False) -> None:
@@ -614,7 +628,8 @@ def screen_contract(card: Card, kind: str, chain: str | None, payload: Any, *, e
         if flags[key] == "1":
             card.add(SECURITY, WARN, text)
     if any(flags[k] not in ("0", "1") for k, _ in EVM_FAIL):
-        card.add(SECURITY, REVIEW, "kontrat yetkileri doğrulanamadı")
+        card.add(SECURITY, REVIEW, "proxy: yetkiler uygulama kontratında, doğrulanamadı" if flags["is_proxy"] == "1"
+                 else "kontrat yetkileri doğrulanamadı")
     elif not any(flags[k] == "1" for k, _ in EVM_FAIL):
         card.add(SECURITY, PASS, "kontratta tehlikeli yetki yok")
 
@@ -784,13 +799,14 @@ class AltcoinWatch:
         deep = 0
         for coin in coins:
             card = Card(coin=coin)
+            contract = contract_of(coin.gecko_id, platforms, index)
             screen_supply(card)
             screen_activity(card, fees.get(coin.gecko_id))
-            hacked = screen_hacks(card, hacks.get(coin.gecko_id, ()), now=now)
+            hacked = screen_hacks(card, hacks.get(coin.gecko_id, ()), now=now, native=contract[0] == "native")
             if card.gate(SUPPLY) == PASS and card.gate(ACTIVITY) == PASS and not hacked:
                 if deep < MAX_DEEP_CHECKS:
                     deep += 1
-                    self._deep(card, platforms, index, now)
+                    self._deep(card, contract, now)
                 else:
                     card.add(LIQUIDITY, REVIEW, "bu taramada sıraya alınamadı")
             compute_measures(card, holders=holders.get(coin.gecko_id), revenue=revenue.get(coin.gecko_id),
@@ -805,8 +821,8 @@ class AltcoinWatch:
         self._record_cohort(snapshot, now)
         return snapshot
 
-    def _deep(self, card: Card, platforms: Mapping[str, Mapping[str, str]], index: LlamaIndex, now: int) -> None:
-        kind, chain, address = contract_of(card.coin.gecko_id, platforms, index)
+    def _deep(self, card: Card, contract: tuple[str, str | None, str | None], now: int) -> None:
+        kind, chain, address = contract
         payload, error = None, False
         if kind == "token" and chain and address:
             try:
@@ -936,7 +952,14 @@ def _usd(value: Any) -> str:
 
 def _multiple(value: Any) -> str:
     number = _finite(value)
-    return "?" if number is None else f"{number:.1f}x"
+    if number is None:
+        return "?"
+    return f"{number:.1f}x" if abs(number) < 100 else f"{number:,.0f}x"
+
+
+def _share(value: Any) -> str:
+    number = _finite(value)
+    return "?" if number is None else f"%{number * 100:.1f}"
 
 
 def _age(seconds: int) -> str:
@@ -969,12 +992,12 @@ def render(snapshot: Mapping[str, Any] | None, *, now: int, error: str | None = 
     passed = sorted((c for c in cards if c.get("status") == PASSED), key=lambda c: c.get("position") or 10**6)
     lines += ["", "✅ <b>KAPILARI GEÇENLER</b> <i>(doğrulanmamış sıralama)</i>"]
     if passed:
-        rows = [f"{'#':>2} {'Coin':<7}{'NetGetiri':>10}{'FDV/Gelir':>10}{'Kullanım':>9}{'ATH':>6}"]
+        rows = [f"{'#':>2} {'Coin':<7}{'NetGetiri':>10}{'FDV/Gelir':>10}{'Kullanım':>9}{'ATH':>8}"]
         for c in passed[:10]:
             m, info = c.get("measures") or {}, c.get("info") or {}
             rows.append(f"{c.get('position') or '-':>2} {str(c.get('symbol'))[:6]:<7}{_pct(m.get('net_yield')):>10}"
                         f"{_multiple(m.get('valuation')):>10}{_pct(m.get('usage'), 0):>9}"
-                        f"{_multiple(info.get('ath_multiple')):>6}")
+                        f"{_multiple(info.get('ath_multiple')):>8}")
         lines.append("<pre>" + esc("\n".join(rows)) + "</pre>")
         lines.append(esc("NetGetiri: token sahibine giden gelir − seyrelme (yıllık). FDV/Gelir: düşük daha ucuz. "
                          "Kullanım: son 30 günün ücreti, yıllık aylık ortalamaya göre. ATH: zirveye kaç kat."))
@@ -1043,9 +1066,9 @@ def render_card(card: Mapping[str, Any], *, now: int, generated_at: int | None =
     if info.get("dilution_note"):
         measure_rows.append(f"Seyrelme notu  {info['dilution_note']}")
     if info.get("locked_share") is not None:
-        measure_rows.append(f"Dolaşım dışı   {_pct(info.get('locked_share'), 1)} (basılmış, dolaşımda değil)")
+        measure_rows.append(f"Dolaşım dışı   {_share(info.get('locked_share'))} (basılmış, dolaşımda değil)")
     if info.get("unminted_share") is not None:
-        measure_rows.append(f"Basılmamış     {_pct(info.get('unminted_share'), 1)} (maksimum arza kadar)")
+        measure_rows.append(f"Basılmamış     {_share(info.get('unminted_share'))} (maksimum arza kadar)")
     lines.append("<pre>" + esc("\n".join(measure_rows)) + "</pre>")
     price, ath = card.get("price"), card.get("ath")
     ath_rows = [f"Fiyat ${_num(price) if price else '?'} · ATH ${_num(ath) if ath else '?'}"

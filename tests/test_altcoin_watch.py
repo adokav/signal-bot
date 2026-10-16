@@ -172,10 +172,11 @@ def test_defillama_fees_are_summed_per_coin_through_parents_chains_and_own_ids()
 
 def test_hacks_count_what_was_not_returned():
     index = aw.build_llama_index(LITE, CHAINS)
-    hacks = aw.hacks_by_gecko([{"date": NOW - DAY, "amount": 5e6, "returnedFunds": 4.5e6, "defillamaId": "11"},
+    hacks = aw.hacks_by_gecko([{"date": NOW - DAY, "amount": 5e6, "returnedFunds": 4.5e6, "defillamaId": "11",
+                                "targetType": "DeFi Protocol"},
                                {"date": NOW, "amount": "x", "defillamaId": "31"},
-                               {"date": NOW, "amount": 2e6, "defillamaId": "31"}], index)
-    assert hacks == {"lendco": [(NOW - DAY, 5e5)], "hacked": [(NOW, 2e6)]}
+                               {"date": NOW, "amount": 2e6, "defillamaId": "31", "targetType": "Chain"}], index)
+    assert hacks == {"lendco": [(NOW - DAY, 5e5, "defi protocol")], "hacked": [(NOW, 2e6, "chain")]}
 
 
 # ---------------------------------------------------------------------------
@@ -205,23 +206,36 @@ def test_economic_activity_needs_mapped_fees():
 
 
 def test_a_recent_hack_eliminates_an_older_one_warns_and_returned_funds_count():
-    for hacks, status, eliminated in (([(NOW - 10 * DAY, 2e6)], aw.FAIL, True),
-                                      ([(NOW - 400 * DAY, 2e6)], aw.WARN, False),
-                                      ([(NOW - 10 * DAY, 5e5)], aw.SKIP, False),
-                                      ([(NOW - 900 * DAY, 9e9)], aw.SKIP, False)):
+    for hacks, status, eliminated in (([(NOW - 10 * DAY, 2e6, "defi protocol")], aw.FAIL, True),
+                                      ([(NOW - 400 * DAY, 2e6, "defi protocol")], aw.WARN, False),
+                                      ([(NOW - 10 * DAY, 5e5, "defi protocol")], aw.SKIP, False),
+                                      ([(NOW - 900 * DAY, 9e9, "defi protocol")], aw.SKIP, False)):
         card = _card()
         assert aw.screen_hacks(card, hacks, now=NOW) is eliminated
         assert card.gate(aw.SECURITY) == status
 
 
+def test_a_chain_coin_is_eliminated_only_by_an_attack_on_the_chain_itself():
+    app_hack = [(NOW - 10 * DAY, 4e6, "defi protocol")]       # an application DefiLlama files under the chain
+    card = _card()
+    assert aw.screen_hacks(card, app_hack, now=NOW, native=True) is False and card.gate(aw.SECURITY) == aw.SKIP
+    card = _card()
+    assert aw.screen_hacks(card, [(NOW - 10 * DAY, 4e6, "chain")], now=NOW, native=True) is True
+    card = _card()
+    assert aw.screen_hacks(card, app_hack, now=NOW, native=False) is True       # a token's protocol: counts
+
+
 def test_contracts_are_located_by_platform_and_gas_tokens_are_native():
     index = aw.build_llama_index(LITE, CHAINS)
-    plats = {"chainone": {"ethereum": "0x" + "11" * 20}, "plain": {}, "tok": {"tron": "T1", "base": "0x" + "ab" * 20},
-             "tron-only": {"tron": "T1"}}
+    plats = {"chainone": {"ethereum": "0x" + "11" * 20}, "plain": {},
+             "sol-first": {"solana": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "ethereum": "0x" + "ab" * 20},
+             "base-first": {"base": "0x" + "ab" * 20, "solana": "Mint"}, "tron-first": {"tron": "T1", "ethereum": "0x1"}}
     assert aw.contract_of("chainone", plats, index) == ("native", None, None)      # its bridged copy is not it
     assert aw.contract_of("plain", plats, index) == ("native", None, None)
-    assert aw.contract_of("tok", plats, index) == ("token", "base", "0x" + "ab" * 20)
-    assert aw.contract_of("tron-only", plats, index)[0] == "unsupported"
+    assert aw.contract_of("sol-first", plats, index) == ("token", "solana",
+                                                         "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263")
+    assert aw.contract_of("base-first", plats, index) == ("token", "base", "0x" + "ab" * 20)
+    assert aw.contract_of("tron-first", plats, index)[0] == "unsupported"         # never a bridged copy instead
     assert aw.contract_of("missing", plats, index)[0] == "unsupported"
 
 
