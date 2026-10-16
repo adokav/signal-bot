@@ -54,6 +54,19 @@ services:
       - key: CMC_API_KEY
         sync: false
 
+      # Altcoin watch (docs/ALTCOIN_WATCH.md): weekly long-horizon fundamental screen of the 150
+      # largest altcoins (supply, fees, hacks, contract powers, liquidity), pre-registered forward
+      # record. Research only, no orders. COINGECKO_DEMO_API_KEY: free demo key from
+      # coingecko.com/en/api, set in the Render dashboard (never in this file, logs or chat).
+      - key: ALTCOIN_WATCH_ENABLED
+        value: "1"
+      - key: ALTCOIN_WATCH_REFRESH_SECONDS
+        value: "604800"
+      - key: ALTCOIN_WATCH_LEDGER_FILE
+        value: /data/altcoin_watch_ledger.jsonl
+      - key: COINGECKO_DEMO_API_KEY
+        sync: false
+
       # D1 trend loop, shadow record (docs/TREND_LOOP_LIVE.md): daily 00:00 UTC
       # decisions on the majors, intraday acute stops, append-only ledger.
       # Alerts carry the RİSK_AZALTIR label (user decision 2026-10-02); no orders.

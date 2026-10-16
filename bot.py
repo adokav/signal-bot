@@ -17,7 +17,7 @@ from flask import Flask, jsonify
 
 from acce_unified import UnifiedConfig, UnifiedRadarEngine, build_trade_universe
 from acce_unified import long_alerts
-from acce_unified import new_coins
+from acce_unified import altcoin_watch, new_coins
 from acce_unified.listing_fundamentals import ListingFundamentalMetricsProvider
 from acce_unified.forward_ledger import ForwardLedger, status_text, update_records
 from acce_unified.radar_gate import (
@@ -84,6 +84,15 @@ NEW_COINS_ENABLED = os.getenv("NEW_COINS_ENABLED", "1") == "1"
 NEW_COINS_SCAN_SECONDS = max(600, int(os.getenv("NEW_COINS_SCAN_INTERVAL_SECONDS", "1800")))
 NEW_COINS_MAX_AGE_SECONDS = 3 * NEW_COINS_SCAN_SECONDS
 CMC_API_KEY = os.getenv("CMC_API_KEY", "").strip()
+# "Altcoin İzleme" (docs/ALTCOIN_WATCH.md). User decision (2026-10-16): a long-horizon fundamental screen
+# built from the synthesis of two selection models; research only, with a pre-registered forward record.
+ALTCOIN_WATCH_ENABLED = os.getenv("ALTCOIN_WATCH_ENABLED", "1") == "1"
+ALTCOIN_WATCH_REFRESH_SECONDS = max(86_400, int(os.getenv("ALTCOIN_WATCH_REFRESH_SECONDS",
+                                                          str(altcoin_watch.REFRESH_SECONDS))))
+ALTCOIN_WATCH_MAX_AGE_SECONDS = 2 * ALTCOIN_WATCH_REFRESH_SECONDS + 86_400
+ALTCOIN_WATCH_TICK_SECONDS = 6 * 3_600
+COINGECKO_DEMO_API_KEY = os.getenv("COINGECKO_DEMO_API_KEY", "").strip()
+COINGECKO_PRO_API_KEY = os.getenv("COINGECKO_PRO_API_KEY", "").strip()
 
 CONFIG = UnifiedConfig.from_env()
 # A snapshot older than three scan cycles is stale evidence, not a current view.
@@ -94,8 +103,8 @@ EVIDENCE_FOOTER = (
     "doğrulama eksik. Puan ve R/R olasılık değildir. Otomatik emir veya pozisyon yetkisi yoktur."
 )
 FUNDAMENTAL_PROVIDER = ListingFundamentalMetricsProvider(
-    demo_api_key=os.getenv("COINGECKO_DEMO_API_KEY", ""),
-    pro_api_key=os.getenv("COINGECKO_PRO_API_KEY", ""),
+    demo_api_key=COINGECKO_DEMO_API_KEY,
+    pro_api_key=COINGECKO_PRO_API_KEY,
     timeout=CONFIG.request_timeout_seconds,
     cache_ttl_seconds=CONFIG.fundamental_cache_ttl_seconds,
     max_assets=CONFIG.fundamental_max_assets,
@@ -120,6 +129,12 @@ NEW_COINS = new_coins.NewCoinsScanner(
     TrendLedger(Path(os.getenv("NEW_COINS_LEDGER_FILE", str(STATE_FILE.parent / "new_coins_ledger.jsonl")))),
     window_hours=max(1, int(os.getenv("NEW_COINS_WINDOW_HOURS", str(new_coins.WINDOW_HOURS)))),
 )
+ALTCOIN_WATCH = altcoin_watch.AltcoinWatch(
+    altcoin_watch.CoinGecko(demo_key=COINGECKO_DEMO_API_KEY, pro_key=COINGECKO_PRO_API_KEY),
+    altcoin_watch.DefiLlama(),
+    new_coins.SecurityProviders(timeout=CONFIG.request_timeout_seconds),
+    TrendLedger(Path(os.getenv("ALTCOIN_WATCH_LEDGER_FILE", str(STATE_FILE.parent / "altcoin_watch_ledger.jsonl")))),
+)
 # /check runs in the Telegram thread: its own HTTP session; the scanner's lookalike reference is only read.
 CHECKER = new_coins.AddressChecker(new_coins.SecurityProviders(timeout=CONFIG.request_timeout_seconds),
                                    reference=NEW_COINS.current_reference)
@@ -143,6 +158,8 @@ STATE: dict[str, Any] = {
     "trend_loop_error": None,
     "new_coins": None,
     "new_coins_error": None,
+    "altcoin_watch": None,
+    "altcoin_watch_error": None,
 }
 
 COMMANDS = [
@@ -151,6 +168,7 @@ COMMANDS = [
     {"command": "longs", "description": "MEXC Likit 100 Long İlk 3"},
     {"command": "new", "description": "CoinMarketCap yeni coinler: dolandırıcılık taraması"},
     {"command": "check", "description": "Kontrat adresiyle anında dolandırıcılık taraması: /check <adres>"},
+    {"command": "altcoin", "description": "Altcoin izleme: arz, gelir, değerleme (uzun vade, araştırma)"},
     {"command": "radar", "description": "Radara giren long sinyalleri ve stop durumu"},
     {"command": "d1", "description": "D1 döngü: gölge pozisyonlar, çıkış seviyesi ve acil stop"},
     {"command": "status", "description": "Tarama sağlığı ve veri durumu"},
@@ -170,7 +188,8 @@ def _safe_error(exc: BaseException) -> str:
     """
 
     message = _URL_RE.sub("<url>", str(exc))
-    for secret, mask in ((TOKEN, "<token>"), (CMC_API_KEY, "<cmc-key>")):
+    for secret, mask in ((TOKEN, "<token>"), (CMC_API_KEY, "<cmc-key>"), (COINGECKO_DEMO_API_KEY, "<cg-key>"),
+                         (COINGECKO_PRO_API_KEY, "<cg-key>")):
         if secret:
             message = message.replace(secret, mask)
     message = message.strip()[:160]
@@ -270,6 +289,7 @@ def panel_keyboard() -> dict[str, Any]:
         [{"text": "📈 D1 Döngü", "callback_data": "D1"}],
         [{"text": "🆕 Yeni Coinler (CMC)", "callback_data": "NEW"},
          {"text": "🔎 Kontrat Kontrol", "callback_data": "CHECK"}],
+        [{"text": "🔭 Altcoin İzleme", "callback_data": "ALTCOIN"}],
         [
             {"text": "📊 Durum", "callback_data": "STATUS"},
             {"text": "🔄 Şimdi Tara", "callback_data": "SCAN"},
@@ -509,6 +529,8 @@ def format_status(snapshot: dict[str, Any] | None) -> str:
         f"Long aday: {len((snapshot or {}).get('liquid_long_candidates') or [])}/3",
         new_coins.status_line(STATE.get("new_coins"), now=int(time.time()), enabled=NEW_COINS_ENABLED,
                               configured=CMC.configured, error=STATE.get("new_coins_error")),
+        altcoin_watch.status_line(STATE.get("altcoin_watch"), now=int(time.time()), enabled=ALTCOIN_WATCH_ENABLED,
+                                  error=STATE.get("altcoin_watch_error")),
         f"Ana hata: {error_text}",
         f"Taktik hata: {STATE.get('tactical_last_error') or 'yok'}",
         evidence_status_text(),
@@ -945,6 +967,64 @@ def new_coins_tick(now: int | None = None) -> None:
         _save_state()
 
 
+def altcoin_watch_tick(now: int | None = None) -> None:
+    """Weekly fundamental refresh of the largest altcoins; due outcomes of earlier cohorts are recorded."""
+
+    now = int(time.time()) if now is None else now
+    with LOCK:
+        snapshot = STATE.get("altcoin_watch")
+    errors = []
+    if not altcoin_watch.fresh(snapshot, now=now, max_age=ALTCOIN_WATCH_REFRESH_SECONDS):
+        try:
+            snapshot = ALTCOIN_WATCH.refresh(now)
+            with LOCK:
+                STATE["altcoin_watch"] = snapshot
+        except Exception as exc:                     # the last snapshot stays and is shown as stale
+            errors.append(_safe_error(exc))
+    try:
+        ALTCOIN_WATCH.record_outcomes(now)
+    except Exception as exc:
+        errors.append(_safe_error(exc))
+    error = "; ".join(errors) or None
+    if error:
+        log.warning("Altcoin izleme: %s", error)
+    with LOCK:
+        STATE["altcoin_watch_error"] = error
+        _save_state()
+
+
+def altcoin_watch_loop() -> None:
+    while True:
+        try:
+            altcoin_watch_tick()
+        except Exception:
+            log.warning("Altcoin izleme beklenmedik hata", exc_info=True)
+        time.sleep(ALTCOIN_WATCH_TICK_SECONDS)
+
+
+def format_altcoin(text: str = "") -> str:
+    """/altcoin: the list; /altcoin <symbol or CoinGecko id>: one coin's card (only that word is read)."""
+
+    with LOCK:
+        snapshot, error = STATE.get("altcoin_watch"), STATE.get("altcoin_watch_error")
+    now = int(time.time())
+    parts = str(text or "").split()
+    query = parts[1] if len(parts) == 2 and parts[0].startswith("/") else None
+    if len(parts) > 2 or (query is not None and not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", query)):
+        return long_alerts.esc("Kullanım: /altcoin ya da /altcoin <sembol>")
+    if query is None:
+        return altcoin_watch.render(snapshot, now=now, error=error, enabled=ALTCOIN_WATCH_ENABLED,
+                                    max_age=ALTCOIN_WATCH_MAX_AGE_SECONDS)
+    found = altcoin_watch.find(snapshot, query)
+    if not found:
+        return long_alerts.esc(f"{query[:20]} izleme evreninde yok (ilk {altcoin_watch.UNIVERSE_SIZE} altcoin) "
+                               "ya da henüz tarama yapılmadı.")
+    if len(found) > 1:
+        ids = ", ".join(str(c.get("id"))[:40] for c in found[:5])
+        return long_alerts.esc(f"Bu sembolde birden çok coin var: {ids}. CoinGecko kimliğiyle sor: /altcoin <kimlik>")
+    return altcoin_watch.render_card(found[0], now=now, generated_at=int((snapshot or {}).get("generated_at") or 0))
+
+
 def new_coins_loop() -> None:
     while True:
         try:
@@ -969,7 +1049,7 @@ def _command(text: str) -> str:
         "/start": "PANEL", "/panel": "PANEL", "/tactical": "TACTICAL",
         "/btceth": "TACTICAL", "/longs": "LONGS", "/new": "NEW",
         "/listings": "NEW", "/status": "STATUS", "/scan": "SCAN", "/radar": "RADAR", "/d1": "D1",
-        "/check": "CHECK",
+        "/check": "CHECK", "/altcoin": "ALTCOIN",
     }.get(token, token.lstrip("/").upper())
 
 
@@ -1007,6 +1087,8 @@ def handle(action: str, text: str = "") -> None:
         send(format_new(), keyboard=panel_keyboard(), html_mode=True)
     elif action == "CHECK":
         check_address(text)
+    elif action == "ALTCOIN":
+        send(format_altcoin(text), keyboard=panel_keyboard(), html_mode=True)
     elif action == "RADAR":
         with LOCK:
             rows = [dict(e) for e in STATE.get("radar_log") or []]
@@ -1034,7 +1116,7 @@ def handle(action: str, text: str = "") -> None:
         send(format_status(refreshed or _snapshot()), keyboard=panel_keyboard())
     else:
         send(
-            "🎯 SIGNAL BOT v5 CORE\n\nAktif araştırma motorları:\n• BTC/ETH Taktik Long giriş ve stop radarı\n• MEXC Likit 100 Long İlk 3\n• CoinMarketCap yeni coinler: dolandırıcılık taraması\n• D1 trend döngüsü (gölge kayıt, emir yok)",
+            "🎯 SIGNAL BOT v5 CORE\n\nAktif araştırma motorları:\n• BTC/ETH Taktik Long giriş ve stop radarı\n• MEXC Likit 100 Long İlk 3\n• CoinMarketCap yeni coinler: dolandırıcılık taraması\n• Altcoin izleme: arz, gelir, değerleme (uzun vade)\n• D1 trend döngüsü (gölge kayıt, emir yok)",
             keyboard=panel_keyboard(),
         )
 
@@ -1105,6 +1187,8 @@ def health() -> Any:
     trend_fresh = TREND_LOOP.fresh(now, stop_seconds=TREND_LOOP_STOP_SECONDS) if TREND_LOOP_ENABLED else None
     coins_fresh = (new_coins.fresh(STATE.get("new_coins"), now=now, max_age=NEW_COINS_MAX_AGE_SECONDS)
                    if NEW_COINS_ENABLED else None)
+    altcoin_fresh = (altcoin_watch.fresh(STATE.get("altcoin_watch"), now=now, max_age=ALTCOIN_WATCH_MAX_AGE_SECONDS)
+                     if ALTCOIN_WATCH_ENABLED else None)
     return jsonify({
         # Healthy means fresh artifacts exist, not merely "no error recorded".
         "ok": (
@@ -1112,6 +1196,7 @@ def health() -> Any:
             and STATE.get("last_error") is None and STATE.get("tactical_last_error") is None
             and (not TREND_LOOP_ENABLED or (trend_fresh and STATE.get("trend_loop_error") is None))
             and (not NEW_COINS_ENABLED or (coins_fresh and STATE.get("new_coins_error") is None))
+            and (not ALTCOIN_WATCH_ENABLED or (altcoin_fresh and STATE.get("altcoin_watch_error") is None))
         ),
         "service": "signal-bot-v5-core",
         "main_scan_fresh": main_fresh,
@@ -1125,6 +1210,8 @@ def health() -> Any:
         "trend_loop_last_error": _error_code(STATE.get("trend_loop_error")),
         "new_coins_fresh": coins_fresh,
         "new_coins_last_error": _error_code(STATE.get("new_coins_error")),
+        "altcoin_watch_fresh": altcoin_fresh,
+        "altcoin_watch_last_error": _error_code(STATE.get("altcoin_watch_error")),
         "can_authorize_trade": False,
     })
 
@@ -1138,6 +1225,8 @@ def main() -> None:
         threading.Thread(target=trend_loop_loop, name="d1-trend-loop", daemon=True).start()
     if NEW_COINS_ENABLED:
         threading.Thread(target=new_coins_loop, name="cmc-new-coins", daemon=True).start()
+    if ALTCOIN_WATCH_ENABLED:
+        threading.Thread(target=altcoin_watch_loop, name="altcoin-watch", daemon=True).start()
     if STARTUP_MESSAGE:
         try:
             send("✅ Signal Bot v5 Core başladı.", keyboard=panel_keyboard())

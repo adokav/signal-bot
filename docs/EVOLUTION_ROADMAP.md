@@ -313,6 +313,17 @@ güncellenenler belirtildi.
       taklit (CMC ilk 500 ile aynı ad/sembol) ve eksik site/sosyal hesap
       uyarıları. Yalnız ⚠️: karar ve ön-kayıtlı test değişmedi.
 
+14. ⏳ **Altcoin izleme: uzun vadeli temel tarama** — `docs/ALTCOIN_WATCH.md`
+    (kullanıcı kararı 2026-10-16; iki karar aracının seçim modelinin sentezi).
+    - İlk 150 altcoin haftada bir kapılardan geçiyor: dolaşım dışı arz, DefiLlama
+      ücretleri, hack ve kontrat yetkileri, 30 günlük medyan hacim. Eksik ya da
+      doğrulanamayan veri "İNCELEME GEREKLİ" kalır.
+    - Kapıları geçenler üç ölçüyle eşit ağırlıklı sıralanıyor: net token sahibi
+      getirisi, FDV/gelir, kullanım ivmesi. Sıralama doğrulanmamış; emir yetkisi yok.
+    - İleriye dönük kayıt ön-kayıtlı; 2028-11-01'den önce değerlendirilmez.
+    - Unlock takvimi ücretsiz veride yok; unlock olay çalışması ayrı bir adım
+      olarak bekliyor.
+
 ## Kesin çizgiler
 
 - OOS validation atlanmaz. Faz A ↔ Faz C arasında bir "kanıt eşiği" vardır.
