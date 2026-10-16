@@ -66,6 +66,8 @@ CHART_MIN_POINTS = 300
 CHART_EDGE_POINTS = 7
 # Schedule and forward record
 REFRESH_SECONDS = 7 * DAY
+RETRY_DELAYS = (30 * 60, HOUR, 2 * HOUR, 4 * HOUR, 6 * HOUR)   # after a failed refresh: 30 min, then doubling
+MAX_RETRY_WAIT = 600              # longest Retry-After honoured within one request
 OUTCOME_DAYS = (182, 365, 730)
 OUTCOME_TOLERANCE_SECONDS = 2 * DAY
 SCHEMA = "altcoin-watch/v1"
@@ -282,7 +284,7 @@ class _Http:
             except Exception as exc:                   # exception text can carry URLs and headers
                 raise AltcoinDataError(f"{name} transport {type(exc).__name__}") from None
             if response.status_code == 429 and attempt < self.retries:
-                self.sleep(self.backoff * (attempt + 1))
+                self.sleep(self._wait(response, attempt))
                 continue
             if response.status_code != 200:
                 raise AltcoinDataError(f"{name} http {response.status_code}")
@@ -291,6 +293,19 @@ class _Http:
             except ValueError:
                 raise AltcoinDataError(f"{name} malformed JSON") from None
         raise AltcoinDataError(f"{name} http 429")     # pragma: no cover - the loop always returns or raises
+
+    def _wait(self, response: Any, attempt: int) -> float:
+        """The provider's Retry-After when it gives a usable one (capped), else a growing backoff."""
+
+        default = self.backoff * (attempt + 1)
+        headers = getattr(response, "headers", None)
+        try:
+            after = float(headers.get("Retry-After")) if headers is not None else None
+        except (TypeError, ValueError, AttributeError):
+            after = None
+        if after is None or not math.isfinite(after) or after <= 0:
+            return default
+        return min(float(MAX_RETRY_WAIT), max(default, after))
 
 
 class CoinGecko:
@@ -306,9 +321,12 @@ class CoinGecko:
         elif demo_key:
             self.headers["x-cg-demo-api-key"] = demo_key
         self.keyed = bool(pro_key or demo_key)
-        self.pace = 2.5 if self.keyed else 7.0         # stay inside 30/min (key) or the public limit
+        # A key has its own 30/min limit. Without one the public limit is shared by everyone on the same IP
+        # (a hosting provider's address), so the refresh goes slowly and waits out 429s for longer.
+        self.pace = 2.5 if self.keyed else 12.0
         self.sleep = sleep
-        self.http = _Http(timeout=timeout, session=session, sleep=sleep)
+        self.http = (_Http(timeout=timeout, session=session, sleep=sleep, retries=3, backoff=30.0) if self.keyed
+                     else _Http(timeout=timeout, session=session, sleep=sleep, retries=5, backoff=60.0))
 
     def _get(self, path: str, params: Mapping[str, Any] | None = None) -> Any:
         payload = self.http.get("coingecko", self.base + path, params=params, headers=self.headers)
@@ -1008,16 +1026,45 @@ def _age(seconds: int) -> str:
     return f"{seconds // DAY} gün"
 
 
+def next_attempt(failures: int, now: int) -> int:
+    """When to try a failed refresh again: 30 minutes, then doubling up to 6 hours."""
+
+    return now + RETRY_DELAYS[min(max(failures, 1), len(RETRY_DELAYS)) - 1]
+
+
+def explain(error: str | None, *, keyed: bool) -> str:
+    """A plain reason for a refresh error the user can act on; empty when there is nothing to add."""
+
+    if error and "coingecko http 429" in error and not keyed:
+        return ("CoinGecko hız sınırı: anahtarsız genel API, Render'ın paylaşılan IP adresinde sık kısıtlanıyor. "
+                "Çözüm: Render paneline ücretsiz COINGECKO_DEMO_API_KEY ekleyin.")
+    if error and "coingecko http 429" in error:
+        return "CoinGecko hız sınırı: kısa süre sonra yeniden denenecek."
+    return ""
+
+
+def _retry_text(retry_at: int | None, now: int) -> str:
+    if not retry_at or retry_at <= now:
+        return ""
+    return f" Sonraki deneme {datetime.fromtimestamp(retry_at, tz=timezone.utc):%H:%M} UTC."
+
+
 def render(snapshot: Mapping[str, Any] | None, *, now: int, error: str | None = None, enabled: bool = True,
-           max_age: int = 2 * REFRESH_SECONDS) -> str:
+           max_age: int = 2 * REFRESH_SECONDS, retry_at: int | None = None, keyed: bool = True) -> str:
     from .long_alerts import esc
 
     head = "🔭 <b>ALTCOIN İZLEME · uzun vade (24–36 ay) · araştırma</b>"
     if not enabled:
         return head + "\n" + esc("Modül kapalı (ALTCOIN_WATCH_ENABLED=0).")
     if not snapshot:
-        reason = f"Henüz tarama yok. Hata: {error}" if error else "İlk tarama sürüyor (10–20 dakika)."
-        return head + "\n" + esc(reason + " Liste boş demek değildir.")
+        if not error:
+            return head + "\n" + esc("İlk tarama sürüyor (anahtarla birkaç dakika, anahtarsız 20 dakikaya kadar). "
+                                     "Liste boş demek değildir.")
+        lines = [head, esc(f"İlk tarama yapılamadı. Hata: {error}.{_retry_text(retry_at, now)}")]
+        if explain(error, keyed=keyed):
+            lines.append(esc(explain(error, keyed=keyed)))
+        lines.append(esc("Liste boş demek değildir."))
+        return "\n".join(lines)
     cards = [c for c in snapshot.get("cards") or [] if isinstance(c, Mapping)]
     counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), Mapping) else {}
     age = max(0, now - int(snapshot.get("generated_at") or 0))
@@ -1026,7 +1073,10 @@ def render(snapshot: Mapping[str, Any] | None, *, now: int, error: str | None = 
              esc(f"✅ kapıları geçen {counts.get(PASSED, 0)} · ❔ inceleme gerekli {counts.get(NEEDS_REVIEW, 0)} · "
                  f"❌ elenen {counts.get(ELIMINATED, 0)}")]
     if age > max_age or error:
-        lines.append(esc(f"⚠️ Tarama güncel değil. Hata: {error or 'yok'}"))
+        lines.append(esc(f"⚠️ Son tarama gösteriliyor; yenileme yapılamadı. Hata: {error or 'yok'}."
+                         f"{_retry_text(retry_at, now)}"))
+        if explain(error, keyed=keyed):
+            lines.append(esc(explain(error, keyed=keyed)))
     passed = sorted((c for c in cards if c.get("status") == PASSED), key=lambda c: c.get("position") or 10**6)
     lines += ["", "✅ <b>KAPILARI GEÇENLER</b> <i>(doğrulanmamış sıralama)</i>"]
     if passed:
@@ -1134,14 +1184,16 @@ def render_card(card: Mapping[str, Any], *, now: int, generated_at: int | None =
     return text if len(text) <= 4000 else text[:3990] + "\n…"
 
 
-def status_line(snapshot: Mapping[str, Any] | None, *, now: int, enabled: bool, error: str | None) -> str:
+def status_line(snapshot: Mapping[str, Any] | None, *, now: int, enabled: bool, error: str | None,
+                keyed: bool | None = None) -> str:
     if not enabled:
         return "Altcoin izleme: kapalı"
+    keyed = bool(snapshot.get("coingecko_keyed")) if keyed is None and snapshot else keyed
+    key = " · CoinGecko anahtarı yok (yavaş)" if keyed is False else ""
     if not snapshot:
-        return f"Altcoin izleme: henüz tarama yok{' · hata ' + error if error else ''}"
+        return f"Altcoin izleme: henüz tarama yok{key}{' · hata ' + error if error else ''}"
     counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), Mapping) else {}
     age = max(0, now - int(snapshot.get("generated_at") or 0))
-    key = "" if snapshot.get("coingecko_keyed") else " · CoinGecko anahtarı yok (yavaş)"
     return (f"Altcoin izleme: ✅ {counts.get(PASSED, 0)} ❔ {counts.get(NEEDS_REVIEW, 0)} "
             f"❌ {counts.get(ELIMINATED, 0)} · {_age(age)} önce{key}" + (f" · hata {error}" if error else ""))
 

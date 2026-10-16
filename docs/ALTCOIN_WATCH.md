@@ -36,7 +36,8 @@ Kod: `acce_unified/altcoin_watch.py`. Bot: `/altcoin`, `/altcoin <sembol>` ve pa
 | RugCheck `tokens/{mint}/report` | Solana tokenlerinde basım ve dondurma yetkisi | yok |
 
 **CoinGecko anahtarı (önerilir):**
-- Anahtarsız genel API çok sık "429" (hız sınırı) verir. Tarama yine çalışır ama yavaş olur; bazı coinler ❔ kalabilir.
+- Anahtarsız genel API çok sık "429" (hız sınırı) verir. Sınır IP adresine göredir ve Render'ın paylaşılan IP'sinde başkalarıyla paylaşılır. İlk canlı denemede (2026-10-16) ilk tarama bu yüzden yapılamadı.
+- Anahtarsız modda bot yavaş gider: çağrılar arası 12 saniye. Her 429'da CoinGecko'nun istediği süreyi (`Retry-After`, en fazla 10 dakika) ya da artan bir süreyi bekler; çağrı başına 5 deneme yapar. Tarama yine de başarısız olabilir; anahtar en sağlam çözümdür.
 - coingecko.com/en/api adresinden ücretsiz Demo anahtarı alınır: ayda 10.000 çağrı, dakikada 30.
 - Anahtar yalnızca Render panelinde `COINGECKO_DEMO_API_KEY` olarak girilir. Sohbete, koda ya da loga yazılmaz.
 - Anahtar istekte başlık (header) olarak gider. Hata metinleri yalnızca hata türünü taşır; anahtar ve adres hiçbir zaman görünmez.
@@ -127,7 +128,11 @@ Kartta `/altcoin <sembol>` gösterilir:
 
 ## Zamanlama ve sağlık
 
-- Tarama haftada bir yapılır (`ALTCOIN_WATCH_REFRESH_SECONDS`, varsayılan 7 gün). Bot 6 saatte bir kontrol eder.
+- Tarama haftada bir yapılır (`ALTCOIN_WATCH_REFRESH_SECONDS`, varsayılan 7 gün). Bot 30 dakikada bir kontrol eder.
+- **Başarısız tarama yeniden denenir:** önce 30 dakika sonra, sonra 1, 2, 4 ve en fazla 6 saat arayla. Başarılı bir taramadan sonra sayaç sıfırlanır.
+  - Bekleme süresi durum dosyasında tutulur; bot yeniden başlasa da sağlayıcıya yüklenmez.
+  - Menü hatayı, nedenini ve sonraki deneme saatini gösterir.
+  - Anahtarsız 429'da menü, `COINGECKO_DEMO_API_KEY` eklenmesini önerir.
 - Bot yeniden başlarsa son tarama durum dosyasından okunur. Tarama bir haftadan eski değilse yeniden yapılmaz.
 - **Bir ana kaynak başarısız olursa tarama başarısız sayılır:** CoinGecko evreni ya da DefiLlama'nın eşleme, ücret, gelir veya hack verisi. Eksik verili bir liste yayınlanmaz; son tarama "güncel değil" uyarısıyla kalır.
 - Tek bir coinin çağrısı başarısız olursa yalnızca o coin ❔ olur.
