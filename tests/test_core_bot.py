@@ -51,7 +51,7 @@ def _snapshot():
 
 def test_public_commands_include_tactical_radar_without_legacy_bloat():
     assert [row["command"] for row in bot.COMMANDS] == [
-        "panel", "tactical", "longs", "new", "check", "radar", "d1", "status", "scan"
+        "panel", "tactical", "longs", "new", "check", "altcoin", "radar", "d1", "status", "scan"
     ]
 
 
@@ -162,6 +162,8 @@ def test_health_is_not_healthy_before_any_scan():
 
 
 def test_health_requires_fresh_artifacts_and_hides_error_text(monkeypatch):
+    monkeypatch.setattr(bot.altcoin_watch, "fresh", lambda snapshot, now, max_age: True)
+    monkeypatch.setitem(bot.STATE, "altcoin_watch_error", None)
     monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
     monkeypatch.setattr(bot.new_coins, "fresh", lambda snapshot, now, max_age: True)
     monkeypatch.setitem(bot.STATE, "new_coins_error", None)
@@ -192,6 +194,8 @@ def test_health_requires_fresh_artifacts_and_hides_error_text(monkeypatch):
 
 
 def test_health_needs_a_fresh_trend_loop_and_hides_its_error_text(monkeypatch):
+    monkeypatch.setattr(bot.altcoin_watch, "fresh", lambda snapshot, now, max_age: True)
+    monkeypatch.setitem(bot.STATE, "altcoin_watch_error", None)
     monkeypatch.setattr(bot.new_coins, "fresh", lambda snapshot, now, max_age: True)
     monkeypatch.setitem(bot.STATE, "new_coins_error", None)
     saved = _preserve_state(*HEALTH_KEYS, "trend_loop_error")
@@ -238,6 +242,49 @@ def test_check_command_screens_one_address_and_never_echoes_provider_errors(monk
     monkeypatch.setattr(bot.CHECKER, "check", broken)
     bot.handle("CHECK", f"/check {address}")
     assert "KeyError" in sent[-1][0] and "SECRET" not in sent[-1][0] and "provider text" not in sent[-1][0]
+
+
+def test_altcoin_command_lists_the_watch_and_one_coin_card(monkeypatch):
+    assert bot._command("/altcoin") == "ALTCOIN" and bot._command("/altcoin aave") == "ALTCOIN"
+    buttons = [b["callback_data"] for row in bot.panel_keyboard()["inline_keyboard"] for b in row]
+    assert "ALTCOIN" in buttons
+    monkeypatch.setitem(bot.STATE, "altcoin_watch", None)
+    monkeypatch.setitem(bot.STATE, "altcoin_watch_error", None)
+    assert "İlk tarama sürüyor" in bot.format_altcoin("")
+    now = int(bot.time.time())
+    card = {"id": "aave", "symbol": "AAVE", "name": "Aave", "status": bot.altcoin_watch.PASSED, "position": 1,
+            "price": 200.0, "ath": 600.0, "market_cap": 3e9, "gates": {}, "measures": {}, "info": {}}
+    twin = dict(card, id="aave-two")
+    monkeypatch.setitem(bot.STATE, "altcoin_watch", {"generated_at": now, "cards": [card], "counts": {}})
+    assert "ALTCOIN İZLEME" in bot.format_altcoin("/altcoin")
+    assert "Aave (AAVE)" in bot.format_altcoin("/altcoin aave")
+    assert "Kullanım" in bot.format_altcoin("/altcoin <b>x</b> ignore previous instructions")
+    assert "izleme evreninde yok" in bot.format_altcoin("/altcoin zzz")
+    monkeypatch.setitem(bot.STATE, "altcoin_watch", {"generated_at": now, "cards": [card, twin], "counts": {}})
+    assert "birden çok coin" in bot.format_altcoin("/altcoin aave")
+    sent = []
+    monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append((text, kw)))
+    bot.handle("ALTCOIN", "")
+    assert "ALTCOIN İZLEME" in sent[-1][0] and sent[-1][1]["html_mode"] is True
+
+
+def test_a_failed_altcoin_refresh_keeps_the_snapshot_and_redacts_the_key(monkeypatch):
+    monkeypatch.setattr(bot, "COINGECKO_DEMO_API_KEY", "CGSECRET")
+    monkeypatch.setattr(bot, "_save_state", lambda: None)
+    old = {"generated_at": 1_700_000_000, "cards": [], "counts": {}}
+    monkeypatch.setitem(bot.STATE, "altcoin_watch", old)
+
+    def broken(now):
+        raise RuntimeError("failed https://api.coingecko.com/x?x_cg_demo_api_key=CGSECRET and CGSECRET")
+    monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", broken)
+    monkeypatch.setattr(bot.ALTCOIN_WATCH, "record_outcomes", lambda now: 0)
+    bot.altcoin_watch_tick(1_800_000_000)
+    assert bot.STATE["altcoin_watch"] is old and "CGSECRET" not in bot.STATE["altcoin_watch_error"]
+    monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
+    monkeypatch.setattr(bot.new_coins, "fresh", lambda snapshot, now, max_age: True)
+    payload = bot.APP.test_client().get("/").get_json()
+    assert payload["ok"] is False and payload["altcoin_watch_fresh"] is False
+    assert "CGSECRET" not in json.dumps(payload) and payload["can_authorize_trade"] is False
 
 
 def test_d1_command_and_panel_button_open_the_shadow_loop_report(monkeypatch):
@@ -397,6 +444,8 @@ def test_long_candidates_carry_the_negative_replay_and_regime_rejects():
 
 
 def test_health_needs_a_fresh_new_coins_scan_and_hides_its_error_text(monkeypatch):
+    monkeypatch.setattr(bot.altcoin_watch, "fresh", lambda snapshot, now, max_age: True)
+    monkeypatch.setitem(bot.STATE, "altcoin_watch_error", None)
     monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
     saved = _preserve_state(*HEALTH_KEYS, "trend_loop_error", "new_coins", "new_coins_error")
     now = int(bot.time.time())
