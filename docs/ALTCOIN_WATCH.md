@@ -61,13 +61,14 @@ Her kapı ✅ geçti, ⚠️ dikkat, ❌ kırmızı bayrak ya da ❔ bilinmiyor 
 
 | Kapı | ✅ | ❌ | ❔ (inceleme gerekli) |
 |---|---|---|---|
-| **Arz** | Basılmış ama dolaşımda olmayan arz, dolaşımın en fazla %5'i | — | Bu pay %5'ten büyük: ne zaman açılacağı ücretsiz veride yok. Arz verisi eksik. |
+| **Arz** | Basılmış ama dolaşımda olmayan arz, dolaşımın en fazla %5'i | — | Bu pay %5'ten büyük: ne zaman açılacağı ücretsiz veride yok. Arz verisi eksik. Toplam arz dolaşımdakinden %0,5'ten fazla küçük (veri tutarsız; daha küçük farklar yuvarlamadır ve 0 sayılır). |
 | **Faaliyet** | DefiLlama'da son 30 günde ücret geliri var | Eşleşen kayıtta 30 günlük ücret sıfır | DefiLlama'da eşleşen kayıt yok |
-| **Güvenlik** | Ana ağ coini (gaz tokeni ya da kontratsız coin); kontratta tehlikeli yetki yok | Son 180 günde net ≥ 1 milyon $ hack. EVM: honeypot, bakiye değiştirme, gizli sahip, kendini yok etme, sahipliği geri alma. Solana: dondurma yetkisi açık. | Kontrat verisi alınamadı ya da alan eksik. Proxy kontrat: yetkiler uygulama kontratında, GoPlus okuyamıyor (AAVE, RENDER). Tokenin asıl zinciri desteklenmiyor (TON, Tron, Sui…). |
-| **Likidite** | Son 30 tam günün medyan hacmi ≥ 10 milyon $ | Medyan hacim < 10 milyon $ | Hacim serisi eksik |
+| **Güvenlik** | Ana ağ coini (gaz tokeni ya da kontratsız coin); kontratta tehlikeli yetki yok | Son 180 günde net ≥ 1 milyon $ hack. EVM: honeypot, bakiye değiştirme, gizli sahip, kendini yok etme, sahipliği geri alma. Solana: dondurma yetkisi açık. | Son 180 günde tutarı bilinmeyen ya da tarihi bilinmeyen bir hack kaydı. Kontrat verisi alınamadı ya da bir ❌ alanı eksik. Proxy kontrat: yetkiler uygulama kontratında, GoPlus okuyamıyor (AAVE, RENDER). Tokenin asıl zinciri desteklenmiyor (TON, Tron, Sui…). |
+| **Likidite** | Son 31 günün tam UTC günlerinde, günde tek nokta, medyan hacim ≥ 10 milyon $ | Medyan hacim < 10 milyon $ | 20 günden az gün, en yeni gün 3 günden eski ya da seri yok |
 
 **Uyarılar (⚠️, kapıyı kapatmaz):**
-- son 2 yılda net ≥ 1 milyon $ hack;
+- son 2 yılda net ≥ 1 milyon $ hack ya da tutarı bilinmeyen hack;
+- EVM'de uyarı alanlarından biri okunamadı (basım, proxy, durdurma, kara liste). Bu alanlar okunabildiğinde de yalnız uyarı verdiği için okunamamaları kapıyı kapatmaz; ama kartta görünür.
 - EVM'de basım fonksiyonu, proxy (kod değiştirilebilir), transfer durdurma, kara liste;
 - Solana'da basım yetkisi açık.
 
@@ -98,7 +99,7 @@ Büyük yönetişim tokenlerinde basım fonksiyonu çoğu zaman yönetişim dene
 |---|---|---|
 | **Net getiri** | DefiLlama'nın 1 yıllık token sahibi geliri / piyasa değeri − max(0, 12 aylık seyrelme) | Yüksek iyi |
 | **Değerleme** | FDV / DefiLlama'nın 1 yıllık protokol geliri. FDV yoksa piyasa değeri kullanılır. | Düşük iyi |
-| **Kullanım ivmesi** | Son 30 günün ücreti / son 1 yılın aylık ortalama ücreti − 1 | Yüksek iyi |
+| **Kullanım ivmesi** | Son 30 günün ücreti / son 1 yılın aylık ortalama ücreti − 1. Katkı veren kayıtlardan birinin 1 yıllık geçmişi yoksa bilinmez. | Yüksek iyi |
 
 - **Seyrelme:** 365 günlük günlük seride ima edilen arz (piyasa değeri / fiyat), son 7 noktanın medyanının ilk 7 noktanın medyanına oranı − 1.
   - Seri bir yıldan kısaysa ya da tek bir günde arz %15'ten fazla sıçradıysa seyrelme bilinmez. Sıçrama, CoinGecko'nun dolaşım arzı tanımını değiştirmesinden de gelebilir; gerçek açılışla ayırt edilemez.
@@ -153,6 +154,7 @@ Kartta `/altcoin <sembol>` gösterilir:
 - Her kayıt `trial` ve `can_authorize_trade: false` taşır.
 
 **Ön-kayıt:** Trial `research/trials/registry.jsonl` içinde; kimliği `acce_unified/altcoin_watch.py` dosyasındaki `TRIAL` sabitidir. Hiçbir kayıt ve hiçbir sonuç oluşmadan, 2026-10-16'da yapıldı.
+- Birleşmemiş taslak `500fd0802593135c` incelemede değişti ve yerini bu kayıt aldı. Değişiklik: tutarı ya da tarihi bilinmeyen hack, tutarsız arz, eski ya da tekrarlanan hacim günleri ve eksik ücret geçmişi artık bilinmiyor sayılıyor, güvenli değil. Bu da hiçbir kayıt yokken yapıldı.
 - **İddia:** Kapıları geçenler içinde üst üçte bir, alt üçte birden daha iyi gider. Ölçü: 365 günlük getiri eksi BTC'nin 365 günlük getirisi.
 - **Zaman:** 2028-11-01'den önce değerlendirilmez. O tarihte 365 günlük sonucu belli olan her kohort girer; beklenen aralık 2026-10 → 2027-10.
 - **Yöntem:**

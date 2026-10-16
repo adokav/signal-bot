@@ -51,8 +51,10 @@ EXCLUDED_CATEGORIES = ("stablecoins", "wrapped-tokens", "liquid-staking-tokens",
 
 # Gates (rules of thumb from the two models; not learned from data)
 LOCKED_MAX = 0.05                 # minted but not circulating, as a share of circulating supply
+SUPPLY_TOLERANCE = 0.005          # total below circulating by more than this is inconsistent data
 VOLUME_MIN_USD = 10_000_000.0     # 30-day median daily volume
-VOLUME_MIN_DAYS = 20
+VOLUME_MIN_DAYS = 20              # distinct complete days among the last 31
+VOLUME_MAX_STALE_DAYS = 3         # the newest complete day must be this recent
 HACK_MIN_USD = 1_000_000.0        # stolen minus returned
 HACK_FAIL_DAYS = 180
 HACK_WARN_DAYS = 730
@@ -97,7 +99,7 @@ TRIAL_DATASET = {"source": "CoinGecko markets, categories, coins/list platforms,
                            "dailyRevenue, dailyHoldersRevenue), hacks; GoPlus token_security (EVM), RugCheck "
                            "report (Solana)",
                  "forward_from": "2026-10-16", "kind": "live forward record (/data/altcoin_watch_ledger.jsonl)"}
-TRIAL = "500fd0802593135c"
+TRIAL = "b6e0fec86714efc2"
 
 
 def trial_params() -> dict[str, Any]:
@@ -108,30 +110,37 @@ def trial_params() -> dict[str, Any]:
                      "excluded_other": "stable symbol rule; price within 3% of $1 with a 24h range under 0.5%"},
         "gates": {
             "supply": f"(total_supply - circulating) / circulating <= {LOCKED_MAX}; above it REVIEW (unlock "
-                      "schedules are not in free data); missing supply REVIEW",
+                      "schedules are not in free data); missing supply REVIEW; total below circulating by more "
+                      f"than {SUPPLY_TOLERANCE} REVIEW (inconsistent data)",
             "activity": "DefiLlama fees mapped to the coin (chain gas token, protocol or parent) with 30-day "
                         "fees > 0; zero fees FAIL; not mapped REVIEW",
             "security": f"DefiLlama hack with stolen minus returned >= {HACK_MIN_USD:.0f} USD within "
-                        f"{HACK_FAIL_DAYS} days FAIL, within {HACK_WARN_DAYS} days WARN (a chain's own coin "
-                        "counts only hacks whose target type is Chain); contract on the primary CoinGecko "
+                        f"{HACK_FAIL_DAYS} days FAIL, within {HACK_WARN_DAYS} days WARN; a hack with an unknown "
+                        f"amount within {HACK_FAIL_DAYS} days or an unknown date REVIEW, an unknown amount within "
+                        f"{HACK_WARN_DAYS} days WARN (a chain's own coin counts only hacks whose target type is "
+                        "Chain); contract on the primary CoinGecko "
                         "platform only (listed first): GoPlus honeypot, balance change, hidden owner, "
-                        "selfdestruct, take-back ownership FAIL, mint/proxy/pause/blacklist WARN, missing fields "
-                        "REVIEW; Solana freeze authority FAIL, mint authority WARN; gas tokens and coins without "
+                        "selfdestruct, take-back ownership FAIL, mint/proxy/pause/blacklist WARN, a missing FAIL "
+                        "field REVIEW, a missing WARN field WARN; Solana freeze authority FAIL, mint authority "
+                        "WARN; gas tokens and coins without "
                         "a contract PASS; a primary platform on another chain REVIEW",
-            "liquidity": f"median of the last 30 complete daily CoinGecko volumes >= {VOLUME_MIN_USD:.0f} USD "
-                         f"(at least {VOLUME_MIN_DAYS} days) else FAIL; no chart REVIEW",
+            "liquidity": f"median daily CoinGecko volume over the complete UTC days of the last 31 (one point "
+                         f"per day) >= {VOLUME_MIN_USD:.0f} USD else FAIL; fewer than {VOLUME_MIN_DAYS} days, the "
+                         f"newest older than {VOLUME_MAX_STALE_DAYS} days, or no chart REVIEW",
             "deep_checks": f"security contract check, liquidity and dilution only for coins passing supply and "
                            f"activity without a hack FAIL, at most {MAX_DEEP_CHECKS} by market cap; the rest "
                            "REVIEW",
         },
         "measures": {
             "net_yield": "DefiLlama holders revenue 1y / market cap - max(0, 12-month dilution)",
-            "dilution": f"implied supply (market cap / price, 365-day daily chart): median of the last "
+            "dilution": f"implied supply (market cap / price, 365-day daily chart, one point per UTC day): "
+                        f"median of the last "
                         f"{CHART_EDGE_POINTS} points / median of the first {CHART_EDGE_POINTS} - 1; unknown "
                         f"when the chart spans < {CHART_MIN_DAYS} days or < {CHART_MIN_POINTS} points or any "
                         f"one-day move in implied supply exceeds {DILUTION_JUMP}",
             "valuation": "FDV (market cap when FDV is missing) / DefiLlama revenue 1y; revenue <= 0 unknown",
-            "usage": "DefiLlama fees 30d / fees monthly average over 1y - 1",
+            "usage": "DefiLlama fees 30d / fees monthly average over 1y - 1; unknown when any contributing "
+                     "entry has no 1-year history",
             "ranking": "coins passing every gate; percentile rank per measure (ties averaged), unknown measure "
                        "ranks 0; composite = mean of the three; position by composite desc, then market cap "
                        "desc, then CoinGecko id; thirds: top floor(n/3), bottom floor(n/3), rest middle",
@@ -449,6 +458,7 @@ class Totals:
     monthly: float = 0.0
     entries: int = 0
     y1_known: bool = True
+    monthly_known: bool = True
 
 
 def aggregate(rows: Sequence[Any], index: LlamaIndex) -> dict[str, Totals]:
@@ -470,26 +480,32 @@ def aggregate(rows: Sequence[Any], index: LlamaIndex) -> dict[str, Totals]:
         else:
             t.y1 += max(0.0, y1)
         monthly = _finite(row.get("monthlyAverage1y"))
+        if monthly is None and y1 is None:
+            t.monthly_known = False                    # recent fees without their history would inflate usage
         t.monthly += max(0.0, monthly if monthly is not None else (y1 or 0.0) / 12.0)
     return out
 
 
-def hacks_by_gecko(rows: Sequence[Any], index: LlamaIndex) -> dict[str, list[tuple[int, float, str]]]:
-    """(date, stolen minus returned USD, target type) per CoinGecko id, from protocol and parent links only."""
+def hacks_by_gecko(rows: Sequence[Any], index: LlamaIndex
+                   ) -> dict[str, list[tuple[int | None, float | None, str]]]:
+    """(date, stolen minus returned USD, target type) per CoinGecko id, from protocol and parent links only.
 
-    out: dict[str, list[tuple[int, float, str]]] = {}
+    A mapped record with a missing date or amount is kept as unknown (None),
+    never dropped: missing risk evidence is not absence of risk.
+    """
+
+    out: dict[str, list[tuple[int | None, float | None, str]]] = {}
     for row in rows or []:
         if not isinstance(row, Mapping):
             continue
         date, amount = row.get("date"), _finite(row.get("amount"))
-        if not isinstance(date, int) or isinstance(date, bool) or amount is None:
-            continue
+        date = date if isinstance(date, int) and not isinstance(date, bool) else None
         returned = max(0.0, _finite(row.get("returnedFunds")) or 0.0)
         did = str(row.get("defillamaId") or "")
         parent = row.get("parentProtocolId") or index.protocol_parent.get(did)
         gecko = (index.parent_gecko.get(str(parent)) if parent else None) or index.protocol_gecko.get(did)
         if gecko:
-            out.setdefault(gecko, []).append((date, max(0.0, amount - returned),
+            out.setdefault(gecko, []).append((date, None if amount is None else max(0.0, amount - returned),
                                               str(row.get("targetType") or "").strip().lower()))
     return out
 
@@ -540,11 +556,15 @@ def screen_supply(card: Card) -> None:
         card.add(SUPPLY, REVIEW, "dolaşım ya da toplam arz verisi yok")
         return
     locked = (coin.total_supply - coin.circulating) / coin.circulating
+    if locked < -SUPPLY_TOLERANCE:
+        card.add(SUPPLY, REVIEW, "toplam arz dolaşımdakinden küçük (veri tutarsız)")
+        return
+    locked = max(0.0, locked)                          # a rounding gap, not a negative overhang
     card.info["locked_share"] = locked
     if coin.max_supply and coin.max_supply > coin.total_supply * 1.001:
         card.info["unminted_share"] = (coin.max_supply - coin.total_supply) / coin.circulating
     if locked <= LOCKED_MAX:
-        card.add(SUPPLY, PASS, f"dolaşım dışı arz %{max(0.0, locked) * 100:.1f}")
+        card.add(SUPPLY, PASS, f"dolaşım dışı arz %{locked * 100:.1f}")
     else:
         card.add(SUPPLY, REVIEW, f"dolaşım dışı arz %{locked * 100:.0f}; açılış takvimi ücretsiz veride yok")
 
@@ -558,7 +578,8 @@ def screen_activity(card: Card, fees: Totals | None) -> None:
         card.add(ACTIVITY, PASS, f"30 günde ${fees.d30:,.0f} ücret")
 
 
-def screen_hacks(card: Card, hacks: Sequence[tuple[int, float, str]], *, now: int, native: bool = False) -> bool:
+def screen_hacks(card: Card, hacks: Sequence[tuple[int | None, float | None, str]], *, now: int,
+                 native: bool = False) -> bool:
     """Adds the hack finding; True when a recent hack eliminates the coin.
 
     A chain's own coin counts only attacks on the chain itself: DefiLlama files
@@ -567,14 +588,22 @@ def screen_hacks(card: Card, hacks: Sequence[tuple[int, float, str]], *, now: in
     """
 
     hacks = [(date, net) for date, net, target in hacks if not native or target == "chain"]
-    recent = [net for date, net in hacks if 0 <= now - date <= HACK_FAIL_DAYS * DAY and net >= HACK_MIN_USD]
-    older = [net for date, net in hacks if HACK_FAIL_DAYS * DAY < now - date <= HACK_WARN_DAYS * DAY
-             and net >= HACK_MIN_USD]
-    if recent:
-        card.add(SECURITY, FAIL, f"son {HACK_FAIL_DAYS} günde hack: ${max(recent):,.0f} kayıp")
+    dated = [(date, net) for date, net in hacks if date is not None]
+    recent = [net for date, net in dated if 0 <= now - date <= HACK_FAIL_DAYS * DAY]
+    older = [net for date, net in dated if HACK_FAIL_DAYS * DAY < now - date <= HACK_WARN_DAYS * DAY]
+    if any(net is not None and net >= HACK_MIN_USD for net in recent):
+        card.add(SECURITY, FAIL, f"son {HACK_FAIL_DAYS} günde hack: "
+                                 f"${max(n for n in recent if n is not None):,.0f} kayıp")
         return True
-    if older:
-        card.add(SECURITY, WARN, f"son 2 yılda hack: ${max(older):,.0f} kayıp")
+    if len(dated) < len(hacks):
+        card.add(SECURITY, REVIEW, "tarihi bilinmeyen hack kaydı")
+    if any(net is None for net in recent):
+        card.add(SECURITY, REVIEW, f"son {HACK_FAIL_DAYS} günde tutarı bilinmeyen hack")
+    big = [net for net in older if net is not None and net >= HACK_MIN_USD]
+    if big:
+        card.add(SECURITY, WARN, f"son 2 yılda hack: ${max(big):,.0f} kayıp")
+    if any(net is None for net in older):
+        card.add(SECURITY, WARN, "son 2 yılda tutarı bilinmeyen hack")
     return False
 
 
@@ -632,17 +661,23 @@ def screen_contract(card: Card, kind: str, chain: str | None, payload: Any, *, e
                  else "kontrat yetkileri doğrulanamadı")
     elif not any(flags[k] == "1" for k, _ in EVM_FAIL):
         card.add(SECURITY, PASS, "kontratta tehlikeli yetki yok")
+    if any(flags[k] not in ("0", "1") for k, _ in EVM_WARN):
+        card.add(SECURITY, WARN, "basım, proxy, durdurma ya da kara liste alanı okunamadı")
 
 
 def _series(chart: Mapping[str, Any], key: str) -> list[tuple[int, float]]:
+    """One point per UTC day (the latest of the day), oldest first; malformed points are dropped."""
+
     rows = chart.get(key) if isinstance(chart.get(key), list) else []
-    out = []
+    by_day: dict[int, tuple[int, float]] = {}
     for row in rows:
         if isinstance(row, list) and len(row) == 2:
             ts, value = _finite(row[0]), _finite(row[1])
             if ts is not None and value is not None:
-                out.append((int(ts // 1000), value))
-    return sorted(out)
+                t = int(ts // 1000)
+                if t // DAY not in by_day or by_day[t // DAY][0] <= t:
+                    by_day[t // DAY] = (t, value)
+    return [by_day[d] for d in sorted(by_day)]
 
 
 def screen_chart(card: Card, chart: Mapping[str, Any] | None, *, now: int) -> None:
@@ -652,9 +687,11 @@ def screen_chart(card: Card, chart: Mapping[str, Any] | None, *, now: int) -> No
         card.add(LIQUIDITY, REVIEW, "hacim verisi alınamadı")
         card.measures["dilution"] = None
         return
-    volumes = [v for ts, v in _series(chart, "total_volumes") if ts < now - DAY and v >= 0][-30:]
-    if len(volumes) < VOLUME_MIN_DAYS:
-        card.add(LIQUIDITY, REVIEW, "30 günlük hacim verisi eksik")
+    days = [(ts, v) for ts, v in _series(chart, "total_volumes")
+            if now - 31 * DAY <= ts < now - DAY and v >= 0]          # complete days of the last month
+    volumes = [v for _, v in days]
+    if len(volumes) < VOLUME_MIN_DAYS or now - days[-1][0] > VOLUME_MAX_STALE_DAYS * DAY:
+        card.add(LIQUIDITY, REVIEW, "30 günlük hacim verisi eksik ya da eski")
     else:
         median = statistics.median(volumes)
         card.info["volume_median_30d"] = median
@@ -694,7 +731,8 @@ def compute_measures(card: Card, *, holders: Totals | None, revenue: Totals | No
     value = coin.fdv or coin.market_cap
     card.measures["valuation"] = (value / revenue.y1 if revenue is not None and revenue.y1_known
                                   and revenue.y1 > 0 else None)
-    card.measures["usage"] = (fees.d30 / fees.monthly - 1 if fees is not None and fees.monthly > 0 else None)
+    card.measures["usage"] = (fees.d30 / fees.monthly - 1 if fees is not None and fees.monthly_known
+                              and fees.monthly > 0 else None)
 
 
 def ath_info(card: Card) -> None:

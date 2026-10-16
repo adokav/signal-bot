@@ -176,7 +176,17 @@ def test_hacks_count_what_was_not_returned():
                                 "targetType": "DeFi Protocol"},
                                {"date": NOW, "amount": "x", "defillamaId": "31"},
                                {"date": NOW, "amount": 2e6, "defillamaId": "31", "targetType": "Chain"}], index)
-    assert hacks == {"lendco": [(NOW - DAY, 5e5, "defi protocol")], "hacked": [(NOW, 2e6, "chain")]}
+    assert hacks == {"lendco": [(NOW - DAY, 5e5, "defi protocol")],
+                     "hacked": [(NOW, None, ""), (NOW, 2e6, "chain")]}      # an unknown amount is kept, not dropped
+
+
+def test_a_hack_with_an_unknown_amount_or_date_is_never_read_as_no_hack():
+    for hacks, status in (([(NOW - 10 * DAY, None, "defi protocol")], aw.REVIEW),
+                          ([(None, 5e6, "defi protocol")], aw.REVIEW),
+                          ([(NOW - 400 * DAY, None, "defi protocol")], aw.WARN)):
+        card = _card()
+        assert aw.screen_hacks(card, hacks, now=NOW) is False
+        assert card.gate(aw.SECURITY) == status
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +198,8 @@ def _card(**kw):
     return aw.Card(coin=aw.parse_market(market("lendco", "LEND", **kw)))
 
 
-@pytest.mark.parametrize("total,status", [(1.05e9, aw.PASS), (1.051e9, aw.REVIEW), (None, aw.REVIEW)])
+@pytest.mark.parametrize("total,status", [(1.05e9, aw.PASS), (1.051e9, aw.REVIEW), (None, aw.REVIEW),
+                                          (0.999e9, aw.PASS), (0.99e9, aw.REVIEW)])
 def test_supply_not_yet_circulating_must_be_small_or_the_coin_needs_review(total, status):
     card = _card(circ=1e9, total=total, max_supply=2e9)
     aw.screen_supply(card)
@@ -196,6 +207,10 @@ def test_supply_not_yet_circulating_must_be_small_or_the_coin_needs_review(total
     if total == 1.051e9:
         assert "takvimi ücretsiz veride yok" in card.reasons(aw.REVIEW)[0]
         assert card.info["unminted_share"] == pytest.approx(0.949)
+    if total == 0.999e9:
+        assert card.info["locked_share"] == 0.0                            # a rounding gap, shown as 0
+    if total == 0.99e9:
+        assert "veri tutarsız" in card.reasons(aw.REVIEW)[0]               # never a negative overhang
 
 
 def test_economic_activity_needs_mapped_fees():
@@ -245,6 +260,7 @@ def test_contract_powers():
              ("token", "ethereum", evm, False, aw.PASS), ("token", "ethereum", {**evm, "hidden_owner": "1"}, False, aw.FAIL),
              ("token", "ethereum", {**evm, "is_mintable": "1"}, False, aw.WARN),
              ("token", "ethereum", {**evm, "selfdestruct": None}, False, aw.REVIEW),
+             ("token", "ethereum", {**evm, "is_mintable": None}, False, aw.WARN),
              ("token", "ethereum", None, False, aw.REVIEW), ("token", "ethereum", evm, True, aw.REVIEW),
              ("token", "solana", {"token": {"freezeAuthority": "F", "mintAuthority": None}}, False, aw.FAIL),
              ("token", "solana", {"token": {"freezeAuthority": None, "mintAuthority": "M"}}, False, aw.WARN),
@@ -271,6 +287,29 @@ def test_the_chart_gives_liquidity_dilution_and_the_ath_day_market_cap():
     none = _card()
     aw.screen_chart(none, None, now=NOW)
     assert none.gate(aw.LIQUIDITY) == aw.REVIEW and none.measures["dilution"] is None
+
+
+def test_volume_needs_recent_distinct_days():
+    stale = chart(volume=5e7)
+    for key in ("prices", "market_caps", "total_volumes"):
+        stale[key] = [p for p in stale[key] if p[0] < (NOW - 10 * DAY) * 1000]   # the newest day is 10 days old
+    card = _card()
+    aw.screen_chart(card, stale, now=NOW)
+    assert card.gate(aw.LIQUIDITY) == aw.REVIEW
+    repeated = chart(volume=5e7, days=12)
+    repeated["total_volumes"] = [[(NOW - 5 * DAY) * 1000 + k, 5e7] for k in range(40)]   # one day, 40 points
+    card = _card()
+    aw.screen_chart(card, repeated, now=NOW)
+    assert card.gate(aw.LIQUIDITY) == aw.REVIEW
+
+
+def test_usage_is_unknown_when_part_of_its_history_is():
+    index = aw.build_llama_index(LITE, CHAINS)
+    totals = aw.aggregate([fee("Lend V1", did="11", d30=4e6, y1=None, monthly=None),
+                           fee("Lend V2", did="12", d30=1e6, y1=1.2e7, monthly=1e6)], index)
+    card = _card()
+    aw.compute_measures(card, holders=None, revenue=None, fees=totals["lendco"])
+    assert totals["lendco"].monthly_known is False and card.measures["usage"] is None
 
 
 def test_a_jump_in_implied_supply_is_not_trusted_as_dilution():
