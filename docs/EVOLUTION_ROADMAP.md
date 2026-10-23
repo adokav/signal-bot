@@ -341,10 +341,13 @@ güncellenenler belirtildi.
       likidasyon fiyatı fitil referansının %20 altında, funding kart ve hedef
       düzeltmesinde (`docs/POSITION_LONG.md` §13). `/new` ve `/d1` kalır.
     - **Atılım kohortu protokolü** — `docs/BREAKOUT_COHORT.md` (sonuçtan
-      önce): Binance perp evreninde 2020–2026, her (coin, ay başı) için 24
-      ayda 2× etiketi; coin, piyasa ve makro göstergeleri sabit kovalarla;
-      keşif 2020-04 → 2022-08, doğrulama 2022-09 → 2024-08 mühürlü; en fazla 5
-      aday, aile alfası bölünür. Harness henüz yazılmadı.
+      önce; inceleme bulgularıyla aynı gün yeniden kuruldu): Binance spot
+      evreni 2017–2026 (iki tam döngü), çıkarım için örtüşmeyen yıllık
+      kohortlar (keşif 2018-09…2021-09, doğrulama 2022-09…2025-09, 12 aylık
+      etiket, purge sağlanır); coin göstergeleri kohort içinde kesitsel
+      karşılaştırmayla ve sabit kovalarla sınanır, en fazla 5 aday; piyasa,
+      makro, stablecoin ve perp katmanı (fitil, funding, 2020'den) yalnız
+      betimleyici; 24 aylık 2× betimleyici. Harness henüz yazılmadı.
     - Sıradaki adımlar: kohort harness'ı ve keşif koşusu, haftalık D1 analoğu
       majör testi (ön-kayıtlı), rejim katmanı ve kayıt defteri, v3.2 kapı/puan
       motoru, pozisyon planı ve ileri kayıt ön-kaydı.

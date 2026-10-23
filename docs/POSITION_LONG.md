@@ -438,15 +438,19 @@ dipleridir. Her coin için ay başında (ve her haftalık kararda):
   Üçü de tanımsızsa (geçmiş kısa) referans BİLİNMİYOR → pozisyon yok.
 
 **Kural:** likidasyon fiyatı, fitil referansının en az **%20 altında**
-olmalı. Bu, kaldıraca bir üst sınır verir:
+olmalı. Likidasyon fiyatı / giriş ≈ 1 − 1/L + sürdürme marjı olduğundan
+(§13.1'deki yaklaşım), `q = 0,8 × (1 + min(WICK365, FLASH365, CYCLE_LOW))`
+ile şart `1 − 1/L + marj ≤ q`, yani:
 
 ```text
-L_max = (1 − sürdürme marjı) / (1 − 0,8 × (1 + min(WICK365, FLASH365, CYCLE_LOW)))
+L_max = 1 / (1 + sürdürme marjı − 0,8 × (1 + min(WICK365, FLASH365, CYCLE_LOW)))
 ```
 
 ve `POSITION_MAX_LEVERAGE` ile kesilir. Örnek: en derin fitil −%55 ise
-0,8 × 0,45 = 0,36 → likidasyon −%64'ten derin olmalı → L_max ≈ 1,48; 1×
-varsayılanıyla likidasyon −%95'te, kuralın çok altında. Fitil referansı,
+q = 0,8 × 0,45 = 0,36 → likidasyon girişin %36'sından aşağıda olmalı →
+L_max = 1 / (1,05 − 0,36) ≈ 1,45; 1× varsayılanıyla likidasyon −%95'te
+(girişin %5'i), kuralın çok altında. Kod, kaldıraç sınırını bu formülle
+hesaplar ve kartta likidasyon fiyatını fitil referansıyla birlikte yazar. Fitil referansı,
 `docs/BREAKOUT_COHORT.md` §6.4'teki `SIGMA90` → `WICK_MIN_90` /
 `FLASH_MAX_24` tablosuyla sınanır: tarihsel dağılımda bir yıllık en derin
 fitilin ötesine giden pay raporlanır ve %20 tamponu bu paya göre yeniden
