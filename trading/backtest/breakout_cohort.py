@@ -56,7 +56,7 @@ MIN_HISTORY_DAYS = 90
 MIN_MEDIAN_VOLUME = 1_000_000.0
 MIN_VOLUME_DAYS = 25                  # of the last 30
 UNIVERSE_TOP = 150
-MAX_MISSING = {90: 2, 365: 5, 730: 10}  # single missing days tolerated per window length (holes of 2+ days break)
+MAX_MISSING = {90: 2, 365: 5, 730: 10}  # single missing days tolerated per window class (holes of 2+ days break)
 MIN_BUCKET = 10                       # coins per bucket for a within-cohort lift
 MIN_COHORTS = 3
 MIN_LIFT = 0.15
@@ -205,16 +205,24 @@ def _holes(values: np.ndarray) -> tuple[int, bool]:
     return int(missing.sum()), False
 
 
+def _allowed_missing(length: int) -> int:
+    """Single missing days tolerated: 2 up to a 90-day window (91 with its anchor), 5 up to 365, 10 beyond."""
+
+    if length <= 91:
+        return MAX_MISSING[90]
+    if length <= 366:
+        return MAX_MISSING[365]
+    return MAX_MISSING[730]
+
+
 def _window(series: Series, name: str, start: int, end: int) -> np.ndarray | None:
     """Forward-filled values for [start, end), or None when the window has a hole or too many gaps."""
 
     values = series.slice(name, start, end)
-    length = end - start
-    allowed = MAX_MISSING.get(length, max(2, length // 45))
-    if not math.isfinite(values[0]) or not math.isfinite(values[-1]):
+    if not len(values) or not math.isfinite(values[0]) or not math.isfinite(values[-1]):
         return None
     missing, hole = _holes(values)
-    if hole or missing > allowed:
+    if hole or missing > _allowed_missing(end - start):
         return None
     out = values.copy()
     for k in range(1, len(out)):
@@ -228,10 +236,18 @@ def _window(series: Series, name: str, start: int, end: int) -> np.ndarray | Non
 # ---------------------------------------------------------------------------
 
 
+def _finite_median(series: Series, name: str, start: int, end: int, *, min_days: int) -> float | None:
+    """Median of the days present in [start, end); None when the window breaks the hole rule or is too thin."""
+
+    if _window(series, name, start, end) is None:
+        return None
+    values = series.slice(name, start, end)
+    finite = values[np.isfinite(values)]
+    return float(np.median(finite)) if len(finite) >= min_days else None
+
+
 def median_volume(series: Series, origin: int) -> float | None:
-    qv = series.slice("qv", origin - 30, origin)
-    finite = qv[np.isfinite(qv)]
-    return float(np.median(finite)) if len(finite) >= MIN_VOLUME_DAYS else None
+    return _finite_median(series, "qv", origin - 30, origin, min_days=MIN_VOLUME_DAYS)
 
 
 def eligible(series: Series, origin: int) -> bool:
@@ -276,10 +292,10 @@ def coin_features(series: Series, origin: int) -> dict[str, float | None]:
     start = max(series.day0, origin - 730)
     w = _window(series, "close", start, origin) if origin - start >= 180 else None
     out["DIST_LOW730"] = _ratio(last, float(np.min(w))) if w is not None else None
-    qv30, qv90 = series.slice("qv", origin - 30, origin), series.slice("qv", origin - 90, origin)
-    f30, f90 = qv30[np.isfinite(qv30)], qv90[np.isfinite(qv90)]
-    out["VOL_TREND"] = (float(np.median(f30) / np.median(f90))
-                        if len(f30) >= MIN_VOLUME_DAYS and len(f90) >= 75 and np.median(f90) > 0 else None)
+    median30 = _finite_median(series, "qv", origin - 30, origin, min_days=MIN_VOLUME_DAYS)
+    median90 = _finite_median(series, "qv", origin - 90, origin, min_days=75)
+    out["VOL_TREND"] = (float(median30 / median90)
+                        if median30 is not None and median90 is not None and median90 > 0 else None)
     if w91 is not None:
         returns = np.diff(np.log(w91))
         out["SIGMA90"] = float(np.std(returns, ddof=1) * math.sqrt(365)) if len(returns) >= 60 else None
@@ -288,7 +304,8 @@ def coin_features(series: Series, origin: int) -> dict[str, float | None]:
     out["AGE"] = float(origin - series.day0)
     lows = _window(series, "low", origin - 90, origin)
     out["WICK90"] = _ratio(float(np.min(lows)), last) if lows is not None else None
-    out["FLASH90"] = flash_depth(series, origin - 90, origin)
+    # the same continuity rule as the other 90-day features: a hole makes the flash depth unknown too
+    out["FLASH90"] = flash_depth(series, origin - 90, origin) if w91 is not None and lows is not None else None
     return out
 
 
@@ -348,7 +365,7 @@ def label_at(series: Series, origin: int, horizon: int, *, data_end_day: int) ->
     last = int(finite[-1])
     inside = closes[:last + 1]
     missing, hole = _holes(inside)
-    if hole or missing > MAX_MISSING.get(horizon, horizon // 45):
+    if hole or missing > _allowed_missing(horizon):
         return None                                       # a break inside the window: unknown, never a return
     delisted = last < horizon - 1 - DELIST_GRACE_DAYS and series.last_day <= origin + last
     if last < horizon - 1 and not delisted:
@@ -514,9 +531,11 @@ def build_cohort(data: Dataset, origin: int, kind: str) -> Cohort:
                                                "PWICK90": None, "PFLASH90": None}
         if perp is not None:
             plow = _window(perp, "low", origin - 90, origin)
+            pclose = _window(perp, "close", origin - 91, origin)
             plast = perp.value("close", origin - 1)
             perp_feats["PWICK90"] = _ratio(float(np.min(plow)), plast) if plow is not None else None
-            perp_feats["PFLASH90"] = flash_depth(perp, origin - 90, origin)
+            perp_feats["PFLASH90"] = (flash_depth(perp, origin - 90, origin)
+                                      if plow is not None and pclose is not None else None)
         label = label_at(series, origin, LABEL_DAYS, data_end_day=data.data_end_day)
         label24 = label_at(series, origin, LONG_LABEL_DAYS, data_end_day=data.data_end_day)
         plabel = (label_at(perp, origin, LABEL_DAYS, data_end_day=data.data_end_day) if perp is not None else None)
@@ -756,9 +775,44 @@ def dataset_description(data_end: tuple[int, int] = DEFAULT_DATA_END) -> dict[st
                             f"{LABEL_DAYS}-day labels"}
 
 
-def trial_params(candidates: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+DIGEST_KEYS = ("schema", "family", "stage", "code_fingerprint", "data_end", "cohorts", "base_rates", "indicators",
+               "candidates")
+
+
+def report_digest(report: Mapping[str, Any]) -> str:
+    """Hash of the discovery statistics the registration binds (kline-derived only; never the descriptive layers)."""
+
+    payload = {key: report.get(key) for key in DIGEST_KEYS}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def validate_discovery_report(report: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The report must come from this code's discovery stage and its candidates must be its own rule's output.
+
+    Returns the candidates. An edited candidate list (or an edited statistic
+    behind one) fails here; an edited statistic that is internally
+    consistent fails the reproduction in ``run_confirmation``.
+    """
+
+    if report.get("schema") != SCHEMA or report.get("family") != FAMILY or report.get("stage") != "discovery":
+        raise SystemExit("not a breakout-cohort discovery report")
+    if report.get("code_fingerprint") != code_fingerprint():
+        raise SystemExit("the discovery report was produced by other code; re-run discovery first")
+    if report.get("cohorts") != [iso(o) for o in annual_origins(DISCOVERY_YEARS)]:
+        raise SystemExit("the discovery report does not cover the protocol's discovery cohorts")
+    recomputed = select_candidates(report.get("indicators") or {})
+    stored = list(report.get("candidates") or [])
+    same = [(c.get("indicator"), c.get("direction"), c.get("lift"), c.get("ci")) for c in stored]
+    if [(c["indicator"], c["direction"], c["lift"], c["ci"]) for c in recomputed] != same:
+        raise SystemExit("the report's candidate list is not what its own statistics select; refusing")
+    return recomputed
+
+
+def trial_params(candidates: Sequence[Mapping[str, Any]], digest: str = "") -> dict[str, Any]:
     return {
         "code_fingerprint": code_fingerprint(),
+        "discovery_digest": digest,
         "candidates": [{"indicator": c["indicator"], "direction": c["direction"]} for c in candidates],
         "buckets": {name: [BUCKETS[name].low, BUCKETS[name].high] for name in COIN_INDICATORS},
         "label_days": LABEL_DAYS, "origin_month": ORIGIN_MONTH,
@@ -775,32 +829,34 @@ def trial_params(candidates: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def trial_id(candidates: Sequence[Mapping[str, Any]], data_end: tuple[int, int] = DEFAULT_DATA_END) -> str:
+def trial_id(candidates: Sequence[Mapping[str, Any]], digest: str = "",
+             data_end: tuple[int, int] = DEFAULT_DATA_END) -> str:
     from trading.research.robustness import trial_id_for
 
-    return trial_id_for(family=FAMILY, params=trial_params(candidates), dataset=dataset_description(data_end))
+    return trial_id_for(family=FAMILY, params=trial_params(candidates, digest),
+                        dataset=dataset_description(data_end))
 
 
-def require_registration(registry: Path, candidates: Sequence[Mapping[str, Any]],
+def require_registration(registry: Path, candidates: Sequence[Mapping[str, Any]], digest: str = "",
                          data_end: tuple[int, int] = DEFAULT_DATA_END) -> str:
     from trading.research.robustness import TrialRegistry
 
     if not candidates:
         raise SystemExit("no candidate passed the discovery rule; the confirmation window stays sealed")
-    tid = trial_id(candidates, data_end)
+    tid = trial_id(candidates, digest, data_end)
     if tid not in {r.trial_id for r in TrialRegistry(registry).selection_trials(FAMILY)}:
-        raise SystemExit(f"trial {tid} is not pre-registered for this code and candidate list; "
-                         f"refusing to look at cohorts from {iso(SEAL_DAY)}")
+        raise SystemExit(f"trial {tid} is not pre-registered for this code, candidate list and discovery "
+                         f"statistics; refusing to look at cohorts from {iso(SEAL_DAY)}")
     return tid
 
 
-def register(registry: Path, candidates: Sequence[Mapping[str, Any]], *,
+def register(registry: Path, candidates: Sequence[Mapping[str, Any]], digest: str = "", *,
              data_end: tuple[int, int] = DEFAULT_DATA_END, now: int | None = None) -> str:
     from trading.research.robustness import TrialRecord, TrialRegistry
 
     if not candidates:
         raise SystemExit("nothing to register: no candidate passed the discovery rule")
-    tid = trial_id(candidates, data_end)
+    tid = trial_id(candidates, digest, data_end)
     when = datetime.fromtimestamp(now or int(time.time()), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     names = ", ".join(f"{c['indicator']} ({c['direction']})" for c in candidates)
     record = TrialRecord(
@@ -811,11 +867,19 @@ def register(registry: Path, candidates: Sequence[Mapping[str, Any]], *,
                      f"annual discovery cohorts {DISCOVERY_YEARS[0]}-09..{DISCOVERY_YEARS[-1]}-09 of the "
                      f"survivorship-free Binance USDT spot universe. Within-cohort lift, stratified bootstrap over "
                      f"coins, one confirmation run. Research only, no order authority."),
-        params=trial_params(candidates), dataset=dataset_description(data_end), recorded_at=when,
+        params=trial_params(candidates, digest), dataset=dataset_description(data_end), recorded_at=when,
         n_trades=None, sharpe_per_trade=None,
     )
     TrialRegistry(registry).append(record)
     return tid
+
+
+def register_report(registry: Path, report: Mapping[str, Any], *, now: int | None = None) -> str:
+    """Register the candidates of a validated discovery report, bound to its statistics digest."""
+
+    candidates = validate_discovery_report(report)
+    data_end = tuple(int(x) for x in str(report["data_end"]).split("-")[:2])
+    return register(registry, candidates, report_digest(report), data_end=data_end, now=now)
 
 
 # ---------------------------------------------------------------------------
@@ -836,7 +900,7 @@ def run_discovery(data: Dataset, *, reps: int = RANDOM_REPS, descriptive: bool =
         "data_end": iso(data.data_end_day), "cohorts": [c.name for c in cohorts],
         "base_rates": {c.name: base_rate(c) for c in cohorts},
         "indicators": stats, "candidates": candidates,
-        "random_control": random_control(cohorts, reps=reps),
+        "random_control": random_control(cohorts, reps=reps) if reps else None,
         "period_cards": [period_card(c) for c in cohorts],
         "sigma_wick_table": sigma_wick_table(cohorts),
         "can_authorize_trade": False,
@@ -851,9 +915,19 @@ def run_discovery(data: Dataset, *, reps: int = RANDOM_REPS, descriptive: bool =
 
 
 def run_confirmation(data: Dataset, discovery: Mapping[str, Any], registry: Path) -> dict[str, Any]:
-    candidates = list(discovery.get("candidates") or [])
-    data_end = tuple(int(x) for x in discovery["data_end"].split("-")[:2])
-    tid = require_registration(registry, candidates, data_end)  # noqa: F841  (refuses before any read)
+    """The one confirmation run. Refuses, before reading any sealed cohort, unless the discovery report is
+    this code's own output, its candidates are what its statistics select, that exact report is registered,
+    and the same discovery reproduces from the data at hand."""
+
+    candidates = validate_discovery_report(discovery)
+    digest = report_digest(discovery)
+    data_end = tuple(int(x) for x in str(discovery["data_end"]).split("-")[:2])
+    tid = require_registration(registry, candidates, digest, data_end)
+    if iso(data.data_end_day) != str(discovery["data_end"]):
+        raise SystemExit("the data at hand ends elsewhere than the registered discovery; refusing")
+    reproduced = run_discovery(data, reps=0, descriptive=False)
+    if report_digest(reproduced) != digest:
+        raise SystemExit("the registered discovery does not reproduce from the data at hand; refusing to confirm")
     cohorts = inference_cohorts(data, CONFIRMATION_YEARS)
     family_alpha = ALPHA / max(1, len(candidates))
     results = {}
@@ -954,6 +1028,39 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def universe_exclusion(symbol: str, bases: Iterable[str]) -> str | None:
+    """History identity rules plus known ticker migrations: both tickers of a migration are left out.
+
+    A renamed project (MATIC -> POL) is one asset under two tickers; the old
+    ticker would read as a delisting and the new one as a young asset, so
+    neither enters the cohort universe. Stitching would need per-migration
+    conversion ratios that the identity list does not carry.
+    """
+
+    from trading.data.binance_history_identity import KNOWN_MIGRATIONS, exclusion_reason
+
+    base = symbol[:-4].upper()
+    reason = exclusion_reason(base, bases)
+    if reason:
+        return reason
+    if base in KNOWN_MIGRATIONS or base in set(KNOWN_MIGRATIONS.values()):
+        return "MIGRATION"
+    return None
+
+
+def check_listing(spot_total: int, has_btc: bool, perp_total: int) -> None:
+    """A syntactically valid but short listing is a broken bucket page, not a small market: fail closed."""
+
+    from trading.data import binance_universe as bu
+    from trading.data.binance_carry_universe import MIN_PERPS
+    from trading.data.binance_perp import DataQualityError
+
+    if spot_total < bu.MIN_USDT_PAIRS or not has_btc:
+        raise DataQualityError(f"spot listing incomplete: {spot_total} USDT pairs, BTCUSDT present={has_btc}")
+    if perp_total < MIN_PERPS:
+        raise DataQualityError(f"perp listing incomplete: {perp_total} symbols")
+
+
 def fetch_stablecoins(session) -> list[tuple[int, float]]:
     response = session.get(STABLECOINS_URL, timeout=60)
     response.raise_for_status()
@@ -988,18 +1095,19 @@ def build(out_dir: Path, *, data_end: tuple[int, int] = DEFAULT_DATA_END, symbol
     import requests
     from trading.data import binance_universe as bu
     from trading.data.binance_carry_universe import PERP_PREFIX, list_symbols, map_perps_to_spot
-    from trading.data.binance_history_identity import exclusion_reason
 
     session = session or requests.Session()
     data_end_day = day_of(*data_end)
     decision_at = data_end_day * DAY
     spots = bu.filter_usdt_pairs(bu.list_spot_symbols(session))
+    perps = list_symbols(session, PERP_PREFIX)
+    check_listing(len(spots.eligible) + len(spots.stable) + len(spots.leveraged), BTC in spots.eligible, len(perps))
     bases = {s[:-4] for s in spots.eligible}
     excluded: dict[str, str] = {s: "STABLE" for s in spots.stable}
     excluded.update({s: "LEVERAGED" for s in spots.leveraged})
     eligible = []
     for symbol in spots.eligible:
-        reason = exclusion_reason(symbol[:-4], bases)
+        reason = universe_exclusion(symbol, bases)
         if reason:
             excluded[symbol] = reason
         else:
@@ -1007,7 +1115,6 @@ def build(out_dir: Path, *, data_end: tuple[int, int] = DEFAULT_DATA_END, symbol
     if symbols:
         wanted = {s.upper() for s in symbols} | {BTC}
         eligible = [s for s in eligible if s in wanted]
-    perps = list_symbols(session, PERP_PREFIX)
     mapping = map_perps_to_spot(perps, eligible)
     spot_of_perp = {p: s for p, s in mapping.mapped.items() if s in set(eligible)}
 
@@ -1177,17 +1284,11 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         print_summary(report)
         return 0
     if args.command == "register":
-        report = json.loads(args.report.read_text("utf-8"))
-        if report.get("code_fingerprint") != code_fingerprint():
-            raise SystemExit("the discovery report was produced by other code; re-run discovery first")
-        data_end = tuple(int(x) for x in report["data_end"].split("-")[:2])
-        tid = register(args.registry, report.get("candidates") or [], data_end=data_end)
+        tid = register_report(args.registry, json.loads(args.report.read_text("utf-8")))
         print(f"registered {tid}")
         return 0
     if args.command == "confirm":
         discovery = json.loads(args.report.read_text("utf-8"))
-        if discovery.get("code_fingerprint") != code_fingerprint():
-            raise SystemExit("the discovery report was produced by other code; refusing to confirm")
         report = run_confirmation(load(args.data_dir), discovery, args.registry)
         _write_json(report, args.out)
         print_summary(report)

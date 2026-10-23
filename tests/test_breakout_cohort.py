@@ -140,18 +140,56 @@ def test_features_read_only_the_history_and_match_their_definitions():
     assert bc.coin_features(tampered, ORIGIN) == feats                        # future bars change nothing
 
 
-def test_a_hole_inside_a_feature_window_makes_it_unknown_a_single_day_does_not():
+def _with_gaps(closes, missing):
+    return bc.series_from_rows("AUSDT", [(ORIGIN - len(closes) + k, c, c * 1.01, c * 0.99, c, 1e7)
+                                         for k, c in enumerate(closes) if k not in missing])
+
+
+def test_a_hole_inside_a_feature_window_makes_every_feature_unknown_a_single_day_does_not():
     closes = [100.0] * 200
-    hole = closes[:150] + [None, None] + closes[152:]
-    series = bc.series_from_rows("AUSDT", [(ORIGIN - 200 + k, c, c * 1.01, c * 0.99, c, 1e7)
-                                           for k, c in enumerate(hole) if c is not None])
-    feats = bc.coin_features(series, ORIGIN)
-    assert feats["R90"] is None and feats["SIGMA90"] is None and feats["WICK90"] is None
-    one = closes[:150] + [None] + closes[151:]
-    series = bc.series_from_rows("AUSDT", [(ORIGIN - 200 + k, c, c * 1.01, c * 0.99, c, 1e7)
-                                           for k, c in enumerate(one) if c is not None])
-    feats = bc.coin_features(series, ORIGIN)
+    feats = bc.coin_features(_with_gaps(closes, {150, 151}), ORIGIN)        # a two-day hole 50 days back
+    for name in ("R90", "SIGMA90", "WICK90", "FLASH90", "VOL_TREND"):
+        assert feats[name] is None, name
+    assert bc.median_volume(_with_gaps(closes, {180, 181}), ORIGIN) is None  # a hole in the last 30 days
+    assert bc.eligible(_with_gaps(closes, {180, 181}), ORIGIN)               # history exists ...
+    assert bc.members_at({"AUSDT": _with_gaps(closes, {180, 181})}, ORIGIN) == []   # ... but no known volume
+    feats = bc.coin_features(_with_gaps(closes, {150}), ORIGIN)
     assert feats["R90"] == pytest.approx(0.0) and feats["SIGMA90"] == pytest.approx(0.0)
+    assert feats["VOL_TREND"] == pytest.approx(1.0) and feats["FLASH90"] == pytest.approx(-0.01)
+
+
+def test_single_missing_day_allowances_follow_the_window_class():
+    assert (bc._allowed_missing(30), bc._allowed_missing(91), bc._allowed_missing(366), bc._allowed_missing(730)) \
+        == (2, 2, 5, 10)
+    closes = [100.0] * 400                                                    # index k = day ORIGIN - 400 + k
+    five = {60, 100, 140, 180, 220}                                           # isolated days inside [34, 400)
+    assert bc.coin_features(_with_gaps(closes, five), ORIGIN)["R365"] == pytest.approx(0.0)
+    six = five | {260}
+    assert bc.coin_features(_with_gaps(closes, six), ORIGIN)["R365"] is None
+    three_in_90 = {320, 340, 360}
+    assert bc.coin_features(_with_gaps(closes, three_in_90), ORIGIN)["R90"] is None
+    assert bc.coin_features(_with_gaps(closes, {320, 340}), ORIGIN)["R90"] == pytest.approx(0.0)
+
+
+def test_universe_exclusions_cover_identity_rules_and_known_migrations():
+    bases = {"BTC", "ETH", "MATIC", "POL", "AAVE", "LEND", "USDC", "BTCUP"}
+    assert bc.universe_exclusion("ETHUSDT", bases) is None
+    assert bc.universe_exclusion("USDCUSDT", bases) == "STABLE"
+    assert bc.universe_exclusion("BTCUPUSDT", bases) == "LEVERAGED"
+    assert bc.universe_exclusion("POLUSDT", bases) == "MIGRATION" and bc.universe_exclusion("MATICUSDT", bases) == "MIGRATION"
+    assert bc.universe_exclusion("AAVEUSDT", bases) == "MIGRATION" and bc.universe_exclusion("LENDUSDT", bases) == "MIGRATION"
+
+
+def test_a_short_listing_fails_the_build():
+    from trading.data.binance_perp import DataQualityError
+
+    bc.check_listing(400, True, 200)
+    with pytest.raises(DataQualityError):
+        bc.check_listing(50, True, 200)
+    with pytest.raises(DataQualityError):
+        bc.check_listing(400, False, 200)
+    with pytest.raises(DataQualityError):
+        bc.check_listing(400, True, 20)
 
 
 def test_buckets_follow_the_fixed_thresholds():
@@ -291,22 +329,81 @@ def test_discovery_runs_on_a_synthetic_universe_and_never_reads_sealed_cohorts(t
     for card in report["period_cards"]:
         assert card["market"]["BTC_TREND"] in {"UP", "DOWN", "SIDEWAYS"} and card["market"]["UNIVERSE_SIZE"] == 41
     assert set(report["sigma_wick_table"]) == {"0", "1", "2"}
+    assert bc.validate_discovery_report(json.loads(json.dumps(report))) == []                 # nothing separates
     registry = tmp_path / "registry.jsonl"
     with pytest.raises(SystemExit):
-        bc.run_confirmation(data, {**report, "candidates": []}, registry)                     # nothing registered
-    candidates = [{"indicator": "RS90", "direction": "UP"}]
+        bc.run_confirmation(data, report, registry)                                            # no candidate: sealed
     with pytest.raises(SystemExit):
-        bc.require_registration(registry, candidates)
-    tid = bc.register(registry, candidates, now=1_800_000_000)
-    assert bc.require_registration(registry, candidates) == tid
+        bc.register_report(registry, report)
+    hand_picked = json.loads(json.dumps(report))
+    hand_picked["candidates"] = [{"indicator": "RS90", "direction": "UP", "lift": 0.5, "ci": [0.2, 0.8]}]
     with pytest.raises(SystemExit):
-        bc.require_registration(registry, [{"indicator": "R90", "direction": "UP"}])          # another list
+        bc.validate_discovery_report(hand_picked)                                              # not its own rule's output
     with pytest.raises(SystemExit):
-        bc.register(registry, [])
-    confirmation = bc.run_confirmation(data, {**report, "candidates": candidates}, registry)
+        bc.validate_discovery_report({**report, "stage": "confirmation"})
+    with pytest.raises(SystemExit):
+        bc.validate_discovery_report({**report, "code_fingerprint": "0" * 16})
+
+
+def _pattern_dataset(n_each=15):
+    """Winners rise 50% in the 90 days before every 1 September and double after it; losers fall 40% and never do."""
+
+    start, end = bc.day_of(2017, 8, 17), DATA_END
+
+    def shape(t, winner):                                # t = days since the last 1 September
+        if winner:
+            return 1.5 + 1.8 * t / 180 if t < 180 else (3.3 - 2.3 * (t - 180) / 95 if t < 275 else 1.0 + 0.5 * (t - 275) / 90)
+        return 0.6 + 0.4 * t / 275 if t < 275 else 1.0 - 0.4 * (t - 275) / 90
+
+    def price(day, winner, base):
+        from datetime import date
+        y = date.fromtimestamp(day * bc.DAY).year
+        origin = bc.day_of(y, 9, 1)
+        if day < origin:
+            origin = bc.day_of(y - 1, 9, 1)
+        return base * shape(day - origin, winner)
+
+    spot = {"BTCUSDT": bc.series_from_rows("BTCUSDT", [(d, 100.0, 101.0, 99.0, 100.0, 1e9) for d in range(start, end)])}
+    for k in range(2 * n_each):
+        winner, symbol = k < n_each, f"{'W' if k < n_each else 'L'}{k:02d}USDT"
+        rows = []
+        previous = price(start, winner, 10.0 + k)
+        for d in range(start, end):
+            close = price(d, winner, 10.0 + k)
+            rows.append((d, previous, max(previous, close) * 1.01, min(previous, close) * 0.99, close, 5e6))
+            previous = close
+        spot[symbol] = bc.series_from_rows(symbol, rows)
+    return bc.Dataset(spot=spot, data_end_day=end)
+
+
+def test_registration_binds_the_discovery_and_confirmation_reproduces_it(tmp_path):
+    data = _pattern_dataset()
+    report = json.loads(json.dumps(bc.run_discovery(data, reps=2, descriptive=False)))
+    names = {c["indicator"] for c in report["candidates"]}
+    assert {"R90", "RS90"} <= names and all(c["direction"] == "UP" for c in report["candidates"])
+    assert report["indicators"]["R90"]["lift"] == pytest.approx(1.0) and report["indicators"]["R90"]["known"] == 4
+    registry = tmp_path / "registry.jsonl"
+    with pytest.raises(SystemExit):
+        bc.run_confirmation(data, report, registry)                                            # not registered yet
+    tid = bc.register_report(registry, report, now=1_800_000_000)
+    assert tid == bc.trial_id(report["candidates"], bc.report_digest(report))
+    confirmation = bc.run_confirmation(data, report, registry)
+    assert confirmation["trial_id"] == tid
     assert confirmation["cohorts"] == ["2022-09-01", "2023-09-01", "2024-09-01", "2025-09-01"]
-    assert confirmation["results"]["RS90"]["verdict"] in {"CONFIRMED", "NO_EFFECT", "REVERSED", "INCOMPLETE_DATA"}
-    assert confirmation["family_alpha"] == pytest.approx(0.05)
+    assert confirmation["results"]["R90"]["verdict"] == "CONFIRMED"
+    assert confirmation["family_alpha"] == pytest.approx(0.05 / len(report["candidates"]))
+    edited = json.loads(json.dumps(report))
+    edited["indicators"]["AGE"]["lift"] = 0.9                                                  # inconsistent edit
+    edited["indicators"]["AGE"].update(known=4, signs_agree=True, ci=[0.5, 1.0])
+    with pytest.raises(SystemExit):
+        bc.run_confirmation(data, edited, registry)                                            # its own rule now differs
+    consistent = json.loads(json.dumps(edited))
+    consistent["candidates"] = bc.select_candidates(consistent["indicators"])                  # made self-consistent
+    with pytest.raises(SystemExit):
+        bc.run_confirmation(data, consistent, registry)                                        # digest not registered
+    bc.register_report(registry, consistent, now=1_800_000_100)
+    with pytest.raises(SystemExit):
+        bc.run_confirmation(data, consistent, registry)                                        # does not reproduce
 
 
 def test_monthly_cohorts_are_descriptive_and_stop_at_the_seal():

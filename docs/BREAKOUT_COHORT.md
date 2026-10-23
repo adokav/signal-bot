@@ -38,7 +38,7 @@ sonuç emir yetkisi vermez (AGENTS.md §4).
 
 | Parça | Kaynak | Not |
 |---|---|---|
-| Evren | `data.binance.vision` spot aylık arşiv listesi, USDT çiftleri, delist edilenler dahil (`binance_universe.list_spot_symbols`) | Stabil, kaldıraçlı, sabitlenmiş ve bilinen sembol göçleri `binance_history_identity` kurallarıyla dışarıda. Spot seçildi, çünkü perp arşivi 2020'de başlıyor; spot 2017-08'den iki tam döngü verir (§5). |
+| Evren | `data.binance.vision` spot aylık arşiv listesi, USDT çiftleri, delist edilenler dahil (`binance_universe.list_spot_symbols`) | Stabil, kaldıraçlı, sabitlenmiş tokenlar `binance_history_identity` kurallarıyla dışarıda. **Bilinen sembol göçlerinin iki ucu da dışarıda** (MATIC ve POL, LEND ve AAVE, RNDR ve RENDER…): eski sembol delist, yeni sembol genç varlık gibi okunurdu; birleştirmek göç başına dönüşüm oranı ister, kimlik listesinde yok. Liste eksik gelirse (300'den az USDT çifti, BTCUSDT yok, 150'den az perp) kurulum durur. Spot seçildi, çünkü perp arşivi 2020'de başlıyor; spot 2017-08'den iki tam döngü verir (§5). |
 | Spot günlük mumlar | Aylık `1d` kline dosyaları: açılış, en yüksek, en düşük, kapanış, quote hacmi; 2017-08 → veri sonu | Fiyat ve spot fitilleri. |
 | Perp katmanı (2020'den) | Perp'i olan çiftler için USDT-M `1d` kline ve aylık `fundingRate` dosyaları (`binance_carry_universe.map_perps_to_spot` eşlemesi; çarpanlı kontratlar oranla) | **Yalnız betimleyici:** perp fitil derinliği ve funding. Keşif penceresinde yok ya da eksik (§5), aday olamaz. |
 | BTC trend geçmişi | BTCUSDT spot günlük mumlar, 2017-08'den | Betimleyici piyasa katmanı. |
@@ -276,6 +276,7 @@ Hiçbir sonuç modülü otomatik değiştirmez; hiçbir sonuç emir yetkisi değ
 ## 8. Bilinen sınırlar
 
 - Binance spot evreni; 2017-08'den. Erken kohortlar küçüktür (2018-09'da onlarca çift); bir kovada 10 coin şartı bazı göstergeleri erken kohortlarda bilinmez bırakır.
+- Sembol değiştiren projeler (kimlik listesindeki 32 göç; AAVE, RENDER, POL, S dahil) evrende yoktur: birleştirilmedi, dışlandı. Bu, bilinen bir eksikliktir; göç oranları eklenirse yeni bir deneme olur.
 - Pencere başına dört bağımsız dönem: piyasa ve makro katmanı için test yoktur, yalnız tasvir. Coin göstergeleri kohort içinde test edilir; aynı kohortun coinleri sektörle bağımlıdır, aralıklar iyimserdir.
 - 12 aylık etiket tezin 24–36 aylık ufkundan kısadır; 24 ay betimleyicidir. Daha uzun etiketle örtüşmeyen bölme bu veriyle yapılamaz.
 - Perp fitilleri ve funding 2020'den vardır; adaya giremez.
@@ -290,7 +291,8 @@ Hiçbir sonuç modülü otomatik değiştirmez; hiçbir sonuç emir yetkisi değ
 - `trading/backtest/breakout_cohort.py`: `build` (spot 1d, perp 1d + funding, stablecoin, Korku-Açgözlülük; atlas depodan okunur), `discover`, `register`, `confirm`. Her eşik, pencere ve kural bu belgedeki sabitlerle modülün başında durur; `trial_params` onları deneme kaydına yazar.
   - Günlük seri yoğun gün ızgarasındadır; eksik gün NaN. Bir pencerede iki ya da daha fazla ardışık eksik gün (bir günden uzun boşluk) o göstergeyi ya da etiketi **bilinmez** yapar; tek eksik gün ileri doldurulur (90 günlük pencerede en fazla 2, 365'te 5, 730'da 10 tek gün).
   - Etikette veri, pencere bitiminden 7 günden fazla önce kesilip bir daha gelmiyorsa `DELISTED` (son kapanışla); kesilip yeniden geliyorsa bilinmez.
-  - `confirm`, keşif raporunun kod parmak izini ve adayları alır; aynı parmak izi ve aday listesiyle kayıtlı bir trial yoksa doğrulama kohortlarını okumadan durur.
+  - Boşluk kuralı bütün özelliklere uygulanır: hacim medyanları (üyelik dahil), hacim trendi, tek günlük fitil ve getiri pencereleri aynı kuraldan geçer; tek eksik gün sınırı pencere sınıfına göredir (90 günlük sınıf 2, 365'lik 5, 730'luk 10).
+  - **Kayıt ve mühür:** `register`, keşif raporunun şemasını, aşamasını, kod parmak izini ve kohortlarını doğrular; raporun aday listesini **raporun kendi istatistiklerinden yeniden hesaplar** ve eşleşmezse reddeder; sonra adayları, kline'dan türeyen istatistiklerin özetiyle (`discovery_digest`) birlikte deneme kaydına yazar. `confirm`, aynı doğrulamayı yapar, o özetle kayıtlı bir trial ister, **keşfi elindeki veriden yeniden üretir** ve özet aynı değilse doğrulama kohortlarına dokunmadan durur. Elle düzenlenmiş bir rapor bu üç kapıdan birinde kalır.
 - `tests/test_breakout_cohort.py` (16 test): purge ve pencereler, etiketler (2× günü, 2× öncesi düşüş, fitil, tek günlük fitil, delist, boşluk), üyelik (90 gün, son gün, hacim tabanı, ilk 150), göstergelerin yalnız geçmişi okuması (gelecek mumlar değişince aynı), kırık kuralı, kova eşikleri, BTC haftalık kanal, funding/stablecoin/Korku-Açgözlülük/makro yardımcıları, kohort içi lift ve tabakalı bootstrap (tohumlu), aday kuralı ve uygunluk (perp katmanı asla), rastgele kontrol, kararlar, sentetik evrende uçtan uca keşif ve mühür, kayıt, manifest özet denetimi.
 - Workflow `breakout_cohort.yml` (`stage: discover | confirm`). Keşif raporu `research/evidence/breakout_discovery.json` olarak depoya girer; `register` adayları kayıt defterine yazar; `confirm` ancak o kayıtla çalışır. Kullanıcı her aşamayı bir kez tetikler.
 - Sonuçlar bu belgeye eklenir: keşif → aday listesi → ön-kayıt → doğrulama.
