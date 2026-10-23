@@ -89,6 +89,7 @@ Bunlar kullanıcıdan PR ile gelir.
 ## 6. Kanıt durumu ve açık kararlar
 
 - Kanıt: hiçbiri. D1 ailesi günlükte majörlerde RİSK_AZALTIR; haftalık ölçekte test edilmedi (§8.1 bekliyor).
-  Atılım kohortu keşif koşusu bekliyor; perp katmanına `PREM90` eklendi.
+  Atılım kohortu keşif koşusu bekliyor; perp katmanına `PREM90` (Binance Premium Index ortalaması; canlı
+  karttaki MEXC primiyle aynı ölçü değil) eklendi.
 - Açık: rejim kuralında "ve" mi "veya" mı; BTC.D arşivinin elle tohumlanması; kayıp bütçesi, dilim ve kısmi satış
   oranları; pozisyon defteri ve ileri kayıt ön-kaydı; raporlama tasarımı.

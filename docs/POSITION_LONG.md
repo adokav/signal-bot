@@ -545,7 +545,7 @@ olur ve o coinin sinyali düşer (AGENTS.md §2).
 | Altcoin sezonu endeksi `ALT90` | İlk 50 altcoin (stabil, sarılı, stake türevleri hariç) içinde 90 günlük getirisi BTC'yi geçenlerin payı; CoinGecko `market_chart` (365 gün) | Blockchaincenter tanımının kendi hesabımız; `/coins/markets` 90 günlük değişim vermiyor |
 | Korku-açgözlülük | alternative.me | Yalnız gösterge; kuralda yok |
 | VIX (son kapanış) | FRED `VIXCLS` anahtarsız CSV | Yalnız bilgi (kullanıcı isteği 2026-10-23); rejim satırında; alınamazsa "?" ve not, karara ve sağlığa etkisi yok |
-| Perp primi: anlık (son / endeks − 1) ve 90 günlük ortalama (günlük kapanış / endeks kapanışı − 1) | MEXC `ticker` (lastPrice, indexPrice) ve `kline/index_price` Day1 | Yalnız bilgi; "vadeli > spot" sürekli hâliyle funding olarak ödenir ve `FUND90` kapı olarak kalır. Kohortta `PREM90` betimleyici (Binance `premiumIndexKlines`). |
+| Perp primi: anlık (son / endeks − 1) ve 90 günlük ortalama (günlük kapanış / endeks kapanışı − 1) | MEXC `ticker` (lastPrice, indexPrice) ve `kline/index_price` Day1 | Yalnız bilgi; "vadeli > spot" sürekli hâliyle funding olarak ödenir ve `FUND90` kapı olarak kalır. Kohorttaki `PREM90` farklı bir ölçüdür: Binance Premium Index (etki alış/satış fiyatlarının endekse primi), betimleyici. |
 | Kapı durumu (arz, faaliyet, güvenlik, likidite) | `altcoin_watch` v2 anlık görüntüsü (`gates_of`), günlük | ❌ → sinyal yok (§5.1); kontrol yok ya da > 3 gün → BİLİNMİYOR → sinyal yok |
 
 ### 14.2 Haftalık karar

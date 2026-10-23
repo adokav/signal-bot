@@ -99,7 +99,7 @@ sıfır sayılmaz.
 | # | Gösterge | Tanım |
 |---|---|---|
 | D1 | `FUND90` | Son 90 günün ortalama funding oranı × 3 × 365 (yıllık %) |
-| D1b | `PREM90` | Son 90 günün günlük prim endeksi kapanışlarının ortalaması (perp işaret fiyatı / endeks − 1, %); en az 60 gün; Binance `premiumIndexKlines` 1d. Kovalar −0,03 / +0,03 (önceden sabitlendi, kullanıcı isteği 2026-10-23: "vadeli > spot"). Sürekli prim funding olarak ödenir; bu gösterge anlık bazın ortalamasıdır. |
+| D1b | `PREM90` | Binance **Premium Index** günlük kapanışlarının son 90 gündeki ortalaması (%); en az 60 gün; `premiumIndexKlines` 1d. Premium Index, perp'in etki (impact) alış/satış fiyatlarının endekse göre primidir, işaret fiyatı / endeks değildir; funding bu seriden türetilir. Kovalar −0,03 / +0,03 (önceden sabitlendi, kullanıcı isteği 2026-10-23: "vadeli > spot"). Canlı `/long` kartındaki prim farklı bir ölçüdür (MEXC son fiyat / endeks); ikisi birbiriyle karşılaştırılmaz. |
 | D2 | `PWICK90`, `PFLASH90` | C8 ve C9'un perp dipleriyle hesaplanmış hâli |
 | D3 | `PWICK_MIN`, `PFLASH_MAX` | Pencerede perp dipleriyle `WICK_MIN` ve `FLASH_MAX` |
 

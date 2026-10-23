@@ -461,8 +461,9 @@ def funding_90(rates: Sequence[tuple[int, float]] | None, origin: int) -> float 
 
 
 def premium_90(closes: Sequence[tuple[int, float]] | None, origin: int) -> float | None:
-    """Mean of the daily premium-index closes (perp mark over the index) in the 90 days before the origin,
-    in percent; unknown below MIN_PREMIUM_DAYS days. Descriptive: the sustained premium is paid as funding."""
+    """Mean of Binance's daily Premium Index closes in the 90 days before the origin, in percent; unknown
+    below MIN_PREMIUM_DAYS days. The Premium Index is Binance's own basis measure (impact bid/ask prices of the
+    perpetual against the index; funding is derived from it), not mark / index. Descriptive only."""
 
     if not closes:
         return None
@@ -1030,8 +1031,9 @@ def premium_url(perp: str, year: int, month: int) -> str:
 
 
 def parse_premium_csv(text: str, *, decision_at: int) -> list[tuple[int, float]]:
-    """(day, close) of the daily premium-index klines; the premium can be negative, so the kline parser's
-    price checks do not apply. Malformed rows are dropped; the forming day (close after decision) is not."""
+    """(day, close) of Binance's daily Premium Index klines (impact bid/ask against the index); the value can
+    be negative, so the kline parser's price checks do not apply. Malformed rows are dropped; a row whose close
+    time is after the decision time is not kept."""
 
     from trading.data.binance_vision import epoch_seconds
 
