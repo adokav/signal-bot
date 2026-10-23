@@ -534,6 +534,7 @@ def test_the_view_escapes_untrusted_text_and_is_not_a_buy_list(tmp_path):
     assert "<script>" not in text and "&lt;B" in text and len(text) <= 4096
     assert "doğrulanmamış sıralama" in text and "Alım önerisi değildir" in text and "Emir yetkisi yok" in text
     assert "İNCELEME GEREKLİ" in text and "ELENDİ" in text
+    assert "1 coin: dolaşım dışı arz %5'in üzerinde; açılış takvimi" in text and "%X" not in text   # grouped reason
     assert "yenileme yapılamadı" in aw.render(snap, now=NOW + 30 * DAY)
     card = aw.render_card(aw.find(snap, "lendco")[0], now=NOW + 60, generated_at=NOW)
     assert "&lt;script&gt;" in card and "<script>" not in card
