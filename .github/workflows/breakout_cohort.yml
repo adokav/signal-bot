@@ -1,0 +1,100 @@
+name: breakout_cohort
+
+# Manual-trigger research job for docs/BREAKOUT_COHORT.md: what was observable
+# before coins that went 2x within 12 months, on the survivorship-free Binance
+# USDT spot universe (data.binance.vision, delisted pairs included), with the
+# perp layer (wicks, funding), DefiLlama stablecoins, alternative.me Fear &
+# Greed and the committed atlas tables as descriptive context.
+#
+#   discover  builds the data and runs the discovery cohorts (2018-09..2021-09)
+#             plus the descriptive monthly cohorts before 2022-09. Commit the
+#             report to research/evidence/breakout_discovery.json, then
+#             `python -m trading.backtest.breakout_cohort register --report ...`
+#             writes the candidates to the trial registry.
+#   confirm   refuses to run unless that registration exists for the current
+#             code and candidate list; evaluates the sealed cohorts
+#             2022-09..2025-09 once.
+#
+# Thresholds, windows and the candidate rule are fixed in the protocol; no
+# inputs change them. Research only: no order authority, does not touch the
+# production bot.
+#
+# How to run:
+#   GitHub → Actions → breakout_cohort → Run workflow → stage
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "discover (first) or confirm (once, after registration)"
+        required: true
+        default: discover
+        type: choice
+        options: [discover, confirm]
+
+permissions:
+  contents: read
+
+jobs:
+  cohort:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements.txt
+          -r requirements-dev.txt
+          -r requirements-trading.txt
+      - name: Build the spot universe, perp layer and descriptive series (as of 2026-09-01)
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.breakout_cohort build --out research/data/breakout --workers 16
+          du -sh research/data/breakout
+      - name: Discover (2018-09..2021-09 cohorts)
+        if: ${{ github.event.inputs.stage == 'discover' }}
+        run: |
+          set -euo pipefail
+          python -m trading.backtest.breakout_cohort discover \
+              --data-dir research/data/breakout \
+              --out research/data/breakout_discovery.json | tee research/data/breakout_discovery.txt
+          {
+            echo "## Atılım kohortu — keşif (2018-09 → 2021-09)"
+            echo '```'
+            cat research/data/breakout_discovery.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Confirm (2022-09..2025-09 cohorts; needs the registered trial)
+        if: ${{ github.event.inputs.stage == 'confirm' }}
+        run: |
+          set -euo pipefail
+          test -f research/evidence/breakout_discovery.json || { echo "commit the discovery report first"; exit 1; }
+          python -m trading.backtest.breakout_cohort confirm \
+              --data-dir research/data/breakout \
+              --report research/evidence/breakout_discovery.json \
+              --registry research/trials/registry.jsonl \
+              --out research/data/breakout_confirmation.json | tee research/data/breakout_confirmation.txt
+          {
+            echo "## Atılım kohortu — doğrulama (2022-09 → 2025-09)"
+            echo '```'
+            cat research/data/breakout_confirmation.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: breakout-cohort-${{ github.event.inputs.stage }}
+          path: |
+            research/data/breakout_discovery.json
+            research/data/breakout_discovery.txt
+            research/data/breakout_confirmation.json
+            research/data/breakout_confirmation.txt
+            research/data/breakout/manifest.json
+          retention-days: 30
+          if-no-files-found: ignore

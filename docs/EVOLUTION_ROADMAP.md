@@ -347,7 +347,9 @@ güncellenenler belirtildi.
       etiket, purge sağlanır); coin göstergeleri kohort içinde kesitsel
       karşılaştırmayla ve sabit kovalarla sınanır, en fazla 5 aday; piyasa,
       makro, stablecoin ve perp katmanı (fitil, funding, 2020'den) yalnız
-      betimleyici; 24 aylık 2× betimleyici. Harness henüz yazılmadı.
+      betimleyici; 24 aylık 2× betimleyici. Harness yazıldı
+      (`trading/backtest/breakout_cohort.py`, workflow `breakout_cohort`);
+      keşif koşusu kullanıcıyı bekliyor.
     - Sıradaki adımlar: kohort harness'ı ve keşif koşusu, haftalık D1 analoğu
       majör testi (ön-kayıtlı), rejim katmanı ve kayıt defteri, v3.2 kapı/puan
       motoru, pozisyon planı ve ileri kayıt ön-kaydı.

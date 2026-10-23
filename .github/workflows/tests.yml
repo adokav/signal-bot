@@ -50,7 +50,8 @@ jobs:
             tests/test_listing_replay.py \
             tests/test_majors_signals.py \
             tests/test_trade_loop.py \
-            tests/test_atlas.py > pytest-output.txt 2>&1
+            tests/test_atlas.py \
+            tests/test_breakout_cohort.py > pytest-output.txt 2>&1
           rc=$?
           cat pytest-output.txt
           exit $rc

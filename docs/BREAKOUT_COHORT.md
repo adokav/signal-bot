@@ -162,8 +162,9 @@ Keşifte ayı (2018), toparlanma (2019), boğa başlangıcı (2020) ve zirve
 2022-09'da başlar: **purge sağlanır**. 2017-09 kohortu yoktur: BTCUSDT
 2017-08-17'de başladı, 90 günlük geçmiş şartı sağlanmaz.
 
-**Betimleyici aylık kohortlar:** 2017-11 → 2025-08 arası her ay başı, 12
-aylık etiket; 24 aylık etiket 2024-08'e kadar. Yalnız §6.4 yol istatistikleri
+**Betimleyici aylık kohortlar:** 2017-11 → 2025-09 arası her ay başı, 12
+aylık etiket (son kohortun penceresi tam veri sonunda biter); 24 aylık
+etiket 2024-09'a kadar. Yalnız §6.4 yol istatistikleri
 ve §6.3 dönem kartları için; aday seçmek ya da karar vermek için **asla**.
 
 **Mühür:** veri kurulumu bütün ayları indirir (keşif etiketleri 2022-08'e
@@ -284,9 +285,12 @@ Hiçbir sonuç modülü otomatik değiştirmez; hiçbir sonuç emir yetkisi değ
 - Çok sayıda gösterge: aday sayısı 5 ile sınırlı, aile alfası bölünür; keşif örneklem içidir, kanıt yalnız doğrulamadan gelir.
 - Pencere bilgi olarak mühürlü değildir (2022–2026 bilinir); eşikler bu yüzden önceden sabit.
 
-## 9. Uygulama
+## 9. Uygulama (harness yazıldı; hiçbir koşu yapılmadı)
 
-- `trading/backtest/breakout_cohort.py`: `build` (spot 1d, perp 1d + funding, BTC, stablecoin, Korku-Açgözlülük, atlas), `discover`, `register`, `confirm`, `report`; `market_data.py` ve `binance_universe` / `binance_carry_universe` yardımcılarını kullanır.
-- `tests/test_breakout_cohort.py`: etiketler (2× günü, 2× öncesi düşüş, fitil, delist), geleceğe bakmama (başlangıçtan sonraki mumlar değişince göstergeler değişmez), üyelik (90 gün, hacim tabanı, ilk 150), kohort içi `LIFT_c` ve tabakalı bootstrap, aday kuralı, purge (keşif etiket sonu < doğrulama başlangıcı), mühür (`confirm` kayıtsız çalışmaz), sembol göçü kırığı, perp katmanının adaya girememesi.
-- Workflow `breakout_cohort.yml`: `discover` işi; `confirm` işi kayıt ister. Kullanıcı bir kez tetikler.
+- `trading/backtest/breakout_cohort.py`: `build` (spot 1d, perp 1d + funding, stablecoin, Korku-Açgözlülük; atlas depodan okunur), `discover`, `register`, `confirm`. Her eşik, pencere ve kural bu belgedeki sabitlerle modülün başında durur; `trial_params` onları deneme kaydına yazar.
+  - Günlük seri yoğun gün ızgarasındadır; eksik gün NaN. Bir pencerede iki ya da daha fazla ardışık eksik gün (bir günden uzun boşluk) o göstergeyi ya da etiketi **bilinmez** yapar; tek eksik gün ileri doldurulur (90 günlük pencerede en fazla 2, 365'te 5, 730'da 10 tek gün).
+  - Etikette veri, pencere bitiminden 7 günden fazla önce kesilip bir daha gelmiyorsa `DELISTED` (son kapanışla); kesilip yeniden geliyorsa bilinmez.
+  - `confirm`, keşif raporunun kod parmak izini ve adayları alır; aynı parmak izi ve aday listesiyle kayıtlı bir trial yoksa doğrulama kohortlarını okumadan durur.
+- `tests/test_breakout_cohort.py` (16 test): purge ve pencereler, etiketler (2× günü, 2× öncesi düşüş, fitil, tek günlük fitil, delist, boşluk), üyelik (90 gün, son gün, hacim tabanı, ilk 150), göstergelerin yalnız geçmişi okuması (gelecek mumlar değişince aynı), kırık kuralı, kova eşikleri, BTC haftalık kanal, funding/stablecoin/Korku-Açgözlülük/makro yardımcıları, kohort içi lift ve tabakalı bootstrap (tohumlu), aday kuralı ve uygunluk (perp katmanı asla), rastgele kontrol, kararlar, sentetik evrende uçtan uca keşif ve mühür, kayıt, manifest özet denetimi.
+- Workflow `breakout_cohort.yml` (`stage: discover | confirm`). Keşif raporu `research/evidence/breakout_discovery.json` olarak depoya girer; `register` adayları kayıt defterine yazar; `confirm` ancak o kayıtla çalışır. Kullanıcı her aşamayı bir kez tetikler.
 - Sonuçlar bu belgeye eklenir: keşif → aday listesi → ön-kayıt → doğrulama.
