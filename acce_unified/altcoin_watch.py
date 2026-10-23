@@ -1098,7 +1098,9 @@ def render(snapshot: Mapping[str, Any] | None, *, now: int, error: str | None = 
         for g in GATES:
             info = (c.get("gates") or {}).get(g) or {}
             if info.get("status") == REVIEW:
-                key = re.sub(r"%\d+(\.\d+)?", "%X", (info.get("notes") or ["?"])[-1])
+                # The only REVIEW note that carries a number is the supply overhang; coins are grouped by
+                # the threshold they crossed, not by their own figure, so the line reads as a rule.
+                key = re.sub(r"%\d+(\.\d+)?", f"%{LOCKED_MAX * 100:.0f}'in üzerinde", (info.get("notes") or ["?"])[-1])
                 reasons[key] = reasons.get(key, 0) + 1
                 break
     for text, n in sorted(reasons.items(), key=lambda kv: -kv[1])[:4]:
