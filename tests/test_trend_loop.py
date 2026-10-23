@@ -121,7 +121,25 @@ def test_live_constants_and_lists_match_the_research():
     assert tl.FIXED == ms.FIXED and tl.MEMES == majors_data.MEMES
     assert tl.NOT_ORDINARY == (hid.HISTORY_STABLE | hid.HISTORY_COMMODITY | hid.HISTORY_LEVERAGED
                                | hid.HISTORY_PEGGED)
-    assert tl.TRIAL == research.trial_id()
+    # The live loop stays bound to the registered trial. The harness's trial id includes a code fingerprint
+    # over files that dead-code wave 3 moved into trading/backtest/market_data.py (docs/DEAD_CODE_AUDIT.md),
+    # so the fingerprint itself is not compared: every registered parameter must still equal the harness's,
+    # and the registered fingerprint must still reproduce the registered id.
+    import json
+    from pathlib import Path
+    from trading.research.robustness import trial_id_for
+
+    registry = Path(__file__).resolve().parents[1] / "research" / "trials" / "registry.jsonl"
+    registered = next(r for r in map(json.loads, registry.read_text("utf-8").splitlines()) if r["trial_id"] == tl.TRIAL)
+
+    def plain(params):
+        return json.loads(json.dumps({k: v for k, v in params.items() if k != "code_fingerprint"},
+                                     sort_keys=True, default=str))
+    params = research.trial_params()
+    assert plain(registered["params"]) == plain(params)
+    assert registered["family"] == research.FAMILY and registered["dataset"] == research.DATASET
+    pinned = dict(params, code_fingerprint=registered["params"]["code_fingerprint"])
+    assert trial_id_for(family=research.FAMILY, params=pinned, dataset=research.DATASET) == tl.TRIAL
 
 
 def test_volatility_is_optional_but_the_entry_window_is_not():

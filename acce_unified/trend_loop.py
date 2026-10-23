@@ -721,7 +721,7 @@ class TrendLoop:
     # -- reports -----------------------------------------------------------
 
     def positions_text(self, now: int) -> str:
-        from .long_alerts import _clock, _num, esc, table
+        from .text import _clock, _num, esc, table
 
         with self.lock:
             state = self.export()
@@ -780,7 +780,7 @@ class TrendLoop:
 
 
 def entry_text(p: Mapping[str, Any], universe_size: int) -> str:
-    from .long_alerts import _clock, _num, esc, table
+    from .text import _clock, _num, esc, table
 
     exit_pct = (1.0 - p["exit_level"] / p["entry_price"]) * 100.0
     slot = f"1/{universe_size}"
@@ -805,7 +805,7 @@ def entry_text(p: Mapping[str, Any], universe_size: int) -> str:
 
 
 def exit_text(event: Mapping[str, Any], reason: str) -> str:
-    from .long_alerts import _clock, _num, esc, table
+    from .text import _clock, _num, esc, table
 
     held = max(0, round((event["exited_at"] - event["entered_at"]) / DAY))
     if reason == "STOP":

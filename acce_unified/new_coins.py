@@ -1408,7 +1408,7 @@ def _usd(value: Any) -> str:
 
 def render(snapshot: Mapping[str, Any] | None, *, now: int, error: str | None = None, base_rate: str = "",
            enabled: bool = True, max_age: int = 3 * HOUR) -> str:
-    from .long_alerts import _num, esc
+    from .text import _num, esc
 
     head = "🆕 <b>YENİ COİNLER · CoinMarketCap · güvenlik taraması</b>"
     if not enabled:
@@ -1475,7 +1475,7 @@ def render(snapshot: Mapping[str, Any] | None, *, now: int, error: str | None = 
 def render_check(card: Card, *, now: int, note: str | None = None) -> str:
     """One /check card: every finding with its own mark (HTML; provider text escaped)."""
 
-    from .long_alerts import _num, esc
+    from .text import _num, esc
 
     coin = card.coin
     verdict = card.verdict

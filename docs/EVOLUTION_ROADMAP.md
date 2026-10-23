@@ -324,6 +324,22 @@ güncellenenler belirtildi.
     - Unlock takvimi ücretsiz veride yok; unlock olay çalışması ayrı bir adım
       olarak bekliyor.
 
+15. ⏳ **Uzun vadeli long pozisyon sistemi** — `docs/POSITION_LONG.md`
+    (kullanıcı kararı 2026-10-23; kullanıcının v3.2 seçim sistemi).
+    - Bot, kısa vadeli taktik radarlardan pozisyon planı üreten bir gölge kayıt
+      sistemine dönüşüyor: v3.2 kapıları ve puanı, rejim dilimleri, "en kötü
+      senaryo fiyatı" ile boyutlandırma, tez geçersizliğine dayalı çıkışlar,
+      D1 ailesinin haftalık analoğu (önce majörlerde test edilecek).
+    - **Temizlik (ölü kod üçüncü dalga):** BTC/ETH taktik radar, Likit-100
+      zinciri, kapı/stop/radar kaydı, makro boru hattı ve bunlara bağlı
+      kapanmış çalışma harness'ları silindi (`docs/DEAD_CODE_AUDIT.md`).
+      Raporlar, kanıt dosyaları ve deneme kaydı duruyor. Aşağıdaki spec uyum
+      matrisi 2026-10-01 tarihli bir denetimdir; "canlı radar" satırları o
+      günkü durumu anlatır, bugün o radarlar yok.
+    - Sıradaki adımlar: haftalık D1 analoğu majör testi (ön-kayıtlı), rejim
+      katmanı ve kayıt defteri, v3.2 kapı/puan motoru, pozisyon planı ve ileri
+      kayıt ön-kaydı.
+
 ## Kesin çizgiler
 
 - OOS validation atlanmaz. Faz A ↔ Faz C arasında bir "kanıt eşiği" vardır.
@@ -388,9 +404,8 @@ yeni listelemelerin yalnızca %15–28'i BTC'yi geçiyor; ortalamayı nadir
 büyük kazananlar (özellikle 2020 sonu) sıfıra yakın tutuyor. 2024 sonrası
 her testte negatif (sonuç sonrası bölme, karar değil).
 
-**Sonraki iş:** `docs/EDGE_RESEARCH.md` sırasıyla (2) zorunlu satış (açık
-pozisyon + fiyat çöküşü) sonrası toparlanma; (3) BTC saat etkisinin yayın
-sonrası testi; (4) haftalık kesitsel momentum. Maker emirli carry ancak
-ileri kayıt funding'in risksiz getirinin üstüne çıktığını gösterirse.
-Her yeni hipotez deneme kaydına önceden girer; deneme sayısı arttıkça çıta
-yükselir.
+**Sonraki iş (2026-10-23'ten itibaren):** `docs/POSITION_LONG.md`'nin
+uygulama sırası (madde 15). Taktik radar ve Likit-100 canlıdan kaldırıldı;
+kanıtları ve raporları duruyor. `docs/EDGE_RESEARCH.md` adayları (zorunlu
+satış sonrası toparlanma, BTC saat etkisi) bekliyor. Her yeni hipotez deneme
+kaydına önceden girer; deneme sayısı arttıkça çıta yükselir.

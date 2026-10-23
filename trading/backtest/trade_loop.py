@@ -15,7 +15,7 @@ Two controls answer the two questions: the same exit rule from 20 random
 entry days per trade (is the entry timing worth anything?) and the
 equal-weight buy-and-hold basket of the same universe (is the loop worth
 anything as a whole?). Token-swap gaps make a trade unknown, never a return
-(``weekly_momentum.continuous``). No order authority (AGENTS.md §4, §10).
+(``market_data.continuous``). No order authority (AGENTS.md §4, §10).
 """
 
 from __future__ import annotations
@@ -32,14 +32,12 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from trading.backtest import liquid_replay as lr
+from trading.backtest import market_data as mkt
 from trading.backtest import majors_signals as ms
-from trading.backtest import signal_quality as sq
-from trading.backtest import weekly_momentum as wm
 
 
 DAY = 86_400
-BARS = lr.DAY_BARS
+BARS = mkt.DAY_BARS
 DISCOVERY = ms.DISCOVERY
 CONFIRMATION = ms.CONFIRMATION
 DISCOVERY_HALF_AT = ms.DISCOVERY_HALF_AT
@@ -75,7 +73,7 @@ LOOPS = (
 
 # Pre-history test (docs/TRADE_LOOP_STUDY.md): the post-discovery hypothesis on 2018-09..2020-09.
 D1_VOL = Loop("D1_20_10_VOL", "D1", "channel", entry_days=20, exit_days=10, vol_target=0.50)
-PREHISTORY = (1_535_760_000, sq.DISCOVERY_START)     # 2018-09-01 -> 2020-10-01
+PREHISTORY = (1_535_760_000, mkt.DISCOVERY_START)     # 2018-09-01 -> 2020-10-01
 PREHISTORY_HALF_AT = 1_567_296_000                    # 2019-09-01
 PREHISTORY_LOOPS = (LOOPS[0], D1_VOL)
 VOL_DAYS = 30
@@ -99,7 +97,7 @@ class Daily:
         return self.close.shape[1]
 
 
-def daily_bars(market: lr.Market) -> Daily:
+def daily_bars(market: mkt.Market) -> Daily:
     day0 = int(market.grid_open[0])
     if day0 % DAY:
         raise ValueError("the 15m grid must start at 00:00 UTC")
@@ -223,7 +221,7 @@ class Skip:
 DATA_SKIPS = frozenset({"no_open", "break_at_entry", "no_atr"})      # missing data, counted as unknown
 
 
-def halt_bars(market: lr.Market) -> np.ndarray:
+def halt_bars(market: mkt.Market) -> np.ndarray:
     """True for 15m bars where most pairs that traded the day before have no candle: an exchange halt.
 
     No trade happens during a halt, so no stop can be crossed inside it. A
@@ -266,8 +264,8 @@ class Trade:
         return self.net_pct() / (self.risk_pct + COST_PCT)
 
 
-def simulate(market: lr.Market, daily: Daily, ind: Indicators, loop: Loop, s: int, d: int,
-             breaks: wm.Breaks, halts: np.ndarray | None = None) -> Trade | Skip:
+def simulate(market: mkt.Market, daily: Daily, ind: Indicators, loop: Loop, s: int, d: int,
+             breaks: mkt.Breaks, halts: np.ndarray | None = None) -> Trade | Skip:
     """Enter at the open after day ``d``'s close and follow the loop's exit, or say why that was not possible.
 
     ``halts`` (``halt_bars``) marks exchange-wide halts; without it every
@@ -281,7 +279,7 @@ def simulate(market: lr.Market, daily: Daily, ind: Indicators, loop: Loop, s: in
         return Skip("no_close")
     if not math.isfinite(market.open[s, first]):
         return Skip("no_open")
-    if not wm.continuous(breaks, s, first - 1, first):
+    if not mkt.continuous(breaks, s, first - 1, first):
         return Skip("break_at_entry")                       # resumes on the entry bar: not tradable at the decision
     entry = float(market.open[s, first])
     levels = stop_levels(loop, ind, s, d, entry)
@@ -297,7 +295,7 @@ def simulate(market: lr.Market, daily: Daily, ind: Indicators, loop: Loop, s: in
     def done(day: int, price: float, reason: str, bar: int) -> Trade:
         missing = first + np.nonzero(~np.isfinite(market.low[s, first:bar + 1]))[0]
         unseen = len(missing) and (halts is None or not bool(halts[missing].all()))
-        ok = wm.continuous(breaks, s, first - 1, bar) and not unseen    # a pair-specific gap could hide the stop
+        ok = mkt.continuous(breaks, s, first - 1, bar) and not unseen    # a pair-specific gap could hide the stop
         return Trade(market.symbols[s], decided_at, d + 1, entry, stop, day, float(price), reason,
                      "RESOLVED" if ok else "UNKNOWN")
 
@@ -332,7 +330,7 @@ def simulate(market: lr.Market, daily: Daily, ind: Indicators, loop: Loop, s: in
 
 
 def decision_days(daily: Daily, monthly: Mapping[int, Sequence[str]], window: tuple[int, int],
-                  market: lr.Market) -> dict[int, list[tuple[int, int]]]:
+                  market: mkt.Market) -> dict[int, list[tuple[int, int]]]:
     """symbol index -> [(decision day, month start)] for days the symbol is a universe member."""
 
     starts = sorted(monthly)
@@ -350,8 +348,8 @@ def decision_days(daily: Daily, monthly: Mapping[int, Sequence[str]], window: tu
     return out
 
 
-def run_loop(market: lr.Market, daily: Daily, ind: Indicators, loop: Loop,
-             days: Mapping[int, Sequence[tuple[int, int]]], breaks: wm.Breaks, *, seed: int = 0,
+def run_loop(market: mkt.Market, daily: Daily, ind: Indicators, loop: Loop,
+             days: Mapping[int, Sequence[tuple[int, int]]], breaks: mkt.Breaks, *, seed: int = 0,
              halts: np.ndarray | None = None) -> tuple[list[dict], dict[str, int]]:
     """Trades of one loop with their random-entry control, and the entry signals that could not trade."""
 
@@ -406,8 +404,8 @@ def daily_path(daily: Daily, row: Mapping[str, Any], s: int) -> dict[int, float]
     return out
 
 
-def portfolio(market: lr.Market, daily: Daily, rows: Sequence[Mapping[str, Any]],
-              monthly: Mapping[int, Sequence[str]], window: tuple[int, int], breaks: wm.Breaks,
+def portfolio(market: mkt.Market, daily: Daily, rows: Sequence[Mapping[str, Any]],
+              monthly: Mapping[int, Sequence[str]], window: tuple[int, int], breaks: mkt.Breaks,
               *, half_at: int, vol_target: float = 0.0, alpha: float = 0.05) -> dict[str, Any]:
     """Each trade holds 1/N of capital (N = its month's universe size); vs the equal-weight basket.
 
@@ -456,7 +454,7 @@ def portfolio(market: lr.Market, daily: Daily, rows: Sequence[Mapping[str, Any]]
             if s is None:
                 continue
             c0, c1 = daily.close[s, e - 1], daily.close[s, e]
-            if math.isfinite(c0) and math.isfinite(c1) and wm.continuous(breaks, s, e * BARS - 1, (e + 1) * BARS - 1):
+            if math.isfinite(c0) and math.isfinite(c1) and mkt.continuous(breaks, s, e * BARS - 1, (e + 1) * BARS - 1):
                 rets.append(c1 / c0 - 1.0)
         if rets:
             basket[k] = statistics.fmean(rets)
@@ -519,7 +517,7 @@ def _curve(returns: np.ndarray, times: np.ndarray, half_at: int) -> dict[str, An
 # ---------------------------------------------------------------------------
 
 
-def _pairs(rows: Iterable[Mapping[str, Any]], value) -> sq.Pairs:
+def _pairs(rows: Iterable[Mapping[str, Any]], value) -> mkt.Pairs:
     out = []
     for row in rows:
         v = value(row)
@@ -578,7 +576,7 @@ def select_candidates(results: Sequence[Mapping[str, Any]], limit: int = 2) -> l
     return chosen
 
 
-def completeness(rows: Sequence[Mapping[str, Any]], daily: Daily, market: lr.Market,
+def completeness(rows: Sequence[Mapping[str, Any]], daily: Daily, market: mkt.Market,
                  days: Mapping[int, Sequence[tuple[int, int]]], monthly: Mapping[int, Sequence[str]],
                  skipped: Mapping[str, int] | None = None, unsized: int = 0) -> dict:
     coin_days = [(s, d) for s, items in days.items() for d, _ in items]
@@ -633,7 +631,7 @@ def verdict(result: Mapping[str, Any], problems: Sequence[str]) -> str:
 FAMILY = "trade_loop_majors"
 FINGERPRINT_FILES = ("trading/backtest/trade_loop.py", *ms.FINGERPRINT_FILES)
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DATASET = {"source": "binance_vision_spot", "built_as_of": sq.CONFIRMATION_END,
+DATASET = {"source": "binance_vision_spot", "built_as_of": mkt.CONFIRMATION_END,
            "confirmation_window": "2024-09..2026-08"}
 
 # Filled in only after discovery, by the rule in docs/TRADE_LOOP_STUDY.md (loop names). No loop met the
@@ -664,7 +662,7 @@ def trial_params() -> dict[str, Any]:
         "window": list(CONFIRMATION),
         "half_at": HALF_AT,
         "family_alpha": 0.05 / max(1, len(REGISTERED)),
-        "bootstrap": {"trades": {"method": "circular_moving_block_days", "block_days": sq.BLOCK_DAYS},
+        "bootstrap": {"trades": {"method": "circular_moving_block_days", "block_days": mkt.BLOCK_DAYS},
                       "sharpe_difference": {"block_days": SHARPE_BLOCK_DAYS, "information_only": True}},
         "min_trades": MIN_CONFIRM_TRADES,
         "completeness": {"max_unknown_trades": MAX_UNKNOWN_TRADES, "max_unknown_days": MAX_UNKNOWN_DAYS},
@@ -679,7 +677,7 @@ def trial_id() -> str:
 
 
 PREHISTORY_FAMILY = "trade_loop_prehistory"
-PREHISTORY_DATASET = {"source": "binance_vision_spot", "built_as_of": sq.DISCOVERY_START,
+PREHISTORY_DATASET = {"source": "binance_vision_spot", "built_as_of": mkt.DISCOVERY_START,
                       "window": "2018-09..2020-09"}
 
 
@@ -696,7 +694,7 @@ def prehistory_trial_params() -> dict[str, Any]:
         "window": list(PREHISTORY),
         "half_at": PREHISTORY_HALF_AT,
         "family_alpha": 0.05 / len(PREHISTORY_LOOPS),
-        "bootstrap": {"trades": {"method": "circular_moving_block_days", "block_days": sq.BLOCK_DAYS},
+        "bootstrap": {"trades": {"method": "circular_moving_block_days", "block_days": mkt.BLOCK_DAYS},
                       "sharpe_difference": {"block_days": SHARPE_BLOCK_DAYS, "information_only": True}},
         "min_trades": MIN_CONFIRM_TRADES,
         "verdicts": "PASS / ZAMANLAMA_YOK / RISK_AZALTIR / NO_EFFECT; INCOMPLETE_DATA gives no verdict",
@@ -797,17 +795,17 @@ def run_prehistory(spot_dir: Path, *, alpha: float) -> dict[str, Any]:
     """The pre-registered pre-history test: spot-only majors universe (no perpetuals before 2019-09)."""
 
     verify_universe_manifest(spot_dir, end=PREHISTORY[1], window=PREHISTORY_DATA)
-    market, _, excluded = sq.load_likit_market(spot_dir, end=PREHISTORY[1])
+    market, _, excluded = mkt.load_likit_market(spot_dir, end=PREHISTORY[1])
     monthly = ms.universes(market, PREHISTORY, perp_of={}, funding_times={}, require_perp=False)
     return evaluate_loops(market, excluded, monthly, window=PREHISTORY, alpha=alpha, half_at=PREHISTORY_HALF_AT,
                           loops=PREHISTORY_LOOPS)
 
 
-def evaluate_loops(market: lr.Market, excluded: Mapping[str, str], monthly: Mapping[int, Sequence[str]], *,
+def evaluate_loops(market: mkt.Market, excluded: Mapping[str, str], monthly: Mapping[int, Sequence[str]], *,
                    window: tuple[int, int], alpha: float, half_at: int, loops: Sequence[Loop]) -> dict[str, Any]:
     daily = daily_bars(market)
     ind = indicators(daily)
-    breaks, halts = wm.continuity_breaks(market), halt_bars(market)
+    breaks, halts = mkt.continuity_breaks(market), halt_bars(market)
     days = decision_days(daily, monthly, window, market)
     results, all_rows = [], []
     for loop in loops:
@@ -879,14 +877,14 @@ def _cli(argv: Iterable[str] | None = None) -> int:
 
         trial = require_registration(args.trial_registry)
         logging.basicConfig(level=logging.INFO, format="%(message)s")
-        build_universe(args.out, lookback_months=sq.CONFIRMATION_MONTHS, decision_at=sq.CONFIRMATION_END)
-        build_funding(args.out, args.out / "funding", decision_at=sq.CONFIRMATION_END)
+        build_universe(args.out, lookback_months=mkt.CONFIRMATION_MONTHS, decision_at=mkt.CONFIRMATION_END)
+        build_funding(args.out, args.out / "funding", decision_at=mkt.CONFIRMATION_END)
         print(json.dumps({"trial": trial, "built": str(args.out)}))
         return 0
     if args.mode == "discover":
         trial = None
-        report = run(args.spot_dir, window=DISCOVERY, end=sq.DISCOVERY_END, alpha=0.05, half_at=DISCOVERY_HALF_AT,
-                     months=sq.DISCOVERY_MONTHS)
+        report = run(args.spot_dir, window=DISCOVERY, end=mkt.DISCOVERY_END, alpha=0.05, half_at=DISCOVERY_HALF_AT,
+                     months=mkt.DISCOVERY_MONTHS)
         report["candidates"] = select_candidates([r for r in report["results"] if not r["incomplete"]])
     elif args.mode == "prehistory":
         trial = require_prehistory_registration(args.trial_registry)
@@ -896,8 +894,8 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     else:
         trial = require_registration(args.trial_registry)
         loops = registered_loops()
-        report = run(args.spot_dir, window=CONFIRMATION, end=sq.CONFIRMATION_END, alpha=0.05 / len(loops),
-                     half_at=HALF_AT, loops=loops, months=sq.CONFIRMATION_MONTHS)
+        report = run(args.spot_dir, window=CONFIRMATION, end=mkt.CONFIRMATION_END, alpha=0.05 / len(loops),
+                     half_at=HALF_AT, loops=loops, months=mkt.CONFIRMATION_MONTHS)
         for r in report["results"]:
             r["verdict"] = verdict(r, r["incomplete"])
     rows = report.pop("rows")

@@ -174,6 +174,12 @@ testle eşit tutulur.
 
 - Kural dondurulmuştur. Herhangi bir parametre değişikliği yeni bir kayıt ve
   yeni bir trial başlatır.
+- 2026-10-23: Ölü kod temizliğinde araştırma harness'ının paylaşılan
+  yardımcıları `trading/backtest/market_data.py`'ye taşındı; harness'ın kod
+  parmak izi bu yüzden değişti. Kural ve parametreler değişmedi: test, canlı
+  sabitleri kayıttaki (`1fcc8f2ef5d92516`) parametrelerle karşılaştırır ve
+  kayıttaki parmak izinin aynı kimliği ürettiğini doğrular. Canlı kayıt aynı
+  trial altında sürer (`docs/DEAD_CODE_AUDIT.md`, üçüncü dalga).
 - Gölge kayıt, 12 aydan önce (2027-10) değerlendirilmez. Ölçüler
   doğrulamadakilerle aynıdır: işlem başına net sonuç, portföy düşüşü ve
   Sharpe, aynı evrenin al-tut'uyla karşılaştırma.

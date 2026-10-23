@@ -3,12 +3,6 @@ services:
     name: signal-bot-v5-core
     runtime: python
     buildCommand: pip install -r requirements.txt
-    # Production runs bot.py directly. run_service.py wrapped bot with the
-    # macro collector daemon; the dashboard override that has been in effect
-    # for the last several deploys already runs bot.py, so this file now
-    # matches reality. The macro pipeline is scheduled for removal in the
-    # Faz A cleanup wave once the backtest verdict is in (see
-    # docs/EVOLUTION_ROADMAP.md and docs/DEAD_CODE_AUDIT.md).
     startCommand: python bot.py
     disk:
       name: signal-bot-data
@@ -25,19 +19,6 @@ services:
         value: "1"
       - key: TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS
         value: "5"
-
-      # Long alerts with stop levels (docs/LONG_ALERTS.md). User policy: every
-      # long signal is pushed with its evidence label; set to "0" to silence.
-      - key: LIQUID_LONG_ALERTS_ENABLED
-        value: "1"
-      # Likit-100 alerts labelled KAÇIN by the confirmed F1 filter
-      # (docs/SIGNAL_QUALITY.md) are logged but not pushed; "1" pushes them.
-      - key: LIQUID_AVOID_ALERTS_ENABLED
-        value: "0"
-      # Tactical setups whose family failed the replay (REJECT) are logged but
-      # not pushed (user decision 2026-10-01, docs/LONG_ALERTS.md); "1" pushes them.
-      - key: TACTICAL_REJECTED_ALERTS_ENABLED
-        value: "0"
 
       # New CoinMarketCap coins through a contract-security screen (docs/NEW_COINS.md):
       # honeypot, owner powers, holder concentration, liquidity lock. Research only, no orders.
@@ -78,99 +59,3 @@ services:
         value: /data/trend_loop_ledger.jsonl
       - key: TREND_LOOP_STOP_INTERVAL_SECONDS
         value: "300"
-
-      # Exactly two MEXC opportunity engines
-      - key: UNIFIED_ENGINE_ENABLED
-        value: "1"
-      - key: UNIFIED_ENGINE_MODE
-        value: SHADOW
-      - key: UNIFIED_CEX_RADAR_ENABLED
-        value: "1"
-      # The MEXC new-listing radar is off: the "Yeni Listeler" menu reads CoinMarketCap
-      # (user decision 2026-10-05; see NEW_COINS_* below and docs/NEW_COINS.md).
-      - key: UNIFIED_LISTING_RADAR_ENABLED
-        value: "0"
-      - key: UNIFIED_SCAN_INTERVAL_SECONDS
-        value: "120"
-
-      # Liquid 100 — Long Top 3
-      - key: UNIFIED_LIQUID_UNIVERSE_SIZE
-        value: "100"
-      - key: UNIFIED_LIQUID_ENRICHMENT_SIZE
-        value: "100"
-      - key: UNIFIED_LIQUID_FUNDAMENTAL_SIZE
-        value: "100"
-      - key: UNIFIED_LIQUID_LONG_TOP_N
-        value: "3"
-      - key: UNIFIED_LIQUID_MIN_QUOTE_VOLUME
-        value: "1000000"
-      - key: UNIFIED_LIQUID_MAX_24H_DRAWDOWN_PCT
-        value: "-8"
-      - key: UNIFIED_LIQUID_MAX_24H_GAIN_PCT
-        value: "25"
-      - key: UNIFIED_LIQUID_MAX_SPREAD_BPS
-        value: "35"
-      - key: UNIFIED_LIQUID_MIN_LONG_SCORE
-        value: "64"
-      - key: UNIFIED_LIQUID_REQUIRE_SUPPLY_DATA
-        value: "true"
-
-      # Point-in-time research archive. Disabled by default until Faz A
-      # backtest closes and we decide whether to feed the archive into the
-      # backtest harness or remove the module entirely (see
-      # docs/DEAD_CODE_AUDIT.md third wave). Also — the archive writes to
-      # /data, which requires the persistent disk to have working write
-      # permissions; keeping it off avoids adding /data noise to the fix
-      # for the disk permission issue currently under investigation.
-      - key: LIQUID_OBSERVATION_ARCHIVE_ENABLED
-        value: "false"
-
-      # Verified MEXC new listings
-      - key: UNIFIED_LISTING_TOP_N
-        value: "5"
-      - key: UNIFIED_LISTING_MIN_SCORE
-        value: "52"
-      - key: UNIFIED_LISTING_MAX_CANDIDATES
-        value: "20"
-      - key: UNIFIED_LISTING_CANDIDATE_TTL_HOURS
-        value: "72"
-      - key: UNIFIED_LISTING_CONFIRMATION_SCANS
-        value: "2"
-      - key: UNIFIED_LISTING_MAX_DRAWDOWN_PCT
-        value: "-8"
-      - key: UNIFIED_LISTING_REQUIRE_OPEN_SPOT
-        value: "true"
-      - key: UNIFIED_LISTING_REQUIRE_SUPPLY_DATA
-        value: "true"
-      - key: UNIFIED_LISTING_SEEN_FILE
-        value: /data/mexc_seen_symbols.json
-      - key: UNIFIED_LISTING_CANDIDATE_FILE
-        value: /data/mexc_listing_candidates.json
-
-      # Internal enrichment only; no standalone Telegram menus
-      - key: UNIFIED_FUNDAMENTAL_RADAR_ENABLED
-        value: "true"
-      - key: UNIFIED_FUNDAMENTAL_CACHE_TTL_SECONDS
-        value: "1800"
-      - key: UNIFIED_FUNDAMENTAL_MAX_ASSETS
-        value: "100"
-      - key: UNIFIED_SOCIAL_RADAR_ENABLED
-        value: "true"
-      - key: UNIFIED_SOCIAL_REDDIT_ENABLED
-        value: "true"
-      - key: UNIFIED_SOCIAL_GDELT_ENABLED
-        value: "true"
-      - key: UNIFIED_SOCIAL_CACHE_TTL_SECONDS
-        value: "600"
-      - key: UNIFIED_SOCIAL_MAX_ASSETS
-        value: "6"
-      - key: UNIFIED_SOCIAL_WINDOW_HOURS
-        value: "6"
-      - key: UNIFIED_SOCIAL_MIN_MENTIONS
-        value: "4"
-      - key: UNIFIED_SOCIAL_MIN_UNIQUE_AUTHORS
-        value: "3"
-      - key: UNIFIED_SOCIAL_MIN_PLATFORMS
-        value: "1"
-      - key: UNIFIED_SOCIAL_MIN_SENTIMENT
-        value: "-10"

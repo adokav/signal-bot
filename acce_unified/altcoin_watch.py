@@ -1051,7 +1051,7 @@ def _retry_text(retry_at: int | None, now: int) -> str:
 
 def render(snapshot: Mapping[str, Any] | None, *, now: int, error: str | None = None, enabled: bool = True,
            max_age: int = 2 * REFRESH_SECONDS, retry_at: int | None = None, keyed: bool = True) -> str:
-    from .long_alerts import esc
+    from .text import esc
 
     head = "🔭 <b>ALTCOIN İZLEME · uzun vade (24–36 ay) · araştırma</b>"
     if not enabled:
@@ -1129,7 +1129,7 @@ def find(snapshot: Mapping[str, Any] | None, query: str) -> list[Mapping[str, An
 
 
 def render_card(card: Mapping[str, Any], *, now: int, generated_at: int | None = None) -> str:
-    from .long_alerts import _num, esc
+    from .text import _num, esc
 
     m, info = card.get("measures") or {}, card.get("info") or {}
     status = str(card.get("status"))

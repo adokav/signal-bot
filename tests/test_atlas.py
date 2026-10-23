@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("pandas")
 
-from trading.backtest import liquid_replay as lr
+from trading.backtest import market_data as mkt
 from trading.research import atlas
 
 
@@ -81,7 +81,7 @@ def test_monthly_market_rows_from_daily_candles():
         series[name] = _rows(list(100 * np.exp(np.cumsum(steps))), start)
     flat = [100.0] * 45 + [100_000.0] * 46                  # a 1000x swap after a 3-day hole
     series["SWAPUSDT"] = _rows(flat, start, gap=(42, 45))
-    market = lr.build_market({s: lr.rows_to_columns(r) for s, r in series.items()})
+    market = mkt.build_market({s: mkt.rows_to_columns(r) for s, r in series.items()})
     panel = atlas.build_panel([market], start=start, end=start + days * 86_400)
     members = list(series)
     rows = atlas.market_monthly(panel, {"2024-01": members, "2024-02": members, "2024-03": members})
@@ -105,7 +105,7 @@ def test_phases_group_consecutive_trend_states():
 
 
 def _market(series):
-    return lr.build_market({s: lr.rows_to_columns(r) for s, r in series.items()})
+    return mkt.build_market({s: mkt.rows_to_columns(r) for s, r in series.items()})
 
 
 def test_an_exchange_wide_halt_is_not_a_break_but_a_pair_hole_is():
