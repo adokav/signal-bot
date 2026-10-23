@@ -544,6 +544,8 @@ olur ve o coinin sinyali düşer (AGENTS.md §2).
 | BTC.D, toplam piyasa değeri | CoinGecko `/global` | Geçmişi ücretsiz değil → haftalık arşiv botta birikir; "düşüyor / yükseliyor" 4 haftalık arşivden, ondan önce BİLİNMİYOR |
 | Altcoin sezonu endeksi `ALT90` | İlk 50 altcoin (stabil, sarılı, stake türevleri hariç) içinde 90 günlük getirisi BTC'yi geçenlerin payı; CoinGecko `market_chart` (365 gün) | Blockchaincenter tanımının kendi hesabımız; `/coins/markets` 90 günlük değişim vermiyor |
 | Korku-açgözlülük | alternative.me | Yalnız gösterge; kuralda yok |
+| VIX (son kapanış) | FRED `VIXCLS` anahtarsız CSV | Yalnız bilgi (kullanıcı isteği 2026-10-23); rejim satırında; alınamazsa "?" ve not, karara ve sağlığa etkisi yok |
+| Perp primi: anlık (son / endeks − 1) ve 90 günlük ortalama (günlük kapanış / endeks kapanışı − 1) | MEXC `ticker` (lastPrice, indexPrice) ve `kline/index_price` Day1 | Yalnız bilgi; "vadeli > spot" sürekli hâliyle funding olarak ödenir ve `FUND90` kapı olarak kalır. Kohortta `PREM90` betimleyici (Binance `premiumIndexKlines`). |
 | Kapı durumu (arz, faaliyet, güvenlik, likidite) | `altcoin_watch` v2 anlık görüntüsü (`gates_of`), günlük | ❌ → sinyal yok (§5.1); kontrol yok ya da > 3 gün → BİLİNMİYOR → sinyal yok |
 
 ### 14.2 Haftalık karar
@@ -579,8 +581,8 @@ kapanışı). Kanal, D1 ailesinin haftalık analoğudur (§5.2):
 Sepet ve rapor sırası, koşul ve tetikleyiciler (durumuyla); fiyat (anlık,
 etiketli) ve haftalık karar fiyatı; fitil referansı üçlüsü ve en düşüğü;
 1× likidasyon fiyatı, `L_max`, marj koruma stop seviyesi (yalnız 1× üstü);
-`FUND90` ve birikmiş funding (pozisyon varsa); OI/pd ve perp/spot (iki
-kaynak, etiketli); kanal durumu ve 10 haftalık seviyeler; 2× / 4× seviyeleri
+`FUND90` ve birikmiş funding (pozisyon varsa); anlık ve 90 günlük perp primi
+(bilgi); OI/pd ve perp/spot (iki kaynak, etiketli); kanal durumu ve 10 haftalık seviyeler; 2× / 4× seviyeleri
 (funding düzeltmeli); raporun risk satırı (σ, medyan çarpan, 2× ve 0,5×
 dokunma, en kötü %5, likidite üst sınırı); "elle bakılacaklar". Altbilgi:
 "Gölge kayıt: emir yok, karar senin. KANIT YOK — ileri kayıt sürüyor."

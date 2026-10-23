@@ -69,7 +69,8 @@ DELIST_GRACE_DAYS = 7
 
 COIN_INDICATORS = ("R90", "RS90", "DIST_HIGH365", "DIST_LOW730", "VOL_TREND", "SIGMA90", "AGE", "WICK90",
                    "FLASH90", "R365", "VOL_RANK")
-PERP_INDICATORS = ("FUND90", "PWICK90", "PFLASH90")
+PERP_INDICATORS = ("FUND90", "PREM90", "PWICK90", "PFLASH90")
+MIN_PREMIUM_DAYS = 60                 # daily premium-index closes needed in the 90-day window
 MARKET_INDICATORS = ("BTC_TREND", "BTC_R90", "BTC_DIST_ATH", "BREADTH90", "BREADTH_POS", "STABLE_90", "FNG30",
                      "UNIVERSE_SIZE")
 MACRO_INDICATORS = ("REAL_10Y", "REAL_10Y_90", "NET_LIQ_90", "VIX", "NASDAQ_90")
@@ -94,7 +95,8 @@ BUCKETS: dict[str, Bucket] = {
     "DIST_LOW730": Bucket(0.50, 2.00), "VOL_TREND": Bucket(0.8, 1.25), "SIGMA90": Bucket(0.8, 1.3),
     "AGE": Bucket(180, 730), "WICK90": Bucket(-0.40, -0.20), "FLASH90": Bucket(-0.25, -0.10),
     "R365": Bucket(-0.50, 0.50), "VOL_RANK": Bucket(30, 90, reverse=True),
-    "FUND90": Bucket(0.0, 0.10), "PWICK90": Bucket(-0.40, -0.20), "PFLASH90": Bucket(-0.25, -0.10),
+    "FUND90": Bucket(0.0, 0.10), "PREM90": Bucket(-0.03, 0.03), "PWICK90": Bucket(-0.40, -0.20),
+    "PFLASH90": Bucket(-0.25, -0.10),
     "BTC_TREND": Bucket(0.5, 1.5), "BTC_R90": Bucket(-0.20, 0.20), "BTC_DIST_ATH": Bucket(-0.50, -0.20),
     "BREADTH90": Bucket(0.33, 0.66), "BREADTH_POS": Bucket(0.33, 0.66), "STABLE_90": Bucket(0.0, 0.05),
     "FNG30": Bucket(30, 60),
@@ -458,6 +460,16 @@ def funding_90(rates: Sequence[tuple[int, float]] | None, origin: int) -> float 
     return float(statistics.fmean(window) * 3 * 365) if len(window) >= 200 else None
 
 
+def premium_90(closes: Sequence[tuple[int, float]] | None, origin: int) -> float | None:
+    """Mean of the daily premium-index closes (perp mark over the index) in the 90 days before the origin,
+    in percent; unknown below MIN_PREMIUM_DAYS days. Descriptive: the sustained premium is paid as funding."""
+
+    if not closes:
+        return None
+    window = [v for d, v in closes if origin - 90 <= d < origin and math.isfinite(v)]
+    return float(statistics.fmean(window) * 100) if len(window) >= MIN_PREMIUM_DAYS else None
+
+
 def macro_features(monthly: Mapping[str, Mapping[str, Any]], daily: Mapping[str, Mapping[str, Any]],
                    origin: int) -> dict[str, float | None]:
     """Previous month-end values (descriptive) and the daily point-in-time rows at the origin."""
@@ -500,6 +512,7 @@ class Dataset:
     data_end_day: int
     perp: dict[str, Series] = field(default_factory=dict)          # keyed by spot symbol
     funding: dict[str, list[tuple[int, float]]] = field(default_factory=dict)
+    premium: dict[str, list[tuple[int, float]]] = field(default_factory=dict)   # day -> premium index close
     stablecoins: dict[int, float] = field(default_factory=dict)    # day -> total circulating USD
     fng: dict[int, float] = field(default_factory=dict)            # day -> index value
     macro_monthly: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -528,6 +541,7 @@ def build_cohort(data: Dataset, origin: int, kind: str) -> Cohort:
         feats["VOL_RANK"] = float(rank)
         perp = data.perp.get(symbol)
         perp_feats: dict[str, float | None] = {"FUND90": funding_90(data.funding.get(symbol), origin),
+                                               "PREM90": premium_90(data.premium.get(symbol), origin),
                                                "PWICK90": None, "PFLASH90": None}
         if perp is not None:
             plow = _window(perp, "low", origin - 90, origin)
@@ -956,6 +970,7 @@ STABLECOINS_URL = "https://stablecoins.llama.fi/stablecoincharts/all"
 FNG_URL = "https://api.alternative.me/fng/?limit=0&format=json"
 PERP_KLINES_PREFIX = "data/futures/um/monthly/klines/"
 PERP_FUNDING_PREFIX = "data/futures/um/monthly/fundingRate/"
+PERP_PREMIUM_PREFIX = "data/futures/um/monthly/premiumIndexKlines/"
 
 
 def _list_months(session, prefix: str) -> list[str]:
@@ -1005,6 +1020,45 @@ def _download_funding(session, perp: str, months: Sequence[str], *, decision_at:
         if text:
             out.extend((t, r) for t, r in parse_funding(text) if t <= decision_at)
     return sorted(set(out))
+
+
+def premium_url(perp: str, year: int, month: int) -> str:
+    from trading.data.binance_carry_universe import BASE_URL
+
+    return (f"{BASE_URL}/data/futures/um/monthly/premiumIndexKlines/{perp}/1d/"
+            f"{perp}-1d-{year:04d}-{month:02d}.zip")
+
+
+def parse_premium_csv(text: str, *, decision_at: int) -> list[tuple[int, float]]:
+    """(day, close) of the daily premium-index klines; the premium can be negative, so the kline parser's
+    price checks do not apply. Malformed rows are dropped; the forming day (close after decision) is not."""
+
+    from trading.data.binance_vision import epoch_seconds
+
+    out: list[tuple[int, float]] = []
+    for line in text.splitlines():
+        row = [c.strip() for c in line.split(",")]
+        if len(row) < 7 or not row[0].isdigit():
+            continue
+        try:
+            open_time, close_time, close = epoch_seconds(row[0]), epoch_seconds(row[6]), float(row[4])
+        except Exception:
+            continue
+        if math.isfinite(close) and abs(close) < 1 and open_time % DAY == 0 and close_time <= decision_at:
+            out.append((open_time // DAY, close))
+    return out
+
+
+def _download_premium(session, perp: str, months: Sequence[str], *, decision_at: int) -> list[tuple[int, float]]:
+    from trading.data.binance_carry_universe import _csv
+
+    out: dict[int, float] = {}
+    for ym in months:
+        year, month = (int(x) for x in ym.split("-"))
+        text = _csv(session, premium_url(perp, year, month), f"{perp} premium {ym}")
+        if text:
+            out.update(parse_premium_csv(text, decision_at=decision_at))
+    return sorted(out.items())
 
 
 def _write_rows(rows: Sequence[Sequence[Any]], columns: Sequence[str], path: Path) -> None:
@@ -1122,11 +1176,13 @@ def build(out_dir: Path, *, data_end: tuple[int, int] = DEFAULT_DATA_END, symbol
         months = _list_months(session, f"{bu.SPOT_KLINES_PREFIX}{symbol}/1d/")
         return symbol, _download_daily(session, "spot", symbol, months, decision_at=decision_at), months
 
-    def one_perp(perp: str) -> tuple[str, list[tuple], list[tuple[int, float]], list[str]]:
+    def one_perp(perp: str) -> tuple[str, list[tuple], list[tuple[int, float]], list[tuple[int, float]], list[str]]:
         months = _list_months(session, f"{PERP_KLINES_PREFIX}{perp}/1d/")
         rows = _download_daily(session, "futures/um", perp, months, decision_at=decision_at)
         fmonths = _list_months(session, f"{PERP_FUNDING_PREFIX}{perp}/")
-        return perp, rows, _download_funding(session, perp, fmonths, decision_at=decision_at), months
+        pmonths = _list_months(session, f"{PERP_PREMIUM_PREFIX}{perp}/1d/")
+        return (perp, rows, _download_funding(session, perp, fmonths, decision_at=decision_at),
+                _download_premium(session, perp, pmonths, decision_at=decision_at), months)
 
     manifest: dict[str, Any] = {"schema": SCHEMA, "data_end": f"{data_end[0]:04d}-{data_end[1]:02d}",
                                 "built_at": int(time.time()), "spot": {}, "perp": {}, "excluded": excluded,
@@ -1142,9 +1198,10 @@ def build(out_dir: Path, *, data_end: tuple[int, int] = DEFAULT_DATA_END, symbol
             manifest["spot"][symbol] = {"rows": len(rows), "months": months, "first_day": iso(rows[0][0]),
                                         "last_day": iso(rows[-1][0])}
             manifest["files"][f"spot/{symbol}.csv"] = _sha256(path)
-        for perp, rows, funding, months in pool.map(one_perp, sorted(spot_of_perp)):
+        for perp, rows, funding, premium, months in pool.map(one_perp, sorted(spot_of_perp)):
             spot = spot_of_perp[perp]
-            entry: dict[str, Any] = {"perp": perp, "rows": len(rows), "funding_rows": len(funding), "months": months}
+            entry: dict[str, Any] = {"perp": perp, "rows": len(rows), "funding_rows": len(funding),
+                                     "premium_rows": len(premium), "months": months}
             if rows:
                 path = out_dir / "perp" / f"{spot}.csv"
                 _write_rows(rows, columns, path)
@@ -1153,6 +1210,10 @@ def build(out_dir: Path, *, data_end: tuple[int, int] = DEFAULT_DATA_END, symbol
                 path = out_dir / "funding" / f"{spot}.csv"
                 _write_rows(funding, ("funding_time", "rate"), path)
                 manifest["files"][f"funding/{spot}.csv"] = _sha256(path)
+            if premium:
+                path = out_dir / "premium" / f"{spot}.csv"
+                _write_rows(premium, ("day", "premium_close"), path)
+                manifest["files"][f"premium/{spot}.csv"] = _sha256(path)
             manifest["perp"][spot] = entry
     stable = fetch_stablecoins(session)
     _write_rows(stable, ("day", "total_usd"), out_dir / "stablecoins.csv")
@@ -1193,6 +1254,9 @@ def load(data_dir: Path, *, atlas_dir: Path = REPO_ROOT / "research" / "atlas") 
         fpath = data_dir / "funding" / f"{spot}.csv"
         if fpath.exists():
             data.funding[spot] = [(int(r[0]), float(r[1])) for r in _read_rows(fpath)]
+        ppath = data_dir / "premium" / f"{spot}.csv"
+        if ppath.exists():
+            data.premium[spot] = [(int(r[0]), float(r[1])) for r in _read_rows(ppath)]
     for name, target in (("stablecoins.csv", data.stablecoins), ("fng.csv", data.fng)):
         path = data_dir / name
         if path.exists():

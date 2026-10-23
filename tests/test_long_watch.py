@@ -193,7 +193,14 @@ class FakeMexc:
         return {"contract_size": 1.0, "maintenance_margin": 0.004}
 
     def ticker(self, symbol):
-        return {"price": 130.0, "oi_contracts": 1000.0, "volume_usdt_24h": 5e6, "funding_rate": 0.0001}
+        return {"price": 130.0, "oi_contracts": 1000.0, "volume_usdt_24h": 5e6, "funding_rate": 0.0001,
+                "index_price": 129.87}
+
+    def index_daily(self, symbol, *, now):
+        if symbol in self.fail:
+            raise lw.LongDataError("mexc http 500")
+        # the index sits 0.1 % below every perp close: a +0.1 % premium
+        return {c.day0: c.close / 1.001 for c in self.daily(symbol, now=now)}
 
     def funding(self, symbol, *, since):
         return [(since + i * 8 * 3600, 0.0001) for i in range(270)]
@@ -248,10 +255,59 @@ def test_thousand_contracts_are_quoted_per_coin(tmp_path):
     assert "1000 coin kote eder" in lw.render_card(bonk, now=NOW)
 
 
-def _watch(tmp_path, mexc=None, gecko=None):
+def _watch(tmp_path, mexc=None, gecko=None, vix=lambda: {"value": 19.03, "date": "2026-10-22"}):
     reg = rg.load()
     ledger = Ledger(tmp_path / "long.jsonl")
-    return lw.LongWatch(reg, mexc or FakeMexc(), gecko or FakeGecko(), ledger), ledger
+    return lw.LongWatch(reg, mexc or FakeMexc(), gecko or FakeGecko(), ledger, vix=vix), ledger
+
+
+def test_vix_and_premium_are_information_never_conditions(tmp_path):
+    watch, _ = _watch(tmp_path)
+    snap = watch.refresh(NOW, gates=_gates())
+    assert snap["regime"]["vix"] == 19.03 and snap["regime"]["vix_date"] == "2026-10-22"
+    uni = lw.find(snap, "UNI")
+    assert uni["premium90"]["mean_pct"] == pytest.approx(0.1, rel=1e-3) and uni["premium90"]["days"] >= 60
+    assert uni["premium_now"] == pytest.approx(130 / 129.87 - 1)
+    assert uni["signal"] == lw.SLICE_2                                              # neither is a gate
+    text = lw.render(snap, now=NOW)
+    assert "VIX 19.0 (2026-10-22)" in text
+    card = lw.render_card(uni, now=NOW, snapshot=snap)
+    assert "Prim 90g      +0.100%" in card and "Prim şimdi" in card and "koşul değil" in card
+    # a failing VIX source or index series is a note, not an error: the snapshot stays complete
+    def broken():
+        raise lw.LongDataError("vix http 503")
+    watch, _ = _watch(tmp_path, vix=broken)
+    snap = watch.refresh(NOW, gates=_gates())
+    assert snap["regime"]["vix"] is None and "VIX alınamadı: vix http 503" in snap["regime"]["vix_note"]
+    assert lw.complete(snap) and "ℹ️ VIX alınamadı" in lw.render(snap, now=NOW) and "VIX ?" in lw.render(snap, now=NOW)
+    assert lw.find(snap, "UNI")["signal"] == lw.SLICE_2
+    no_vix, _ = _watch(tmp_path, vix=None)
+    assert no_vix.refresh(NOW, gates=_gates())["regime"]["vix"] is None
+
+
+def test_the_vix_csv_parser_takes_the_last_numeric_row_and_the_premium_needs_sixty_days():
+    assert lw.parse_vix_csv("observation_date,VIXCLS\n2026-10-21,16.68\n2026-10-22,.\n") == {"value": 16.68, "date": "2026-10-21"}
+    with pytest.raises(lw.LongDataError):
+        lw.parse_vix_csv("observation_date,VIXCLS\n2026-10-21,.\n")
+    candles = _candles(100)
+    index = {c.day0: c.close for c in candles}
+    assert lw.premium_90(candles, index, now=NOW)["mean"] == pytest.approx(0.0)
+    assert lw.premium_90(candles, {c.day0: c.close for c in candles[-30:]}, now=NOW)["mean"] is None   # 30 paired days
+
+    class Session:
+        def __init__(self, status=200, text="observation_date,VIXCLS\n2026-10-22,19.03\n", exc=None):
+            self.status_code, self.text, self.exc = status, text, exc
+
+        def get(self, url, timeout=None):
+            if self.exc:
+                raise self.exc
+            return self
+    assert lw.fetch_vix(session=Session()) == {"value": 19.03, "date": "2026-10-22"}
+    with pytest.raises(lw.LongDataError, match="http 500"):
+        lw.fetch_vix(session=Session(status=500))
+    with pytest.raises(lw.LongDataError) as info:
+        lw.fetch_vix(session=Session(exc=ConnectionError("https://fred.stlouisfed.org/x")))
+    assert "://" not in str(info.value)
 
 
 def _gates(now=NOW, **fails):

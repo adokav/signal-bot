@@ -40,7 +40,7 @@ sonuç emir yetkisi vermez (AGENTS.md §4).
 |---|---|---|
 | Evren | `data.binance.vision` spot aylık arşiv listesi, USDT çiftleri, delist edilenler dahil (`binance_universe.list_spot_symbols`) | Stabil, kaldıraçlı, sabitlenmiş tokenlar `binance_history_identity` kurallarıyla dışarıda. **Bilinen sembol göçlerinin iki ucu da dışarıda** (MATIC ve POL, LEND ve AAVE, RNDR ve RENDER…): eski sembol delist, yeni sembol genç varlık gibi okunurdu; birleştirmek göç başına dönüşüm oranı ister, kimlik listesinde yok. Liste eksik gelirse (300'den az USDT çifti, BTCUSDT yok, 150'den az perp) kurulum durur. Spot seçildi, çünkü perp arşivi 2020'de başlıyor; spot 2017-08'den iki tam döngü verir (§5). |
 | Spot günlük mumlar | Aylık `1d` kline dosyaları: açılış, en yüksek, en düşük, kapanış, quote hacmi; 2017-08 → veri sonu | Fiyat ve spot fitilleri. |
-| Perp katmanı (2020'den) | Perp'i olan çiftler için USDT-M `1d` kline ve aylık `fundingRate` dosyaları (`binance_carry_universe.map_perps_to_spot` eşlemesi; çarpanlı kontratlar oranla) | **Yalnız betimleyici:** perp fitil derinliği ve funding. Keşif penceresinde yok ya da eksik (§5), aday olamaz. |
+| Perp katmanı (2020'den) | Perp'i olan çiftler için USDT-M `1d` kline, aylık `fundingRate` ve `premiumIndexKlines` 1d dosyaları (`binance_carry_universe.map_perps_to_spot` eşlemesi; çarpanlı kontratlar oranla) | **Yalnız betimleyici:** perp fitil derinliği ve funding. Keşif penceresinde yok ya da eksik (§5), aday olamaz. |
 | BTC trend geçmişi | BTCUSDT spot günlük mumlar, 2017-08'den | Betimleyici piyasa katmanı. |
 | Stablecoin arzı | DefiLlama `stablecoincharts/all` (günlük toplam) | **Güncel sürüm** (geçmiş revize edilebilir): yalnız betimleyici, aday olamaz. |
 | Korku-Açgözlülük | alternative.me, günlük, 2018-02'den | Revize edilmez; yine de piyasa katmanı betimleyicidir (§6.3). |
@@ -99,6 +99,7 @@ sıfır sayılmaz.
 | # | Gösterge | Tanım |
 |---|---|---|
 | D1 | `FUND90` | Son 90 günün ortalama funding oranı × 3 × 365 (yıllık %) |
+| D1b | `PREM90` | Son 90 günün günlük prim endeksi kapanışlarının ortalaması (perp işaret fiyatı / endeks − 1, %); en az 60 gün; Binance `premiumIndexKlines` 1d. Kovalar −0,03 / +0,03 (önceden sabitlendi, kullanıcı isteği 2026-10-23: "vadeli > spot"). Sürekli prim funding olarak ödenir; bu gösterge anlık bazın ortalamasıdır. |
 | D2 | `PWICK90`, `PFLASH90` | C8 ve C9'un perp dipleriyle hesaplanmış hâli |
 | D3 | `PWICK_MIN`, `PFLASH_MAX` | Pencerede perp dipleriyle `WICK_MIN` ve `FLASH_MAX` |
 
