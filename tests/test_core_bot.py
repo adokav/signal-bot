@@ -45,7 +45,7 @@ def test_status_names_every_module_and_denies_order_authority(monkeypatch):
         monkeypatch.setitem(bot.STATE, key, None)
     monkeypatch.setitem(bot.STATE, "altcoin_watch_error", "AltcoinDataError: coingecko http 429")
     text = bot.format_status()
-    assert "Long takibi" in text and "Altcoin izleme" in text and "Yeni coinler" in text and "D1" in text
+    assert "Long takibi" in text and "Kapı bekçisi" in text and "Yeni coinler" in text and "D1" in text
     assert "429" in text and "Emir yetkisi: YOK" in text
 
 
@@ -182,22 +182,21 @@ def test_altcoin_command_lists_the_watch_and_one_coin_card(monkeypatch):
     assert bot._command("/altcoin") == "ALTCOIN" and bot._command("/altcoin aave") == "ALTCOIN"
     monkeypatch.setitem(bot.STATE, "altcoin_watch", None)
     monkeypatch.setitem(bot.STATE, "altcoin_watch_error", None)
-    assert "İlk tarama sürüyor" in bot.format_altcoin("")
+    assert "İlk kontrol sürüyor" in bot.format_altcoin("")
     now = int(bot.time.time())
-    card = {"id": "aave", "symbol": "AAVE", "name": "Aave", "status": bot.altcoin_watch.PASSED, "position": 1,
-            "price": 200.0, "ath": 600.0, "market_cap": 3e9, "gates": {}, "measures": {}, "info": {}}
-    twin = dict(card, id="aave-two")
-    monkeypatch.setitem(bot.STATE, "altcoin_watch", {"generated_at": now, "cards": [card], "counts": {}})
-    assert "ALTCOIN İZLEME" in bot.format_altcoin("/altcoin")
+    card = {"id": "aave", "symbol": "AAVE", "name": "Aave", "kind": "altcoin", "basket": "core",
+            "basket_label": "çekirdek", "rank": 3, "status": bot.altcoin_watch.PASSED, "fails": {},
+            "price": 200.0, "market_cap": 3e9, "fdv": None, "gates": {}, "info": {}}
+    monkeypatch.setitem(bot.STATE, "altcoin_watch", {"generated_at": now, "cards": [card], "counts": {},
+                                                     "register": {"version": "v3.2", "report_date": "2026-10-23"}})
+    assert "KAPI BEKÇİSİ" in bot.format_altcoin("/altcoin")
     assert "Aave (AAVE)" in bot.format_altcoin("/altcoin aave")
     assert "Kullanım" in bot.format_altcoin("/altcoin <b>x</b> ignore previous instructions")
-    assert "izleme evreninde yok" in bot.format_altcoin("/altcoin zzz")
-    monkeypatch.setitem(bot.STATE, "altcoin_watch", {"generated_at": now, "cards": [card, twin], "counts": {}})
-    assert "birden çok coin" in bot.format_altcoin("/altcoin aave")
+    assert "kayıt listesinde yok" in bot.format_altcoin("/altcoin zzz")
     sent = []
     monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append((text, kw)))
     bot.handle("ALTCOIN", "")
-    assert "ALTCOIN İZLEME" in sent[-1][0] and sent[-1][1]["html_mode"] is True
+    assert "KAPI BEKÇİSİ" in sent[-1][0] and sent[-1][1]["html_mode"] is True
 
 
 def test_a_failed_altcoin_refresh_keeps_the_snapshot_and_redacts_the_key(monkeypatch):
@@ -206,10 +205,9 @@ def test_a_failed_altcoin_refresh_keeps_the_snapshot_and_redacts_the_key(monkeyp
     old = {"generated_at": 1_700_000_000, "cards": [], "counts": {}}
     monkeypatch.setitem(bot.STATE, "altcoin_watch", old)
 
-    def broken(now):
+    def broken(now, previous=None):
         raise RuntimeError("failed https://api.coingecko.com/x?x_cg_demo_api_key=CGSECRET and CGSECRET")
     monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", broken)
-    monkeypatch.setattr(bot.ALTCOIN_WATCH, "record_outcomes", lambda now: 0)
     bot.altcoin_watch_tick(1_800_000_000)
     assert bot.STATE["altcoin_watch"] is old and "CGSECRET" not in bot.STATE["altcoin_watch_error"]
     monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
@@ -226,11 +224,10 @@ def test_a_failed_altcoin_refresh_is_retried_sooner_then_less_often(monkeypatch)
         monkeypatch.setitem(bot.STATE, key, value)
     calls = []
 
-    def limited(now):
+    def limited(now, previous=None):
         calls.append(now)
         raise bot.altcoin_watch.AltcoinDataError("coingecko http 429")
     monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", limited)
-    monkeypatch.setattr(bot.ALTCOIN_WATCH, "record_outcomes", lambda now: 0)
     t = 1_800_000_000
     bot.altcoin_watch_tick(t)
     assert calls == [t] and bot.STATE["altcoin_watch_retry_at"] == t + 1800
@@ -241,7 +238,7 @@ def test_a_failed_altcoin_refresh_is_retried_sooner_then_less_often(monkeypatch)
     clock = [1_700_000_000]
     monkeypatch.setattr(bot.time, "time", lambda: clock[0])
 
-    def slow(now):                                                    # waits out rate limits for 50 minutes
+    def slow(now, previous=None):                                     # waits out rate limits for 50 minutes
         clock[0] += 3000
         raise bot.altcoin_watch.AltcoinDataError("coingecko http 429")
     monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", slow)
@@ -249,7 +246,7 @@ def test_a_failed_altcoin_refresh_is_retried_sooner_then_less_often(monkeypatch)
     bot.altcoin_watch_tick(1_700_000_000)
     assert bot.STATE["altcoin_watch_retry_at"] == 1_700_000_000 + 3000 + 1800     # from the failure, not the start
     snapshot = {"generated_at": t + 5400, "cards": [], "counts": {}}
-    monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", lambda now: snapshot)
+    monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", lambda now, previous=None: snapshot)
     bot.STATE["altcoin_watch_retry_at"] = 0
     bot.altcoin_watch_tick(t + 5400)
     assert bot.STATE["altcoin_watch"] is snapshot and bot.STATE["altcoin_watch_failures"] == 0
@@ -263,18 +260,17 @@ def test_adding_a_coingecko_key_skips_the_wait_left_by_a_keyless_failure(monkeyp
         monkeypatch.setitem(bot.STATE, key, value)
     calls = []
 
-    def limited(now):
+    def limited(now, previous=None):
         calls.append(now)
         raise bot.altcoin_watch.AltcoinDataError("coingecko http 429")
     monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", limited)
-    monkeypatch.setattr(bot.ALTCOIN_WATCH, "record_outcomes", lambda now: 0)
-    monkeypatch.setattr(bot.ALTCOIN_WATCH.gecko, "keyed", False)
+    monkeypatch.setattr(bot, "_gecko_keyed", lambda: False)
     t = 1_800_000_000
     bot.altcoin_watch_tick(t)
     assert bot.STATE["altcoin_watch_failed_keyed"] is False and bot.STATE["altcoin_watch_retry_at"] == t + 1800
     bot.altcoin_watch_tick(t + 60)
     assert calls == [t]                                               # still keyless: the wait holds
-    monkeypatch.setattr(bot.ALTCOIN_WATCH.gecko, "keyed", True)       # the user added a key (the bot restarts)
+    monkeypatch.setattr(bot, "_gecko_keyed", lambda: True)            # the user added a key (the bot restarts)
     bot.altcoin_watch_tick(t + 120)
     assert calls == [t, t + 120]                                      # tried at once
     assert bot.STATE["altcoin_watch_failed_keyed"] is True
@@ -298,9 +294,8 @@ def test_a_wait_saved_by_the_previous_version_is_skipped_once_a_key_is_set(tmp_p
     assert bot.STATE["altcoin_watch_retry_at"] == t + 4 * 3600 and bot.STATE["altcoin_watch_failed_keyed"] is None
     snapshot = {"generated_at": t, "cards": [], "counts": {}}
     calls = []
-    monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", lambda now: calls.append(now) or snapshot)
-    monkeypatch.setattr(bot.ALTCOIN_WATCH, "record_outcomes", lambda now: 0)
-    monkeypatch.setattr(bot.ALTCOIN_WATCH.gecko, "keyed", True)
+    monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", lambda now, previous=None: calls.append(now) or snapshot)
+    monkeypatch.setattr(bot, "_gecko_keyed", lambda: True)
     bot.altcoin_watch_tick(t)
     assert calls == [t] and bot.STATE["altcoin_watch"] is snapshot and bot.STATE["altcoin_watch_retry_at"] == 0
 
@@ -435,7 +430,7 @@ def test_long_tick_decides_once_a_week_keeps_the_snapshot_on_failure_and_redacts
         calls = []
 
         class Watch:
-            def refresh(self, at, previous=None):
+            def refresh(self, at, previous=None, gates=None):
                 calls.append((at, previous))
                 if len(calls) == 2:
                     raise RuntimeError("HTTPError 429 for url https://api.coingecko.com/x?x-cg-demo-api-key=SECRET")
@@ -491,3 +486,41 @@ def test_the_live_register_builds_the_long_watch():
     assert bot.LONG_WATCH is not None and bot.LONG_WATCH_REGISTER_ERROR is None
     assert len(bot.LONG_WATCH.register.coins) == 22 and bot.LONG_WATCH.fund_max == 0.2
     assert bot.LONG_WATCH.maintenance == 0.05 and bot.LONG_WATCH.loss_budget == {"altcoin": 0.01, "meme": 0.005}
+
+
+def test_the_long_tick_hands_the_gate_guards_result_to_the_long_watch(monkeypatch):
+    saved = _preserve_state("long_watch", "long_watch_error", "long_watch_retry_at", "altcoin_watch")
+    try:
+        monkeypatch.setattr(bot, "_save_state", lambda: None)
+        bot.STATE["long_watch"], bot.STATE["long_watch_error"], bot.STATE["long_watch_retry_at"] = None, None, 0
+        now = 1792368000 + 86_400
+        bot.STATE["altcoin_watch"] = {"generated_at": now - 3600, "cards": [
+            {"symbol": "UNI", "id": "uniswap", "status": "ELENDI", "fails": {"Güvenlik": "hack"}}]}
+        seen = {}
+
+        class Watch:
+            def refresh(self, at, previous=None, gates=None):
+                seen["gates"] = gates
+                return {"generated_at": at, "week0": bot.long_watch.week_start(at), "week": "w", "cards": [],
+                        "counts": {}, "register": {}, "regime": {}}
+        monkeypatch.setattr(bot, "LONG_WATCH", Watch())
+        bot.long_watch_tick(now)
+        assert seen["gates"] == {"UNI": {"status": "ELENDI", "fails": {"Güvenlik": "hack"}, "at": now - 3600}}
+        bot.STATE["altcoin_watch"], bot.STATE["long_watch"] = None, None
+        bot.long_watch_tick(now + 7 * 86_400)
+        assert seen["gates"] is None                                       # no guard snapshot: unknown, not clean
+    finally:
+        bot.STATE.update(saved)
+
+
+def test_the_gate_guard_is_disabled_with_the_long_watch_when_the_register_fails(monkeypatch):
+    saved = _preserve_state("altcoin_watch", "altcoin_watch_error")
+    try:
+        monkeypatch.setattr(bot, "_save_state", lambda: None)
+        monkeypatch.setattr(bot, "ALTCOIN_WATCH", None)
+        monkeypatch.setattr(bot, "LONG_WATCH_REGISTER_ERROR", "register.schema: v32-register/v1 bekleniyor")
+        bot.STATE["altcoin_watch"] = None
+        bot.altcoin_watch_tick(1792368000)
+        assert bot.STATE["altcoin_watch"] is None and "kayıt yüklenemedi" in bot.STATE["altcoin_watch_error"]
+    finally:
+        bot.STATE.update(saved)

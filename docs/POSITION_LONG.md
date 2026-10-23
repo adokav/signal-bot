@@ -228,6 +228,8 @@ Kapılar pozisyon açıkken de kontrol edilir. Bir kapı ❌ olursa pozisyon **b
 
 Çıkış, tetiğin doğru olmasını ister, fiyatın düşmüş olmasını değil. Bir coin %300 yükselmişken hack olursa da çıkılır.
 
+**Uygulama (2026-10-23):** hack, kontrat, likidite ve faaliyet satırlarını kapı bekçisi (`acce_unified/altcoin_watch.py` v2, günlük) üretir; `/long` haftalık kararda `gate_verdict` ile okur: hack/kontrat/faaliyet ❌ hemen, likidite ❌ iki ardışık kararda sinyali keser; kontrol yoksa ya da 3 günden eskiyse "kapı kontrolü bilinmiyor". Açık pozisyonun kapatılması pozisyon defteriyle (§8.2) gelir.
+
 ### 5.2 Trend-durumu çıkışı — fiyata bağlı tek kural
 
 v3.2'de fiyat tabanlı çıkış tanımlı değildir. Bu depoda tek kanıtlı çıkış ailesi D1'dir: günlük kapanış, önceki 10 günlük kapanışın en düşüğünün altına inince çık; majörlerde iki bağımsız testte düşüşü al-tut'un yarısının altında tuttu, getiri kanıtı yok. Pozisyon ufkunda aynı aile **haftalık ölçekte** uygulanır:
@@ -371,7 +373,7 @@ Doğrulandı (2026-10-23, ücretsiz, anahtarsız): CoinGecko `global` (BTC.D), m
 | `bot.py` | 1.260 → ~650 | Küçülür | `/tactical`, `/longs`, `/radar`, tarayıcı döngüleri, radar kaydı, ileri kayıt gider |
 | `acce_unified/new_coins.py` `/new` tarayıcısı (CMC yeni coinler, 72 saatlik pencere, defter, trial) | ~600 | **Bu dalgada kaldı; karar bekliyor** | v3.2 meme evreni 18 aydan genç coini zaten eler (M1); kaldırılırsa trial `b57b9eb0a6073085` ABANDONED olur. `SecurityProviders`, kimlik referansı ve `/check` her durumda **kalır** (G4, K6, M2). |
 | `acce_unified/trend_loop.py`, `/d1` | 827 | **Kaldı (karar bekliyor; öneri: kalsın)** | Depodaki tek kanıtlı çıkış ailesi; canlı gölge kaydı 2026-10-02'de kullanıcı onayıyla başladı; `Ledger` sınıfı yeni deftere de hizmet eder. |
-| `acce_unified/altcoin_watch.py` | 1.206 | **Daralır** | 150 coinlik tarama, sıralama ve ölçütler kalkar; DefiLlama hack/ücret, kontrat ve hacim sağlayıcıları yalnız kayıt coinlerinde §5.1 tez geçersizliği kontrolü için çalışır. Trial `b6e0fec86714efc2` dürüstçe kapatılır (SUPERSEDED). |
+| `acce_unified/altcoin_watch.py` | 1.206 → ~750 | **Daraltıldı (v2)** | 150 coinlik tarama, sıralama, ölçütler ve kohort kaydı kalktı; dört kapı yalnız kayıt coinlerinde günlük çalışır ve `/long`'a tez geçersizliği girdisi verir (§5.1). Trial `b6e0fec86714efc2` SUPERSEDED (`docs/ALTCOIN_WATCH.md`). |
 | `trading/risk/*`, `trading/research/*`, `trading/data/*`, `trading/backtest/{trade_loop, majors_signals, walk_forward, benchmark, cost_model, carry_replay, carry_audit, listing_replay, atlas}` ve dossier'ları | ~9.000 | Kalır, ikinci dalga kararı | Botta çalışmaz; §8.1 testi `trade_loop` ve `majors_signals` altyapısını kullanır. Kapanmış çalışmalar (carry, listing, TSMOM, atlas) yeni sistem çalışır hale gelince ayrı kararla elenir. |
 
 Toplam: ≈ 44.600 satırdan ≈ 20.000 satır gider. `render.yaml`'dan `UNIFIED_*`, `LIQUID_*`, `TACTICAL_*` ayarları; `README.md`, `docs/DEAD_CODE_AUDIT.md`, `docs/EVOLUTION_ROADMAP.md` güncellenir. Silinen her modülün son commit'i ilgili rapora yazılır; git geçmişi tam kalır.
@@ -385,7 +387,7 @@ Toplam: ≈ 44.600 satırdan ≈ 20.000 satır gider. `render.yaml`'dan `UNIFIED
 | A ✅ | Temizlik (§10) | Küçük bot: `/long` henüz yok; `/altcoin`, `/new`, `/check`, `/d1`, `/status` çalışır. Trial kayıtları değişmedi. |
 | B | Haftalık D1 analoğu majör testi (§8.1) | Ön-kayıt → workflow → tek koşu → rapor. §5.2'nin kaderi belli olur. |
 | C ✅ | **Kayıt** (raporun listesi, `acce_unified/register.py`) + `acce_unified/long_watch.py`: MEXC vadeli veri katmanı (fitil dipleri, funding, OI, sürdürme marjı), CoinGecko (piyasa, toplu OI, BTC.D, ALT90), haftalık kanal, rejim K0, `/long`, `/long <sembol>`, karar defteri | Liste coinleri kartta: sepet, fitil referansı, likidasyon fiyatı, L_max, funding, OI/pd, kanal, eksik koşullar; haftalık BTC.D arşivi birikmeye başlar (yön 4 hafta sonra). |
-| D | `/altcoin` daraltma: tarama kalkar, kapı bekçisi yalnız kayıt coinlerinde (§5.1) | `b6e0fec86714efc2` SUPERSEDED. ~~Seçim motoru v2~~ iptal (§0 düzeltmesi). |
+| D ✅ | `/altcoin` daraltma: tarama kalktı, kapı bekçisi yalnız kayıt coinlerinde, günlük; `gates_of` → `long_watch.gate_verdict` (§5.1 histerezisiyle) | `b6e0fec86714efc2` SUPERSEDED. ~~Seçim motoru v2~~ iptal (§0 düzeltmesi). |
 | E | Pozisyon planı, çıkışlar, defter, bildirimler; ileri kayıt ön-kaydı (§8.2) | İlk karar haftası; gölge kayıt başlar. |
 
 Her PR Codex incelemesinden geçer; kanıt dosyaları ve parmak izleri mevcut
@@ -542,6 +544,7 @@ olur ve o coinin sinyali düşer (AGENTS.md §2).
 | BTC.D, toplam piyasa değeri | CoinGecko `/global` | Geçmişi ücretsiz değil → haftalık arşiv botta birikir; "düşüyor / yükseliyor" 4 haftalık arşivden, ondan önce BİLİNMİYOR |
 | Altcoin sezonu endeksi `ALT90` | İlk 50 altcoin (stabil, sarılı, stake türevleri hariç) içinde 90 günlük getirisi BTC'yi geçenlerin payı; CoinGecko `market_chart` (365 gün) | Blockchaincenter tanımının kendi hesabımız; `/coins/markets` 90 günlük değişim vermiyor |
 | Korku-açgözlülük | alternative.me | Yalnız gösterge; kuralda yok |
+| Kapı durumu (arz, faaliyet, güvenlik, likidite) | `altcoin_watch` v2 anlık görüntüsü (`gates_of`), günlük | ❌ → sinyal yok (§5.1); kontrol yok ya da > 3 gün → BİLİNMİYOR → sinyal yok |
 
 ### 14.2 Haftalık karar
 
@@ -596,6 +599,7 @@ dokunma, en kötü %5, likidite üst sınırı); "elle bakılacaklar". Altbilgi:
 | Kayıt 180 günden eski | ⚠️ "kayıt bayat", hiçbir coine yeni dilim; yeni rapor sürümü PR ile |
 | BTC.D arşivi < 4 hafta | rejim yönü BİLİNMİYOR → dilim yok |
 | CoinGecko hatası | ilgili satırlar BİLİNMİYOR; önceki karar yaşıyla gösterilir |
+| Kapı kontrolü yok ya da 3 günden eski | "kapı kontrolü bilinmiyor" → sinyal yok |
 | Herhangi bir seri başarısız | anlık görüntü "eksik" sayılır: `/` sağlık kontrolü tazelikle birlikte eksiksizliği ister |
 
 ### 14.6 Durum ve ayarlar

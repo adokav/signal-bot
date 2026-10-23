@@ -254,9 +254,48 @@ def _watch(tmp_path, mexc=None, gecko=None):
     return lw.LongWatch(reg, mexc or FakeMexc(), gecko or FakeGecko(), ledger), ledger
 
 
+def _gates(now=NOW, **fails):
+    """A clean gate check for every register coin, with the given symbols' ❌ gates."""
+
+    return {c.symbol: {"status": "ELENDI" if c.symbol in fails else "KAPILARI_GECTI",
+                       "fails": fails.get(c.symbol, {}), "at": now} for c in rg.load().coins}
+
+
+def test_the_gate_guard_blocks_hard_fails_at_once_and_liquidity_after_two_decisions(tmp_path):
+    watch, _ = _watch(tmp_path)
+    clean = watch.refresh(NOW, gates=_gates())
+    uni = lw.find(clean, "UNI")
+    assert uni["signal"] == lw.SLICE_2 and uni["gate"]["known"] and uni["gate"]["block"] is None
+    hacked = watch.refresh(NOW + 7 * DAY, previous=clean, gates=_gates(NOW + 7 * DAY, UNI={"Güvenlik": "son 180 günde hack: $2,000,000 kayıp"}))
+    uni = lw.find(hacked, "UNI")
+    assert uni["signal"] is None and any(m.startswith("kapı ❌: son 180 günde hack") for m in uni["missing"])
+    assert lw.find(hacked, "PEPE")["gate"]["block"] is None                 # the other coins are untouched
+    thin = watch.refresh(NOW + 14 * DAY, previous=hacked, gates=_gates(NOW + 14 * DAY, UNI={"Likidite": "30 günlük medyan hacim $8.0M"}))
+    uni = lw.find(thin, "UNI")
+    assert uni["signal"] == lw.SLICE_2 and uni["gate"]["warning"].startswith("likidite ❌ ilk karar")
+    assert any(e.startswith("likidite ❌ ilk karar") for e in uni["errors"]) and not lw.complete(thin)
+    still = watch.refresh(NOW + 21 * DAY, previous=thin, gates=_gates(NOW + 21 * DAY, UNI={"Likidite": "30 günlük medyan hacim $7.0M"}))
+    uni = lw.find(still, "UNI")
+    assert uni["signal"] is None and any("iki ardışık karar" in m for m in uni["missing"])
+    assert "Kapılar" in lw.render_card(uni, now=NOW + 21 * DAY) and "❌" in lw.render_card(uni, now=NOW + 21 * DAY)
+
+
+def test_missing_or_stale_gate_checks_are_unknown_and_block(tmp_path):
+    watch, _ = _watch(tmp_path)
+    none = watch.refresh(NOW)                                                  # no altcoin_watch snapshot at all
+    assert all("kapı kontrolü bilinmiyor" in c["missing"] and c["signal"] is None for c in none["cards"])
+    assert any(e.startswith("kapı kontrolü yok") for e in none["errors"]) and not lw.complete(none)
+    stale = watch.refresh(NOW, gates=_gates(NOW - 4 * DAY))                    # older than GATES_MAX_AGE
+    assert all("kapı kontrolü bilinmiyor" in c["missing"] for c in stale["cards"])
+    partial = watch.refresh(NOW, gates={"UNI": {"status": "KAPILARI_GECTI", "fails": {}, "at": NOW}})
+    assert lw.find(partial, "UNI")["signal"] == lw.SLICE_2 and "kapı kontrolü bilinmiyor" in lw.find(partial, "PEPE")["missing"]
+    assert "bilinmiyor" in lw.render_card(lw.find(partial, "PEPE"), now=NOW)
+    assert lw.gate_verdict({"status": "x", "fails": {"Faaliyet": "ücret yok"}, "at": NOW}, now=NOW, previous=None)["block"].startswith("kapı ❌: ücret yok")
+
+
 def test_a_refresh_evaluates_every_coin_and_records_each_decision_once(tmp_path):
     watch, ledger = _watch(tmp_path)
-    snap = watch.refresh(NOW)
+    snap = watch.refresh(NOW, gates=_gates())
     assert snap["can_authorize_trade"] is False and snap["trial"] is None and snap["week"] == "2026-10-19"
     assert snap["regime"]["slice"] == lw.SLICE_2                                  # BTC.D 54 < 55 needs no history
     cards = {c["symbol"]: c for c in snap["cards"]}
@@ -333,7 +372,7 @@ def test_an_incomplete_derivative_sum_or_an_unknown_margin_blocks_the_signal(tmp
             return super().detail(symbol)
 
     watch, _ = _watch(tmp_path, mexc=Mexc(), gecko=Gecko())
-    snap = watch.refresh(NOW)
+    snap = watch.refresh(NOW, gates=_gates())
     uni = lw.find(snap, "UNI")
     assert uni["buildup"] is None and uni["oi_mcap"] is None and uni["signal"] is None
     assert "OI/hacim bilinmiyor" in uni["missing"] and any(e.startswith("türev") for e in uni["errors"])
@@ -358,7 +397,7 @@ def test_a_stale_register_warns_and_gives_no_new_slice(tmp_path):
     assert all(c["signal"] is None and any(m.startswith("kayıt bayat") for m in c["missing"]) for c in snap["cards"])
     assert any(e.startswith("kayıt bayat") for e in snap["errors"]) and not lw.complete(snap)
     assert "Kayıt bayat" in lw.render(snap, now=NOW)
-    fresh_snap = lw.LongWatch(rg.load(), FakeMexc(), FakeGecko(), Ledger(tmp_path / "fresh.jsonl")).refresh(NOW)
+    fresh_snap = lw.LongWatch(rg.load(), FakeMexc(), FakeGecko(), Ledger(tmp_path / "fresh.jsonl")).refresh(NOW, gates=_gates())
     assert fresh_snap["register"]["stale"] is False and lw.complete(fresh_snap)
     assert lw.complete(None) is False and lw.complete({"cards": []}) is False
     assert lw.complete({"cards": [{"errors": ["x"]}], "errors": []}) is False

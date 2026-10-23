@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from . import register as rg
-from .altcoin_watch import AltcoinDataError, CoinGecko
+from .altcoin_watch import LIQUIDITY as LIQUIDITY_GATE, AltcoinDataError, CoinGecko
 from .cex import is_stable_or_synthetic
 from .text import _num, esc
 
@@ -68,6 +68,7 @@ SIGMA_TARGET = 0.9
 DERIVATIVE_MARKETS = ("Binance (Futures)", "Bybit (Futures)", "OKX (Futures)", "Bitget Futures", "Gate (Futures)",
                       "Hyperliquid (Futures)", "MEXC (Futures)", "KuCoin Futures", "HTX Futures")
 REGISTER_MAX_AGE_DAYS = 180        # an older report is stale: shown with a warning, no new slice (§3.5)
+GATES_MAX_AGE = 3 * DAY            # a gate check (altcoin_watch) older than this is unknown: no slice
 UNKNOWN = "BİLİNMİYOR"
 SLICE_1, SLICE_2, REDUCE, WAIT = "DİLİM 1", "DİLİM 2", "AZALT", "BEKLE"
 UP, DOWN = "YUKARI", "AŞAĞI"
@@ -314,6 +315,30 @@ def regime(*, btc_d: float | None, btc_d_then: float | None, alt90: float | None
     return out
 
 
+def gate_verdict(gate: Mapping[str, Any] | None, *, now: int,
+                 previous: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The gate guard's result for one coin (altcoin_watch.gates_of) read as thesis invalidation (§5.1).
+
+    A hack, contract or activity ❌ blocks at once. A liquidity ❌ blocks only when the previous weekly
+    decision also saw it (two consecutive checks; the first is a warning). No check, or one older than
+    GATES_MAX_AGE, is unknown and blocks as unknown. ❔ never blocks: the report evaluated those by hand."""
+
+    if gate is None or now - int(gate.get("at") or 0) > GATES_MAX_AGE:
+        return {"known": False, "block": None, "warning": None, "status": None, "fails": {}, "at": None}
+    fails = {str(k): str(v) for k, v in (gate.get("fails") or {}).items()}
+    out = {"known": True, "block": None, "warning": None, "status": gate.get("status"), "fails": fails,
+           "at": int(gate.get("at") or 0)}
+    hard = {g: r for g, r in fails.items() if g != LIQUIDITY_GATE}
+    if hard:
+        out["block"] = "kapı ❌: " + "; ".join(hard.values())
+    elif LIQUIDITY_GATE in fails:
+        if LIQUIDITY_GATE in ((previous or {}).get("fails") or {}):
+            out["block"] = f"kapı ❌: {fails[LIQUIDITY_GATE]} (iki ardışık karar)"
+        else:
+            out["warning"] = f"likidite ❌ ilk karar: {fails[LIQUIDITY_GATE]}"
+    return out
+
+
 def position_share(kind: str, sigma: float | None, *, loss_budget: Mapping[str, float]) -> float | None:
     """Share of capital: loss budget ÷ 0,8, scaled by min(1, 0,9/σ) (§4.2). Unknown σ → unknown share."""
 
@@ -325,12 +350,17 @@ def position_share(kind: str, sigma: float | None, *, loss_budget: Mapping[str, 
 
 def evaluate(coin: rg.Coin, *, regime_slice: str | None, channel_state: str | None, worst: float | None,
              l_max: float | None, fund_annual: float | None, buildup: bool | None,
-             fund_max: float = FUND_MAX, margin_known: bool = True, register_age_days: int = 0) -> dict[str, Any]:
+             fund_max: float = FUND_MAX, margin_known: bool = True, register_age_days: int = 0,
+             gate_known: bool = True, gate_block: str | None = None) -> dict[str, Any]:
     """Every condition of §14.3 at once; the missing ones are named. ``signal`` is None unless all hold."""
 
     missing: list[str] = []
     if register_age_days > REGISTER_MAX_AGE_DAYS:
         missing.append(f"kayıt bayat ({register_age_days} gün > {REGISTER_MAX_AGE_DAYS})")
+    if not gate_known:
+        missing.append("kapı kontrolü bilinmiyor")
+    elif gate_block:
+        missing.append(gate_block)
     if coin.basket != rg.CORE:
         missing.append(f"sepet {coin.basket_label}")
     if coin.condition:
@@ -608,7 +638,8 @@ class LongWatch:
     # -- one coin -----------------------------------------------------------
 
     def _coin(self, coin: rg.Coin, *, now: int, market: Mapping[str, Any] | None, deriv: Mapping[str, Any] | None,
-              deriv_ok: bool, regime_slice: str | None, register_age_days: int = 0) -> dict[str, Any]:
+              deriv_ok: bool, regime_slice: str | None, register_age_days: int = 0,
+              gate: Mapping[str, Any] | None = None, previous_gate: Mapping[str, Any] | None = None) -> dict[str, Any]:
         card: dict[str, Any] = {"symbol": coin.symbol, "name": coin.name, "kind": coin.kind, "gecko_id": coin.gecko_id,
                                 "basket": coin.basket, "basket_label": coin.basket_label, "condition": coin.condition,
                                 "rank": coin.rank, "venue": VENUE, "venue_symbol": coin.mexc_symbol,
@@ -671,9 +702,11 @@ class LongWatch:
                                  thresholds=thresholds)
         l_max = max_leverage(wick["worst"], maintenance=maintenance) if margin_known else None
         ref = wick["reference_price"]
+        verdict = gate_verdict(gate, now=now, previous=previous_gate)
         decision = evaluate(coin, regime_slice=regime_slice, channel_state=chan["state"], worst=wick["worst"],
                             l_max=l_max, fund_annual=fund["annual"], buildup=build["triggered"], fund_max=self.fund_max,
-                            margin_known=margin_known, register_age_days=register_age_days)
+                            margin_known=margin_known, register_age_days=register_age_days,
+                            gate_known=verdict["known"], gate_block=verdict["block"])
         sigma = coin.risk.get("sigma") if coin.risk else None
         card.update({
             "price": _sig(price), "perp_close": _sig(perp_price), "price_multiplier": mult,
@@ -697,14 +730,21 @@ class LongWatch:
             "share": _round(position_share(coin.kind, sigma, loss_budget=self.loss_budget), 5),
             "sigma": sigma,
             "position_cap_usd": coin.position_cap_usd,
+            "gate": verdict,
             "signal": decision["signal"], "missing": decision["missing"],
         })
+        if verdict["warning"]:
+            card["errors"].append(verdict["warning"])              # shown as missing data; not a block yet
         return card
 
     # -- snapshot -------------------------------------------------------------
 
-    def refresh(self, now: int, previous: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        """Collect every series, evaluate every coin, record the week's decision once per coin."""
+    def refresh(self, now: int, previous: Mapping[str, Any] | None = None,
+                gates: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, Any]:
+        """Collect every series, evaluate every coin, record the week's decision once per coin.
+
+        ``gates`` is the gate guard's latest result (altcoin_watch.gates_of); None or stale means every
+        coin's gate check is unknown and no slice is produced."""
 
         week0 = week_start(day_start(now))
         ids = [c.gecko_id for c in self.register.coins]
@@ -721,9 +761,14 @@ class LongWatch:
             deriv, deriv_ok = self.gecko.derivatives(), True
         except Exception as exc:
             errors.append("türev: " + _safe(exc))
+        previous_cards = {c.get("symbol"): c for c in (previous or {}).get("cards") or [] if isinstance(c, Mapping)}
         cards = [self._coin(c, now=now, market=markets.get(c.gecko_id), deriv=deriv, deriv_ok=deriv_ok,
-                            regime_slice=regime_result["slice"], register_age_days=register_age_days)
+                            regime_slice=regime_result["slice"], register_age_days=register_age_days,
+                            gate=(gates or {}).get(c.symbol),
+                            previous_gate=(previous_cards.get(c.symbol) or {}).get("gate"))
                  for c in self.register.coins]
+        if gates is None:
+            errors.append("kapı kontrolü yok (altcoin_watch anlık görüntüsü yok)")
         snapshot = {
             "generated_at": now, "week0": week0, "week": _iso(week0), "venue": VENUE,
             "register": dict(self.register.summary(), age_days=register_age_days,
@@ -750,6 +795,7 @@ class LongWatch:
                      "perp_close": card.get("perp_close"), "wick": card.get("wick"), "l_max": card.get("l_max"),
                      "fund90": card.get("fund90"), "oi_mcap": card.get("oi_mcap"), "perp_spot": card.get("perp_spot"),
                      "channel": card.get("channel"), "regime": snapshot["regime"].get("slice"),
+                     "gate": card.get("gate"),
                      "register_sha256": snapshot["register"]["sha256"], "venue": VENUE,
                      "trial": TRIAL, "can_authorize_trade": False}
             if self.ledger.append(event):
@@ -809,6 +855,15 @@ def _age(seconds: int) -> str:
     if seconds < DAY:
         return f"{seconds // 3600} sa"
     return f"{seconds // DAY} gün"
+
+
+def _gate_text(gate: Mapping[str, Any] | None, now: int) -> str:
+    if not gate or not gate.get("known"):
+        return "bilinmiyor (kapı kontrolü yok ya da eski)"
+    fails = gate.get("fails") or {}
+    head = "❌ " + "; ".join(str(v) for v in fails.values()) if fails else "✅ ❌ yok"
+    age = f" · kontrol {_age(now - int(gate['at']))} önce" if gate.get("at") else ""
+    return (head + age)[:90]
 
 
 def _regime_line(snapshot: Mapping[str, Any]) -> str:
@@ -904,6 +959,7 @@ def render_card(card: Mapping[str, Any], *, now: int, snapshot: Mapping[str, Any
         f"{'Perp / spot':<14}{_mult(card.get('perp_spot'))}",
         f"{'Kaldıraç bir.':<14}{'EVET' if card.get('buildup') else 'hayır' if card.get('buildup') is False else '?'}",
         f"{'Kanal 10h':<14}{chan.get('state') or '?'}  üst {_num(chan['high']) if chan.get('high') else '?'} alt {_num(chan['low']) if chan.get('low') else '?'} ({chan.get('weeks') or 0} hafta)",
+        f"{'Kapılar':<14}{_gate_text(card.get('gate'), now)}",
         f"{'2× / 4×':<14}{' / '.join(_num(v) for v in card['scale_out']) if card.get('scale_out') else '?'}  (funding düzeltmesi pozisyonla)",
         f"{'Pay':<14}{_pct(card.get('share'), 2).lstrip('+') if card.get('share') is not None else '? (σ raporda yok)'} sermaye  "
         f"· likidite üst sınırı {_usd(card.get('position_cap_usd'))}",
