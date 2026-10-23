@@ -1,5 +1,7 @@
 # Haftalık momentum — Likit-100 evreninde kesitsel test
 
+> **Harness kaldırıldı (2026-10-23, ölü kod üçüncü dalga, `docs/DEAD_CODE_AUDIT.md`).** Bu çalışma kapandı; kodu `main`'in `ce953eb` commit'inde duruyor. Rapor, kanıt dosyası (`research/evidence/`) ve deneme kaydı (`research/trials/registry.jsonl`) değişmedi.
+
 **Durum:** Keşif tamamlandı. **Altı varyantın hiçbiri etki göstermedi.**
 Hiçbiri ön-kayda alınmadı; doğrulama penceresi bu aile için mühürlü kaldı
 (ayrıntı: "Keşif sonuçları").

@@ -286,7 +286,7 @@ Bildirimler:
 
 - **Haftalık özet** (Pazartesi kararından sonra, tek mesaj): rejim, yeni çekirdek girişleri, açılan dilimler, kısmi satışlar, trend çıkışları, yeniden puanlama çıkışları.
 - **Anında:** tez geçersizliği (günlük hack/kontrat kontrolünden) ve rejim azaltması.
-- Her mesajda: referans fiyatın karar anı fiyatı olduğu, gecikme varsa süresi, "KANIT YOK — ileri kayıt sürüyor" etiketi ve "Gölge kayıt: emir yok, karar senin." (`docs/LONG_ALERTS.md` altbilgi geleneği).
+- Her mesajda: referans fiyatın karar anı fiyatı olduğu, gecikme varsa süresi, "KANIT YOK — ileri kayıt sürüyor" etiketi ve "Gölge kayıt: emir yok, karar senin." (kaldırılan `long_alerts` modülünün altbilgi geleneği; `trend_loop` aynı altbilgiyi kullanır).
 - Teslim güvencesi `trend_loop` ile aynı: mesaj olayıyla deftere yazılır, `DELIVERED` kaydı gelene kadar yeniden denenir.
 
 ## 8. Kanıt planı
@@ -351,18 +351,20 @@ Doğrulandı (2026-10-23, ücretsiz, anahtarsız): CoinGecko `global` (BTC.D), m
 | `trading/backtest/{tactical_replay, liquid_replay, signal_quality, reversal_replay, weekly_momentum}.py`, `trading/strategies/{tactical,liquid,reversal}_dossier.py`; workflow'lar `tactical_replay`, `liquid_replay`, `signal_quality`, `signal_quality_confirm`, `reversal_replay` | ~4.160 | **Kaldır** | Kaldırılan canlı modülleri import eden, kapanmış çalışmaların harness'ları. Raporlar (`docs/*_REPORT.md`, `SIGNAL_QUALITY.md`, `WEEKLY_MOMENTUM.md`) ve `research/evidence/*.json` kalır. |
 | Bunların testleri (`test_tactical_*`, `test_forward_ledger`, `test_radar_gate`, `test_long_alerts`, `test_liquid_*`, `test_observation_*`, `test_fundamental_radar`, `test_social_radar`, `test_unified_{engine,listings,providers}`, `test_listing_report_details`, `test_signal_quality*`, `test_reversal_replay`, `test_weekly_momentum`, `test_macro_*`) | ~6.600 | **Kaldır** | |
 | `bot.py` | 1.260 → ~650 | Küçülür | `/tactical`, `/longs`, `/radar`, tarayıcı döngüleri, radar kaydı, ileri kayıt gider |
-| `acce_unified/new_coins.py` `/new` tarayıcısı (CMC yeni coinler, 72 saatlik pencere, defter, trial) | ~600 | **Kaldır (karar)** | v3.2 meme evreni 18 aydan genç coini zaten eler (M1). `SecurityProviders`, kimlik referansı ve `/check` **kalır** (G4, K6, M2). |
-| `acce_unified/trend_loop.py`, `/d1` | 827 | **Kalır (karar)** | Depodaki tek kanıtlı çıkış ailesi; canlı gölge kaydı 2026-10-02'de kullanıcı onayıyla başladı; `Ledger` sınıfı yeni deftere de hizmet eder. |
+| `acce_unified/new_coins.py` `/new` tarayıcısı (CMC yeni coinler, 72 saatlik pencere, defter, trial) | ~600 | **Bu dalgada kaldı; karar bekliyor** | v3.2 meme evreni 18 aydan genç coini zaten eler (M1); kaldırılırsa trial `b57b9eb0a6073085` ABANDONED olur. `SecurityProviders`, kimlik referansı ve `/check` her durumda **kalır** (G4, K6, M2). |
+| `acce_unified/trend_loop.py`, `/d1` | 827 | **Kaldı (karar bekliyor; öneri: kalsın)** | Depodaki tek kanıtlı çıkış ailesi; canlı gölge kaydı 2026-10-02'de kullanıcı onayıyla başladı; `Ledger` sınıfı yeni deftere de hizmet eder. |
 | `acce_unified/altcoin_watch.py` | 1.206 | Kalır, **dönüşür** | Seçim motorunun gövdesi: evren, kapılar, DefiLlama eşlemesi, kohort kaydı. v3.2 kapı/puanı üstüne yazılır. |
 | `trading/risk/*`, `trading/research/*`, `trading/data/*`, `trading/backtest/{trade_loop, majors_signals, walk_forward, benchmark, cost_model, carry_replay, carry_audit, listing_replay, atlas}` ve dossier'ları | ~9.000 | Kalır, ikinci dalga kararı | Botta çalışmaz; §8.1 testi `trade_loop` ve `majors_signals` altyapısını kullanır. Kapanmış çalışmalar (carry, listing, TSMOM, atlas) yeni sistem çalışır hale gelince ayrı kararla elenir. |
 
 Toplam: ≈ 44.600 satırdan ≈ 20.000 satır gider. `render.yaml`'dan `UNIFIED_*`, `LIQUID_*`, `TACTICAL_*` ayarları; `README.md`, `docs/DEAD_CODE_AUDIT.md`, `docs/EVOLUTION_ROADMAP.md` güncellenir. Silinen her modülün son commit'i ilgili rapora yazılır; git geçmişi tam kalır.
 
+**Durum (2026-10-23):** uygulandı (PR A, `docs/DEAD_CODE_AUDIT.md` üçüncü dalga). `/new` ve `/d1` bu dalgada kaldı; kararları §12'de.
+
 ## 11. Uygulama sırası
 
 | PR | İş | Çıktı |
 |---|---|---|
-| A | Temizlik (§10) | Küçük bot: `/long` henüz yok; `/altcoin`, `/check`, `/d1`, `/status` çalışır. Trial kayıtları: `b57b9eb0a6073085` ABANDONED. |
+| A ✅ | Temizlik (§10) | Küçük bot: `/long` henüz yok; `/altcoin`, `/new`, `/check`, `/d1`, `/status` çalışır. Trial kayıtları değişmedi. |
 | B | Haftalık D1 analoğu majör testi (§8.1) | Ön-kayıt → workflow → tek koşu → rapor. §5.2'nin kaderi belli olur. |
 | C | Rejim katmanı + kayıt defteri şeması + `/rejim` | Haftalık K0 arşivi birikmeye başlar (4 hafta sonra yön bilinir). |
 | D | Seçim motoru v2: v3.2 kapıları ve puanı (altcoin + meme), yol riski, `/long`, `/long <sembol>` | `b6e0fec86714efc2` SUPERSEDED; seçim kohortu yeni şemayla. |

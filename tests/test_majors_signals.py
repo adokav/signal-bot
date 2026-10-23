@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("pandas")
 
-from trading.backtest import liquid_replay as lr
+from trading.backtest import market_data as mkt
 from trading.backtest import majors_signals as ms
 from trading.data import majors_data as md
 
@@ -186,7 +186,7 @@ def _universe_market(extra=None):
     series = {s: _rows(T0, BARS, qv=v) for s, v in volumes.items()}
     series["NEWUSDT"] = _rows(T0 + 100 * D, BARS - 100 * 96, qv=9e6)       # listed 20 days before the month
     series.update(extra or {})
-    market = lr.build_market({s: lr.rows_to_columns(r) for s, r in series.items()})
+    market = mkt.build_market({s: mkt.rows_to_columns(r) for s, r in series.items()})
     perp_of = {s: s for s in series if s != "NOPERPUSDT"}
     funding_times = {s: np.arange(T0, MONTH, 8 * H, dtype=np.int64) for s in perp_of}
     return market, perp_of, funding_times
@@ -194,7 +194,7 @@ def _universe_market(extra=None):
 
 def _members(market, perp_of, funding_times):
     return ms.monthly_universe(market, MONTH, perp_of=perp_of, funding_times=funding_times,
-                               first_trade=ms.first_trade_times(market), breaks=ms.wm.continuity_breaks(market))
+                               first_trade=ms.first_trade_times(market), breaks=ms.mkt.continuity_breaks(market))
 
 
 def test_universe_is_btc_eth_top_ten_seasoned_with_a_perp_and_one_meme():
@@ -242,13 +242,13 @@ def test_outcomes_start_at_the_next_open_and_a_swap_gap_is_unknown():
     halt, resume = i + 10, i + 10 + 2 * 96
     swapped = flat[:halt] + [r[:2] + tuple(x * 1000 for x in r[2:6]) + r[6:] for r in flat[resume:]]
     series = {"JUMPUSDT": jump, "SWAPUSDT": swapped, **{f"F{k}USDT": flat for k in range(8)}}
-    market = lr.build_market({s: lr.rows_to_columns(r) for s, r in series.items()})
+    market = mkt.build_market({s: mkt.rows_to_columns(r) for s, r in series.items()})
     index = [market.index_of[s] for s in series]
-    returns, basket = ms.outcomes(market, index, i, 24, ms.wm.continuity_breaks(market))
+    returns, basket = ms.outcomes(market, index, i, 24, ms.mkt.continuity_breaks(market))
     assert returns[0] == pytest.approx(0.0)            # bought at the open after the gap-up, not before it
     assert math.isnan(returns[1])                      # never a 1000x return
     assert basket == pytest.approx(0.0)
-    _, thin = ms.outcomes(market, index[:5], i, 24, ms.wm.continuity_breaks(market))
+    _, thin = ms.outcomes(market, index[:5], i, 24, ms.mkt.continuity_breaks(market))
     assert thin is None                                # fewer than BASKET_MIN known members
 
 
@@ -257,8 +257,8 @@ def test_a_pair_resuming_on_the_entry_bar_is_not_an_outcome():
     i = 5 * 96 - 1
     resumed = flat[: i - 2 * 96] + [r[:2] + tuple(x * 1000 for x in r[2:6]) + r[6:] for r in flat[i + 1:]]
     series = {"BACKUSDT": resumed, **{f"F{k}USDT": flat for k in range(8)}}
-    market = lr.build_market({s: lr.rows_to_columns(r) for s, r in series.items()})
-    breaks = ms.wm.continuity_breaks(market)
+    market = mkt.build_market({s: mkt.rows_to_columns(r) for s, r in series.items()})
+    breaks = ms.mkt.continuity_breaks(market)
     assert int(breaks[market.index_of["BACKUSDT"]][0]) == i + 1          # trading resumes at the entry bar
     returns, _ = ms.outcomes(market, [market.index_of[s] for s in series], i, 24, breaks)
     assert math.isnan(returns[0])

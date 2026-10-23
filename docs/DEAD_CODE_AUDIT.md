@@ -98,11 +98,54 @@ orphan golden fixtures).
 
 `bot.py` UI hiçbirini göstermiyordu; hiçbir davranışsal regresyon yok.
 
-### Üçüncü dalga — Faz A karar noktası
+### Üçüncü dalga — tamamlandı (2026-10-23)
 
-- `acce_unified/observation_archive.py` (602 satır): Faz A backtest harness'ının
-  input feature'ı olarak yeniden bağlanacak veya silinecek.
-- `macro_*.py` (11 dosya, ~2500 satır): Faz A'da backtest feature'ı olarak
-  yeniden bağlanacak veya silinecek. Şu an sadece `/macro-research` endpoint'inde
-  observability.
-- `acce_unified/social.py` (870): Faz A'da feature testi.
+Kullanıcı kararı: bot, kısa vadeli taktik radarlardan uzun vadeli long pozisyon
+sistemine dönüşüyor (`docs/POSITION_LONG.md`). Bu yöne hizmet etmeyen, kanıtı
+negatif ya da üretimde çalışmayan kod silindi. Silinen her şey `main`'in
+`ce953eb` commit'inde duruyor; raporlar, `research/evidence/*.json` ve deneme
+kaydı değişmedi.
+
+| Silinen | Neden |
+|---|---|
+| `acce_unified/tactical_long.py`, `tactical_long_data.py`, `tactical_long_engine.py`, `forward_ledger.py` | BTC/ETH taktik radar: replay NEGATIVE, REJECT, susturulmuş |
+| `acce_unified/radar_gate.py`, `long_alerts.py` | Taktik ve Likit-100 kapısı, stop'u ve radar kaydı. Yazı yardımcıları (`esc`, `table`, `_num`, `_clock`) aynen `acce_unified/text.py`'ye taşındı |
+| `acce_unified/engine.py`, `liquid_long.py`, `providers.py`, `listings.py`, `fundamentals.py`, `listing_fundamentals.py`, `social.py`, `observation_archive.py`, `observation_runtime.py`, `config.py`, `models.py` | Likit-100 zinciri: replay NEGATIVE, REJECT; MEXC yeni listeleme radarı zaten kapalıydı |
+| `acce_unified/cex.py::opportunity_proxy` | Yalnız Likit-100 kullanıyordu; `is_stable_or_synthetic` ve `is_leveraged_token` kaldı |
+| `run_service.py`, `macro_*.py` (11), `scripts/` | Üretim `bot.py` ile başlıyor; makro boru hattı çalışmıyordu; atlas makro katmanı aday üretmedi |
+| `trading/backtest/{tactical_replay, liquid_replay, signal_quality, reversal_replay, weekly_momentum}.py`, `trading/strategies/{tactical,liquid,reversal}_dossier.py`, 5 workflow | Kaldırılan canlı modülleri import eden kapanmış çalışma harness'ları |
+| 34 test dosyası | Yukarıdakilerin testleri; `tests/test_cex.py` iki kalan yardımcıyı test eder |
+| `CHANGELOG_*.md` (15), `COMPILE_STATUS.txt` | Silinmiş v4 botunun değişiklik günlükleri |
+| `docs/LONG_ALERTS.md`, `UNIFIED_ENGINE.md`, `NEW_LISTING_ANTI_TRAP_DESIGN.md`, `memecoin_radar_integration_v1.md`, `RESEARCH_CORE_ARCHITECTURE.md`, `MACRO_REGIME_ENGINE_V1.md` | Artık var olmayan modüllerin tasarım belgeleri |
+
+**Paylaşılan parçalar `trading/backtest/market_data.py`'ye taşındı.** `trade_loop`,
+`majors_signals` ve `atlas`, silinen `liquid_replay`, `signal_quality` ve
+`weekly_momentum` harness'larından piyasa matrisi (`Market`, `build_market`,
+`load_likit_market`, `forward_returns`), mühürlü pencere sabitleri, blok
+bootstrap (`block_bootstrap_means`, `diff_ci`) ve süreklilik (`continuity_breaks`,
+`continuous`) yardımcılarını kullanıyordu. Bunlar satırı satırına taşındı;
+`tests/test_trade_loop.py` ve `tests/test_majors_signals.py` aynı sonuçları
+doğruluyor. **Parmak izi notu:** `majors_signals.FINGERPRINT_FILES` artık silinen
+dosyalar yerine `market_data.py`'yi sayıyor; bu yüzden `trade_loop.code_fingerprint()`
+değeri değişti. Kural değişmedi (`tests/test_trend_loop.py` canlı D1'i araştırma
+döngüsüyle gün gün karşılaştırır). Kapanmış denemeler (`83c3e26b5ea98c95`,
+`1fcc8f2ef5d92516`) kayıt anındaki parmak izleriyle durur; canlı D1 gölge kaydı
+etkilenmez. Yeni bir `trade_loop` koşusu zaten yeni bir deneme kaydı ister.
+
+`bot.py` 1.260 satırdan ~560 satıra indi: `/tactical`, `/longs`, `/radar`,
+tarayıcı döngüleri, radar kaydı ve ileri kayıt gitti; `/altcoin`, `/new`,
+`/check`, `/d1`, `/status`, `/scan` kaldı. `render.yaml`'dan `UNIFIED_*`,
+`LIQUID_*`, `TACTICAL_*` ayarları kaldırıldı. Eski durum dosyasındaki
+`radar_log`, `snapshot`, `tactical_*` anahtarları yüklenmez; diskteki
+`tactical_forward_ledger.json` dosyasına dokunulmadı.
+
+**Bu dalgada kalanlar (karar bekliyor):** `/new` CMC tarayıcısı ve ileri
+kayıt denemesi `b57b9eb0a6073085`; `/d1` D1 gölge kaydı (`1fcc8f2ef5d92516`).
+`docs/POSITION_LONG.md` §10.
+
+### Dördüncü dalga — yeni sistem çalışınca
+
+`trading/` araştırma şasisinden kapanmış çalışmalar (`carry_*`,
+`listing_replay`, `walk_forward`/`tsmom`, `atlas`) ve `research/` Faz 0
+boru hattı. `trade_loop` ve `majors_signals` kalır: D1 canlı testi ve
+`docs/POSITION_LONG.md` §8.1 haftalık testi bunları kullanır.

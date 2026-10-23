@@ -7,7 +7,7 @@ import pytest
 
 pytest.importorskip("pandas")
 
-from trading.backtest import liquid_replay as lr
+from trading.backtest import market_data as mkt
 from trading.backtest import trade_loop as tl
 
 T0 = 1_704_067_200            # 2024-01-01T00:00:00Z
@@ -32,7 +32,7 @@ def _rows(prices, *, start=T0, wick=0.01, opens=None, lows=None):
 
 
 def _market(series):
-    return lr.build_market({s: lr.rows_to_columns(r) for s, r in series.items()})
+    return mkt.build_market({s: mkt.rows_to_columns(r) for s, r in series.items()})
 
 
 def _breakout_path(tail):
@@ -44,7 +44,7 @@ def _breakout_path(tail):
 def _one(prices, **kw):
     market = _market({"AUSDT": _rows(prices, **kw)})
     daily = tl.daily_bars(market)
-    return market, daily, tl.indicators(daily), tl.wm.continuity_breaks(market)
+    return market, daily, tl.indicators(daily), tl.mkt.continuity_breaks(market)
 
 
 def test_daily_candles_come_from_closed_15m_candles():
@@ -103,18 +103,18 @@ def test_a_pair_specific_gap_inside_a_trade_is_unknown_but_an_exchange_halt_is_n
     gapped = [r for r in rows if r[0] not in hole]
     market = _market({"AUSDT": gapped})
     daily = tl.daily_bars(market)
-    ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
+    ind, breaks = tl.indicators(daily), tl.mkt.continuity_breaks(market)
     assert tl.simulate(market, daily, ind, D1, 0, 30, breaks).status == "UNKNOWN"   # no halt map: fail closed
     other = {f"B{k}USDT": [r for r in _rows(prices) if r[0] not in hole] for k in range(5)}
     market = _market({"AUSDT": gapped, **other})                              # every pair is missing: a halt
     daily = tl.daily_bars(market)
-    ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
+    ind, breaks = tl.indicators(daily), tl.mkt.continuity_breaks(market)
     halts = tl.halt_bars(market)
     assert halts[34 * 96 + 11] and not halts[34 * 96 + 20]
     assert tl.simulate(market, daily, ind, D1, 0, 30, breaks, halts).status == "RESOLVED"
     alone = _market({"AUSDT": gapped, **{f"B{k}USDT": _rows(prices) for k in range(5)}})
     daily = tl.daily_bars(alone)
-    trade = tl.simulate(alone, daily, tl.indicators(daily), D1, 0, 30, tl.wm.continuity_breaks(alone),
+    trade = tl.simulate(alone, daily, tl.indicators(daily), D1, 0, 30, tl.mkt.continuity_breaks(alone),
                         tl.halt_bars(alone))
     assert trade.status == "UNKNOWN"                                          # only this pair is missing
 
@@ -124,7 +124,7 @@ def test_entry_signals_that_cannot_trade_are_counted_not_dropped():
     rows = [r for r in _rows(prices) if r[0] != T0 + 31 * 96 * BAR]          # the execution open is missing
     market = _market({"AUSDT": rows})
     daily = tl.daily_bars(market)
-    ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
+    ind, breaks = tl.indicators(daily), tl.mkt.continuity_breaks(market)
     assert tl.simulate(market, daily, ind, D1, 0, 30, breaks) == tl.Skip("no_open")
     trades, skipped = tl.run_loop(market, daily, ind, D1, {0: [(30, T0)]}, breaks)
     assert trades == [] and skipped == {"no_open": 1}
@@ -144,7 +144,7 @@ def test_the_loop_repeats_and_the_random_control_is_reproducible():
     prices = _breakout_path([108.0, 104.0, 100.0, 96.0]) + second
     market = _market({"AUSDT": _rows(prices, wick=0.002)})
     daily = tl.daily_bars(market)
-    ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
+    ind, breaks = tl.indicators(daily), tl.mkt.continuity_breaks(market)
     days = {0: [(d, T0) for d in range(25, daily.n_days)]}
     rows, _ = tl.run_loop(market, daily, ind, D1, days, breaks, seed=7)
     assert len(rows) == 2 and rows[1]["entry_day"] > rows[0]["exit_day"]          # one position at a time, then again
@@ -157,7 +157,7 @@ def test_portfolio_charges_costs_and_compares_with_buy_and_hold():
     prices = _breakout_path([110.0] * 2 + [108.0, 106.0, 104.0, 102.0, 100.0, 99.0, 98.0, 97.0])
     market = _market({"AUSDT": _rows(prices, wick=0.002)})
     daily = tl.daily_bars(market)
-    ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
+    ind, breaks = tl.indicators(daily), tl.mkt.continuity_breaks(market)
     days = {0: [(d, T0) for d in range(25, daily.n_days)]}
     rows, _ = tl.run_loop(market, daily, ind, D1, days, breaks)
     assert len(rows) == 1
@@ -171,7 +171,7 @@ def test_positions_kept_after_a_universe_rotation_never_lever_the_portfolio():
     prices = _breakout_path([110.0 + k for k in range(20)])
     market = _market({"AUSDT": _rows(prices, wick=0.002), "BUSDT": _rows(prices, wick=0.002)})
     daily = tl.daily_bars(market)
-    ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
+    ind, breaks = tl.indicators(daily), tl.mkt.continuity_breaks(market)
     month2 = T0 + 33 * DAY_S
     rows_a, _ = tl.run_loop(market, daily, ind, D1, {0: [(30, T0)]}, breaks)     # A entered in a 1-coin month
     rows_b, _ = tl.run_loop(market, daily, ind, D1, {1: [(34, month2)]}, breaks)  # B in a later 1-coin month
@@ -273,7 +273,7 @@ def test_volatility_target_cuts_the_slot_of_a_volatile_coin_and_never_raises_it(
     calm = _breakout_path([110.0] * 2 + [108.0, 106.0, 104.0, 102.0, 100.0, 99.0, 98.0, 97.0])
     market = _market({"AUSDT": _rows(calm, wick=0.002)})
     daily = tl.daily_bars(market)
-    ind, breaks = tl.indicators(daily), tl.wm.continuity_breaks(market)
+    ind, breaks = tl.indicators(daily), tl.mkt.continuity_breaks(market)
     rows, _ = tl.run_loop(market, daily, ind, D1, {0: [(d, T0) for d in range(25, daily.n_days)]}, breaks)
     window = (T0 + DAY_S, T0 + daily.n_days * DAY_S)
     plain = tl.portfolio(market, daily, rows, {T0: ["AUSDT"]}, window, breaks, half_at=T0 + 40 * DAY_S)
@@ -314,7 +314,7 @@ def test_the_spot_only_universe_drops_the_perpetual_condition_only():
     series.update(BTCUSDT=_rows([100.0] * 130), ETHUSDT=_rows([100.0] * 130))
     market = _market(series)
     month = T0 + 120 * DAY_S
-    kw = dict(first_trade=ms.first_trade_times(market), breaks=ms.wm.continuity_breaks(market))
+    kw = dict(first_trade=ms.first_trade_times(market), breaks=ms.mkt.continuity_breaks(market))
     assert ms.monthly_universe(market, month, perp_of={}, funding_times={}, **kw) == []
     spot = ms.monthly_universe(market, month, perp_of={}, funding_times={}, require_perp=False, **kw)
     assert spot[:2] == ["BTCUSDT", "ETHUSDT"] and len(spot) == 12
@@ -345,8 +345,8 @@ def test_the_dataset_manifest_must_be_the_complete_expected_build(tmp_path):
             "candidates": 2, "downloaded": 2, "symbols": {"BTCUSDT": {}, "ETHUSDT": {}}}
     (tmp_path / "manifest.json").write_text(json.dumps(good))
     assert tl.verify_universe_manifest(tmp_path, end=1601510400, window=tl.PREHISTORY_DATA)["candidates"] == 2
-    assert tl.data_window(tl.sq.DISCOVERY_END, tl.sq.DISCOVERY_MONTHS) == ("2020-10", "2024-08")
-    assert tl.data_window(tl.sq.CONFIRMATION_END, tl.sq.CONFIRMATION_MONTHS) == ("2024-06", "2026-08")
+    assert tl.data_window(tl.mkt.DISCOVERY_END, tl.mkt.DISCOVERY_MONTHS) == ("2020-10", "2024-08")
+    assert tl.data_window(tl.mkt.CONFIRMATION_END, tl.mkt.CONFIRMATION_MONTHS) == ("2024-06", "2026-08")
     for bad in ({"downloaded": 1}, {"data_end": 1601510000}, {"window": ["2018-01", "2020-09"]},
                 {"schema": "other"}, {"symbols": {"BTCUSDT": {}, "XRPUSDT": {}}}):
         (tmp_path / "manifest.json").write_text(json.dumps({**good, **bad}))

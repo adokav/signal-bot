@@ -7,92 +7,51 @@ import bot
 from acce_unified.trend_loop import Ledger as TrendLedger, TrendLoop
 
 
-def _snapshot():
-    return {
-        "generated_at": 1_700_000_000,
-        "errors": [],
-        "liquid_universe_size": 100,
-        "liquid_long_candidates": [
-            {
-                "symbol": "SOLUSDT",
-                "score": 82,
-                "stage": "A_PLUS",
-                "metadata": {
-                    "quote_volume": 100_000_000,
-                    "spread_bps": 4,
-                    "long_metrics": {
-                        "change_1h_pct": 2,
-                        "change_4h_pct": 5,
-                        "rsi14": 58,
-                        "volume_ratio": 1.8,
-                    },
-                    "fundamentals": {"circulation_pct": 72},
-                },
-            }
-        ],
-        "listing_candidates": [
-            {
-                "symbol": "NEWUSDT",
-                "score": 74,
-                "stage": "BUILDING",
-                "risk_flags": [],
-                "metadata": {
-                    "change_pct": 12,
-                    "quote_volume": 3_000_000,
-                    "volume_acceleration": 2.4,
-                    "social": {"community_gate": "PASS"},
-                    "fundamentals": {"status": "READY"},
-                },
-            }
-        ],
-        "liquid_market_context": {"regime": "RISK_ON", "positive_breadth_pct": 64},
-    }
+def _preserve_state(*keys):
+    return {key: bot.STATE.get(key) for key in keys}
 
 
-def test_public_commands_include_tactical_radar_without_legacy_bloat():
-    assert [row["command"] for row in bot.COMMANDS] == [
-        "panel", "tactical", "longs", "new", "check", "altcoin", "radar", "d1", "status", "scan"
-    ]
+HEALTH_KEYS = ("trend_loop_error", "new_coins", "new_coins_error", "altcoin_watch", "altcoin_watch_error")
 
 
-def test_legacy_listing_command_routes_to_new_view():
+def _all_fresh(monkeypatch):
+    monkeypatch.setattr(bot.altcoin_watch, "fresh", lambda snapshot, now, max_age: True)
+    monkeypatch.setattr(bot.new_coins, "fresh", lambda snapshot, now, max_age: True)
+    monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
+    for key in HEALTH_KEYS:
+        monkeypatch.setitem(bot.STATE, key, None)
+
+
+def test_public_commands_are_the_retained_research_menus():
+    assert [row["command"] for row in bot.COMMANDS] == ["panel", "new", "check", "altcoin", "d1", "status", "scan"]
+    buttons = [b["callback_data"] for row in bot.panel_keyboard()["inline_keyboard"] for b in row]
+    assert buttons == ["ALTCOIN", "D1", "NEW", "CHECK", "STATUS", "SCAN"]
+
+
+def test_removed_radar_commands_fall_back_to_the_panel(monkeypatch):
     assert bot._command("/listings") == "NEW"
-    assert bot._command("/btceth") == "TACTICAL"
-    assert bot._command("/social") == "SOCIAL"
+    sent = []
+    monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append((text, kw)))
+    for text in ("/tactical", "/longs", "/radar", "/btceth"):
+        bot.handle(bot._command(text), text)
+        assert "SIGNAL BOT v5 CORE" in sent[-1][0] and "emir yetkisi yok" in sent[-1][0]
 
 
-def test_long_report_is_top_three_and_shadow_only():
-    text = bot.format_longs(_snapshot())
-    assert "LONG İLK 3" in text
-    assert "SOLUSDT" in text
-    assert "işlem emri değildir" in text
+def test_status_names_every_module_and_denies_order_authority(monkeypatch):
+    for key in HEALTH_KEYS:
+        monkeypatch.setitem(bot.STATE, key, None)
+    monkeypatch.setitem(bot.STATE, "altcoin_watch_error", "AltcoinDataError: coingecko http 429")
+    text = bot.format_status()
+    assert "Altcoin izleme" in text and "Yeni coinler" in text and "D1" in text
+    assert "429" in text and "Emir yetkisi: YOK" in text
 
 
-def test_tactical_report_exposes_entry_stop_and_no_trade_authority():
-    text = bot.format_tactical({
-        "assessments": [{
-            "symbol": "BTCUSDT",
-            "state": "READY",
-            "setup": "TREND_PULLBACK",
-            "structure_4h": "BULLISH",
-            "plan": {
-                "entry_low": 100,
-                "entry_high": 101,
-                "technical_invalidation": 98,
-                "hard_stop": 97,
-                "target_1": 106,
-                "target_2": 110,
-                "net_rr_1": 2.0,
-                "net_rr_2": 3.5,
-            },
-            "reasons": [],
-            "evidence": ["4H_BULLISH_STRUCTURE"],
-            "risk_flags": [],
-        }]
-    })
-    assert "Giriş bölgesi" in text
-    assert "Hard stop" in text
-    assert "otomatik emir" in text
+def test_scan_runs_the_new_coin_scan_from_the_command_thread(monkeypatch):
+    calls, sent = [], []
+    monkeypatch.setattr(bot, "new_coins_tick", lambda now=None: calls.append(now))
+    monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append(text))
+    bot.handle("SCAN")
+    assert calls == [None] and "başlatıldı" in sent[0] and "SIGNAL BOT v5 CORE" in sent[1]
 
 
 def test_new_coins_menu_reads_coinmarketcap_and_says_unknown_without_a_key(monkeypatch):
@@ -104,7 +63,13 @@ def test_new_coins_menu_reads_coinmarketcap_and_says_unknown_without_a_key(monke
         assert bot.STATE["new_coins"] is None and "CMC_API_KEY" in bot.STATE["new_coins_error"]
         text = bot.format_new()
         assert "CoinMarketCap" in text and "Aday yok demek değildir" in text and "MEXC" not in text
-        assert "API anahtarı yok" in bot.format_status(None)
+        assert "API anahtarı yok" in bot.format_status()
+        # the menu carries the closed listing study's base rate, never a per-coin probability
+        seen, real_render = {}, bot.new_coins.render
+        monkeypatch.setattr(bot.new_coins, "render",
+                            lambda snapshot, **kw: seen.update(kw) or real_render(snapshot, **kw))
+        bot.format_new()
+        assert "NO_CLAIM" in seen["base_rate"] and "CoinMarketCap yeni coinleri için test yok" in seen["base_rate"]
         sent = []
         monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append((text, kw)))
         bot.handle("NEW")
@@ -132,93 +97,59 @@ def test_a_failed_new_coins_scan_keeps_the_last_snapshot_and_redacts_the_key(mon
         bot.STATE.update(saved)
 
 
-def test_status_surfaces_last_scan_error():
-    previous = bot.STATE.get("last_error")
-    try:
-        bot.STATE["last_error"] = "RuntimeError: provider down"
-        text = bot.format_status(None)
-        assert "RuntimeError: provider down" in text
-    finally:
-        bot.STATE["last_error"] = previous
-
-
-def _preserve_state(*keys):
-    return {key: bot.STATE.get(key) for key in keys}
-
-
-HEALTH_KEYS = ("last_error", "tactical_last_error", "snapshot", "tactical_snapshot")
-
-
-def test_health_is_not_healthy_before_any_scan():
-    saved = _preserve_state(*HEALTH_KEYS)
-    try:
-        bot.STATE.update({key: None for key in HEALTH_KEYS})
-        payload = bot.APP.test_client().get("/").get_json()
-        assert payload["ok"] is False
-        assert payload["main_scan_fresh"] is False
-        assert payload["can_authorize_trade"] is False
-    finally:
-        bot.STATE.update(saved)
+def test_health_is_not_healthy_before_any_artifact_exists(monkeypatch):
+    for key in HEALTH_KEYS:
+        monkeypatch.setitem(bot.STATE, key, None)
+    monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: False)
+    payload = bot.APP.test_client().get("/").get_json()
+    assert payload["ok"] is False and payload["new_coins_fresh"] is False and payload["altcoin_watch_fresh"] is False
+    assert payload["can_authorize_trade"] is False
 
 
 def test_health_requires_fresh_artifacts_and_hides_error_text(monkeypatch):
+    _all_fresh(monkeypatch)
+    payload = bot.APP.test_client().get("/").get_json()
+    assert payload["ok"] is True and payload["can_authorize_trade"] is False
+
+    monkeypatch.setattr(bot.altcoin_watch, "fresh", lambda snapshot, now, max_age: False)
+    assert bot.APP.test_client().get("/").get_json()["ok"] is False
+
     monkeypatch.setattr(bot.altcoin_watch, "fresh", lambda snapshot, now, max_age: True)
-    monkeypatch.setitem(bot.STATE, "altcoin_watch_error", None)
-    monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
-    monkeypatch.setattr(bot.new_coins, "fresh", lambda snapshot, now, max_age: True)
-    monkeypatch.setitem(bot.STATE, "new_coins_error", None)
-    saved = _preserve_state(*HEALTH_KEYS)
-    now = int(bot.time.time())
-    try:
-        bot.STATE.update({
-            "snapshot": {"generated_at": now - 10, "errors": ["LISTING:TimeoutError"]},
-            "tactical_snapshot": {"generated_at": now - 10},
-            "last_error": None,
-            "tactical_last_error": None,
-        })
-        payload = bot.APP.test_client().get("/").get_json()
-        assert payload["ok"] is True
-        assert payload["errors"] == ["LISTING:TimeoutError"]
-
-        bot.STATE["snapshot"] = {"generated_at": now - 10 * bot.MAIN_MAX_AGE_SECONDS}
-        assert bot.APP.test_client().get("/").get_json()["ok"] is False
-
-        bot.STATE["snapshot"] = {"generated_at": now - 10}
-        bot.STATE["last_error"] = "HTTPError: 403 for url https://api.example.com/x?apikey=SECRET"
-        payload = bot.APP.test_client().get("/").get_json()
-        assert payload["ok"] is False
-        assert payload["last_error"] == "HTTPError"
-        assert "SECRET" not in json.dumps(payload)
-    finally:
-        bot.STATE.update(saved)
+    bot.STATE["altcoin_watch_error"] = "HTTPError: 403 for url https://api.example.com/x?apikey=SECRET"
+    payload = bot.APP.test_client().get("/").get_json()
+    assert payload["ok"] is False and payload["altcoin_watch_last_error"] == "HTTPError"
+    assert "SECRET" not in json.dumps(payload)
 
 
 def test_health_needs_a_fresh_trend_loop_and_hides_its_error_text(monkeypatch):
-    monkeypatch.setattr(bot.altcoin_watch, "fresh", lambda snapshot, now, max_age: True)
-    monkeypatch.setitem(bot.STATE, "altcoin_watch_error", None)
+    _all_fresh(monkeypatch)
+    monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: False)
+    payload = bot.APP.test_client().get("/").get_json()
+    assert payload["ok"] is False and payload["trend_loop_fresh"] is False
+    monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
+    bot.STATE["trend_loop_error"] = "TrendLoopDataError: mexc https://api.mexc.com/api/v3/klines?x=SECRET"
+    payload = bot.APP.test_client().get("/").get_json()
+    assert payload["ok"] is False and payload["trend_loop_last_error"] == "TrendLoopDataError"
+    assert "SECRET" not in json.dumps(payload) and payload["can_authorize_trade"] is False
+
+
+def test_health_needs_a_fresh_new_coins_scan_and_hides_its_error_text(monkeypatch):
+    _all_fresh(monkeypatch)
+    monkeypatch.setattr(bot.new_coins, "fresh", lambda snapshot, now, max_age: False)
+    bot.STATE["new_coins_error"] = "CMC_API_KEY tanımlı değil"
+    payload = bot.APP.test_client().get("/").get_json()
+    assert payload["ok"] is False and payload["new_coins_fresh"] is False
     monkeypatch.setattr(bot.new_coins, "fresh", lambda snapshot, now, max_age: True)
-    monkeypatch.setitem(bot.STATE, "new_coins_error", None)
-    saved = _preserve_state(*HEALTH_KEYS, "trend_loop_error")
-    now = int(bot.time.time())
-    try:
-        bot.STATE.update({"snapshot": {"generated_at": now - 10}, "tactical_snapshot": {"generated_at": now - 10},
-                          "last_error": None, "tactical_last_error": None, "trend_loop_error": None})
-        monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: False)
-        payload = bot.APP.test_client().get("/").get_json()
-        assert payload["ok"] is False and payload["trend_loop_fresh"] is False
-        monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
-        bot.STATE["trend_loop_error"] = "TrendLoopDataError: mexc https://api.mexc.com/api/v3/klines?x=SECRET"
-        payload = bot.APP.test_client().get("/").get_json()
-        assert payload["ok"] is False and payload["trend_loop_last_error"] == "TrendLoopDataError"
-        assert "SECRET" not in json.dumps(payload) and payload["can_authorize_trade"] is False
-    finally:
-        bot.STATE.update(saved)
+    bot.STATE["new_coins_error"] = None
+    assert bot.APP.test_client().get("/").get_json()["ok"] is True
+    bot.STATE["new_coins_error"] = "NewCoinsDataError: cmc http 429 https://x?key=SECRET"
+    payload = bot.APP.test_client().get("/").get_json()
+    assert payload["ok"] is False and payload["new_coins_last_error"] == "NewCoinsDataError"
+    assert "SECRET" not in json.dumps(payload)
 
 
 def test_check_command_screens_one_address_and_never_echoes_provider_errors(monkeypatch):
     assert bot._command("/check 0xabc") == "CHECK"
-    buttons = [b["callback_data"] for row in bot.panel_keyboard()["inline_keyboard"] for b in row]
-    assert "CHECK" in buttons
     sent = []
     monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append((text, kw)))
     bot.handle("CHECK", "")                                          # the panel button: how to use it
@@ -246,8 +177,6 @@ def test_check_command_screens_one_address_and_never_echoes_provider_errors(monk
 
 def test_altcoin_command_lists_the_watch_and_one_coin_card(monkeypatch):
     assert bot._command("/altcoin") == "ALTCOIN" and bot._command("/altcoin aave") == "ALTCOIN"
-    buttons = [b["callback_data"] for row in bot.panel_keyboard()["inline_keyboard"] for b in row]
-    assert "ALTCOIN" in buttons
     monkeypatch.setitem(bot.STATE, "altcoin_watch", None)
     monkeypatch.setitem(bot.STATE, "altcoin_watch_error", None)
     assert "İlk tarama sürüyor" in bot.format_altcoin("")
@@ -354,13 +283,15 @@ def test_a_wait_saved_by_the_previous_version_is_skipped_once_a_key_is_set(tmp_p
     t = 1_800_000_000
     state_file = tmp_path / "state.json"                              # written by the version before the marker
     state_file.write_text(json.dumps({"altcoin_watch": None, "altcoin_watch_error": "AltcoinDataError: coingecko "
-                                      "http 429", "altcoin_watch_failures": 3, "altcoin_watch_retry_at": t + 4 * 3600}))
+                                      "http 429", "altcoin_watch_failures": 3, "altcoin_watch_retry_at": t + 4 * 3600,
+                                      "radar_log": [{"id": "legacy"}], "snapshot": {"generated_at": 1}}))
     monkeypatch.setattr(bot, "STATE_FILE", state_file)
     monkeypatch.setattr(bot, "_save_state", lambda: None)
     for key, value in (("altcoin_watch", None), ("altcoin_watch_error", None), ("altcoin_watch_failures", 0),
                        ("altcoin_watch_retry_at", 0), ("altcoin_watch_failed_keyed", None)):
         monkeypatch.setitem(bot.STATE, key, value)
     bot._load_state()
+    assert "radar_log" not in bot.STATE and "snapshot" not in bot.STATE      # removed radars' keys are not loaded
     assert bot.STATE["altcoin_watch_retry_at"] == t + 4 * 3600 and bot.STATE["altcoin_watch_failed_keyed"] is None
     snapshot = {"generated_at": t, "cards": [], "counts": {}}
     calls = []
@@ -373,8 +304,6 @@ def test_a_wait_saved_by_the_previous_version_is_skipped_once_a_key_is_set(tmp_p
 
 def test_d1_command_and_panel_button_open_the_shadow_loop_report(monkeypatch):
     assert bot._command("/d1") == "D1"
-    buttons = [b["callback_data"] for row in bot.panel_keyboard()["inline_keyboard"] for b in row]
-    assert "D1" in buttons
     sent = []
     monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append((text, kw)))
     monkeypatch.setattr(bot, "TREND_LOOP_LOADED", threading.Event())
@@ -457,93 +386,9 @@ def test_alerts_switched_off_are_recorded_as_not_sent(tmp_path, monkeypatch):
         bot.STATE.update(saved)
 
 
-def test_safe_error_redacts_urls_and_token():
+def test_safe_error_redacts_urls_and_keys():
     exc = RuntimeError("failed https://api.telegram.org/bot123:ABC/getUpdates?offset=1")
     text = bot._safe_error(exc)
     assert text.startswith("RuntimeError")
     assert "api.telegram.org" not in text and "ABC" not in text
     assert "<url>" in text
-
-
-def _tactical_text(setup):
-    return bot.format_tactical({
-        "assessments": [{
-            "symbol": "ETHUSDT",
-            "decision_at": int(bot.time.time()) - 30,
-            "state": "TRIGGERED",
-            "setup": setup,
-            "structure_4h": "BULLISH",
-            "plan": {
-                "entry_low": 100, "entry_high": 101, "technical_invalidation": 98,
-                "hard_stop": 97, "target_1": 106, "target_2": 110,
-                "net_rr_1": 2.0, "net_rr_2": 3.5,
-            },
-            "reasons": [], "evidence": [], "risk_flags": [],
-        }]
-    })
-
-
-def test_tactical_plan_with_negative_replay_is_rejected_with_evidence():
-    text = _tactical_text("BREAKOUT_RETEST")
-    assert "Durum: REJECT — geçmiş test NEGATIVE" in text
-    assert "hedef-önce-stop %18" in text and "başabaş %35" in text
-    assert "Sinyal bazında kalibre olasılık: YOK" in text
-    assert "EXECUTION_READY" not in text and "QUALIFIED" not in text
-
-
-def test_tactical_plan_without_enough_evidence_stays_watch():
-    text = _tactical_text("RANGE_RECLAIM")
-    assert "Durum: WATCH — kanıt yok: OOS test, kalibrasyon, EV" in text
-    assert "INSUFFICIENT" in text
-    assert "EXECUTION_READY" not in text and "QUALIFIED" not in text
-
-
-def test_stale_tactical_plan_is_rejected_not_presented_as_current():
-    text = bot.format_tactical({
-        "assessments": [{
-            "symbol": "BTCUSDT",
-            "decision_at": int(bot.time.time()) - 10 * bot.TACTICAL_MAX_AGE_SECONDS,
-            "state": "READY", "setup": "TREND_PULLBACK", "structure_4h": "BULLISH",
-            "plan": {
-                "entry_low": 100, "entry_high": 101, "technical_invalidation": 98,
-                "hard_stop": 97, "target_1": 106, "target_2": 110,
-                "net_rr_1": 2.0, "net_rr_2": 3.5,
-            },
-            "reasons": [], "evidence": [], "risk_flags": [],
-        }]
-    })
-    assert "Durum: REJECT" in text
-    assert "eski" in text
-
-
-def test_long_candidates_carry_the_negative_replay_and_regime_rejects():
-    snapshot = _snapshot()
-    snapshot["generated_at"] = int(bot.time.time()) - 5
-    text = bot.format_longs(snapshot)
-    assert "Durum: REJECT — geçmiş test NEGATIVE" in text
-    assert "İlk 3 → 4 saat sonra sepete göre" in text
-    assert "kalibre edilmemiş" in text
-    snapshot["liquid_market_context"] = {"regime": "RISK_OFF", "positive_breadth_pct": 20}
-    assert "Durum: REJECT — rejim RISK_OFF" in bot.format_longs(snapshot)
-
-
-def test_health_needs_a_fresh_new_coins_scan_and_hides_its_error_text(monkeypatch):
-    monkeypatch.setattr(bot.altcoin_watch, "fresh", lambda snapshot, now, max_age: True)
-    monkeypatch.setitem(bot.STATE, "altcoin_watch_error", None)
-    monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
-    saved = _preserve_state(*HEALTH_KEYS, "trend_loop_error", "new_coins", "new_coins_error")
-    now = int(bot.time.time())
-    try:
-        bot.STATE.update({"snapshot": {"generated_at": now - 10}, "tactical_snapshot": {"generated_at": now - 10},
-                          "last_error": None, "tactical_last_error": None, "trend_loop_error": None,
-                          "new_coins": None, "new_coins_error": "CMC_API_KEY tanımlı değil"})
-        payload = bot.APP.test_client().get("/").get_json()
-        assert payload["ok"] is False and payload["new_coins_fresh"] is False
-        bot.STATE.update({"new_coins": {"generated_at": now - 10}, "new_coins_error": None})
-        assert bot.APP.test_client().get("/").get_json()["ok"] is True
-        bot.STATE["new_coins_error"] = "NewCoinsDataError: cmc http 429 https://x?key=SECRET"
-        payload = bot.APP.test_client().get("/").get_json()
-        assert payload["ok"] is False and payload["new_coins_last_error"] == "NewCoinsDataError"
-        assert "SECRET" not in json.dumps(payload)
-    finally:
-        bot.STATE.update(saved)

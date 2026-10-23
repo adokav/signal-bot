@@ -1,4 +1,10 @@
-"""Signal Bot v5 Core: MEXC research radars without order authority."""
+"""Signal Bot v5 Core: research menus without order authority.
+
+Three modules run: the altcoin watch (/altcoin), the CoinMarketCap new-coin
+security screen with /check, and the D1 trend loop shadow record (/d1). The
+long position system that replaces the removed short-term radars is designed
+in docs/POSITION_LONG.md and arrives in later PRs.
+"""
 from __future__ import annotations
 
 import html
@@ -8,43 +14,15 @@ import os
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import requests
 from flask import Flask, jsonify
 
-from acce_unified import UnifiedConfig, UnifiedRadarEngine, build_trade_universe
-from acce_unified import long_alerts
 from acce_unified import altcoin_watch, new_coins
-from acce_unified.listing_fundamentals import ListingFundamentalMetricsProvider
-from acce_unified.forward_ledger import ForwardLedger, status_text, update_records
-from acce_unified.radar_gate import (
-    evidence_line,
-    evidence_status_text,
-    family_disqualified,
-    liquid_evidence_line,
-    atr15_from_metadata,
-    closed_change_24h,
-    likit_quality_label,
-    liquid_long_gate,
-    listing_evidence_line,
-    live_vs_replay_text,
-    status_line,
-    tactical_gate,
-    universe_median_change,
-)
-from acce_unified.liquid_long import select_liquid_universe
-from acce_unified.tactical_long_data import (
-    TACTICAL_SYMBOLS,
-    MexcTacticalMarketData,
-    TacticalTimeframe,
-)
-from acce_unified.tactical_long_engine import TacticalLongEngine
+from acce_unified.text import esc
 from acce_unified.trend_loop import Ledger as TrendLedger, MexcSpot, TrendLoop
-from acce_unified.providers import MexcPublicProvider
-from acce_unified.models import MexcListing
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -58,18 +36,7 @@ PORT = int(os.getenv("PORT", "10000"))
 STATE_FILE = Path(os.getenv("CORE_STATE_FILE", "/data/core_state.json"))
 POLL_SECONDS = max(2, int(os.getenv("TELEGRAM_COMMAND_POLL_INTERVAL_SECONDS", "5")))
 STARTUP_MESSAGE = os.getenv("CORE_SEND_STARTUP_MESSAGE", "1") == "1"
-TACTICAL_SCAN_SECONDS = max(60, int(os.getenv("TACTICAL_SCAN_INTERVAL_SECONDS", "300")))
-TACTICAL_ALERTS = os.getenv("TACTICAL_LONG_ALERTS_ENABLED", "1") == "1"
-# Setups whose family failed the historical replay are REJECT (spec §3, §38,
-# §40). User decision (2026-10-01): REJECT setups are not pushed (their 5m-structure
-# stops are noise for a multi-day hold and the family's replay is negative); they
-# stay in the forward ledger and the radar log, marked "sessiz". "1" pushes them.
-TACTICAL_REJECTED_ALERTS = os.getenv("TACTICAL_REJECTED_ALERTS_ENABLED", "0") == "1"
-# Likit-100 top 3: push a labelled alert with stop levels when a coin enters the list.
-LIQUID_LONG_ALERTS = os.getenv("LIQUID_LONG_ALERTS_ENABLED", "1") == "1"
-# User decision (2026-10-01): alerts the confirmed F1 filter labels KAÇIN are not pushed;
-# they stay in the radar log so the filter keeps being checked live. "1" pushes them again.
-LIQUID_AVOID_ALERTS = os.getenv("LIQUID_AVOID_ALERTS_ENABLED", "0") == "1"
+REQUEST_TIMEOUT_SECONDS = max(3, int(os.getenv("REQUEST_TIMEOUT_SECONDS", "15")))
 # D1 trend loop in shadow mode (docs/TREND_LOOP_LIVE.md): the majors' daily close at 00:00 UTC,
 # intraday acute stops, an append-only ledger. User decision (2026-10-02): entry and exit alerts are
 # pushed with the RİSK_AZALTIR label; "0" records them without pushing. No orders either way.
@@ -77,8 +44,8 @@ TREND_LOOP_ENABLED = os.getenv("TREND_LOOP_ENABLED", "1") == "1"
 TREND_LOOP_ALERTS = os.getenv("TREND_LOOP_ALERTS_ENABLED", "1") == "1"
 TREND_LOOP_STOP_SECONDS = max(60, int(os.getenv("TREND_LOOP_STOP_INTERVAL_SECONDS", "300")))
 TREND_LOOP_TICK_SECONDS = 60
-# "Yeni Listeler" menu (docs/NEW_COINS.md). User decision (2026-10-05): new coins come from
-# CoinMarketCap, not MEXC, and every coin goes through a contract-security screen (honeypot, owner
+# "Yeni Coinler" menu (docs/NEW_COINS.md). User decision (2026-10-05): new coins come from
+# CoinMarketCap, and every coin goes through a contract-security screen (honeypot, owner
 # powers, holder concentration, liquidity lock). Needs CMC_API_KEY (free Basic plan) in the environment.
 NEW_COINS_ENABLED = os.getenv("NEW_COINS_ENABLED", "1") == "1"
 NEW_COINS_SCAN_SECONDS = max(600, int(os.getenv("NEW_COINS_SCAN_INTERVAL_SECONDS", "1800")))
@@ -94,66 +61,38 @@ ALTCOIN_WATCH_TICK_SECONDS = 30 * 60
 COINGECKO_DEMO_API_KEY = os.getenv("COINGECKO_DEMO_API_KEY", "").strip()
 COINGECKO_PRO_API_KEY = os.getenv("COINGECKO_PRO_API_KEY", "").strip()
 
-CONFIG = UnifiedConfig.from_env()
-# A snapshot older than three scan cycles is stale evidence, not a current view.
-MAIN_MAX_AGE_SECONDS = 3 * max(60, int(CONFIG.scan_interval_seconds))
-TACTICAL_MAX_AGE_SECONDS = 3 * TACTICAL_SCAN_SECONDS
-EVIDENCE_FOOTER = (
-    "REJECT = geçmiş test negatif ya da kurulum kapısı başarısız; WATCH = setup tespit edildi, "
-    "doğrulama eksik. Puan ve R/R olasılık değildir. Otomatik emir veya pozisyon yetkisi yoktur."
+# Historical base rate shown under the new-coin menu (docs/LISTING_REPLAY_REPORT.md, run #1, closed study).
+NEW_COINS_BASE_RATE = (
+    "Geçmiş test (Binance yeni listelemeleri 2020-10 → 2026-08): kaçınma iddiası doğrulanmadı (NO_CLAIM 6/6); "
+    "medyan getiri negatif, yeni listelemelerin yalnızca %15–28'i BTC'yi geçti, ortalamayı az sayıda büyük kazanan "
+    "taşıdı. CoinMarketCap yeni coinleri için test yok."
 )
-FUNDAMENTAL_PROVIDER = ListingFundamentalMetricsProvider(
-    demo_api_key=COINGECKO_DEMO_API_KEY,
-    pro_api_key=COINGECKO_PRO_API_KEY,
-    timeout=CONFIG.request_timeout_seconds,
-    cache_ttl_seconds=CONFIG.fundamental_cache_ttl_seconds,
-    max_assets=CONFIG.fundamental_max_assets,
-)
-TRADE_UNIVERSE = build_trade_universe()
-ENGINE = UnifiedRadarEngine(CONFIG, TRADE_UNIVERSE, fundamental_provider=FUNDAMENTAL_PROVIDER)
-TACTICAL_DATA = MexcTacticalMarketData(timeout_seconds=CONFIG.request_timeout_seconds)
-TACTICAL_ENGINE = TacticalLongEngine()
-# Klines for stop levels and stop tracking (closed candles only; research use).
-KLINES = MexcPublicProvider(timeout=CONFIG.request_timeout_seconds)
-FORWARD_LEDGER = ForwardLedger(Path(os.getenv(
-    "FORWARD_LEDGER_FILE", str(STATE_FILE.parent / "tactical_forward_ledger.json")
-)))
+
 TREND_LOOP = TrendLoop(
     TrendLedger(Path(os.getenv("TREND_LOOP_LEDGER_FILE", str(STATE_FILE.parent / "trend_loop_ledger.jsonl")))),
-    market=MexcSpot(timeout=CONFIG.request_timeout_seconds),
+    market=MexcSpot(timeout=REQUEST_TIMEOUT_SECONDS),
 )
 TREND_LOOP_LOADED = threading.Event()
-CMC = new_coins.CoinMarketCap(CMC_API_KEY, timeout=CONFIG.request_timeout_seconds)
+CMC = new_coins.CoinMarketCap(CMC_API_KEY, timeout=REQUEST_TIMEOUT_SECONDS)
 NEW_COINS = new_coins.NewCoinsScanner(
-    CMC, new_coins.SecurityProviders(timeout=CONFIG.request_timeout_seconds),
+    CMC, new_coins.SecurityProviders(timeout=REQUEST_TIMEOUT_SECONDS),
     TrendLedger(Path(os.getenv("NEW_COINS_LEDGER_FILE", str(STATE_FILE.parent / "new_coins_ledger.jsonl")))),
     window_hours=max(1, int(os.getenv("NEW_COINS_WINDOW_HOURS", str(new_coins.WINDOW_HOURS)))),
 )
 ALTCOIN_WATCH = altcoin_watch.AltcoinWatch(
     altcoin_watch.CoinGecko(demo_key=COINGECKO_DEMO_API_KEY, pro_key=COINGECKO_PRO_API_KEY),
     altcoin_watch.DefiLlama(),
-    new_coins.SecurityProviders(timeout=CONFIG.request_timeout_seconds),
+    new_coins.SecurityProviders(timeout=REQUEST_TIMEOUT_SECONDS),
     TrendLedger(Path(os.getenv("ALTCOIN_WATCH_LEDGER_FILE", str(STATE_FILE.parent / "altcoin_watch_ledger.jsonl")))),
 )
 # /check runs in the Telegram thread: its own HTTP session; the scanner's lookalike reference is only read.
-CHECKER = new_coins.AddressChecker(new_coins.SecurityProviders(timeout=CONFIG.request_timeout_seconds),
+CHECKER = new_coins.AddressChecker(new_coins.SecurityProviders(timeout=REQUEST_TIMEOUT_SECONDS),
                                    reference=NEW_COINS.current_reference)
 APP = Flask(__name__)
 HTTP = requests.Session()
 LOCK = threading.RLock()
 STATE: dict[str, Any] = {
     "offset": 0,
-    "snapshot": None,
-    "tactical_snapshot": None,
-    "tactical_last_states": {},
-    # symbol -> "STATE:SETUP" whose opening alert was not pushed (REJECT muted): no teardown alert either
-    "tactical_muted": {},
-    "last_error": None,
-    "tactical_last_error": None,
-    "forward_ledger_status": None,
-    "forward_vs_replay": None,
-    "forward_ledger_error": None,
-    "radar_log": [],
     "trend_loop": None,
     "trend_loop_error": None,
     "new_coins": None,
@@ -167,15 +106,12 @@ STATE: dict[str, Any] = {
 
 COMMANDS = [
     {"command": "panel", "description": "Sade kontrol paneli"},
-    {"command": "tactical", "description": "BTC ve ETH giriş/stop radarı"},
-    {"command": "longs", "description": "MEXC Likit 100 Long İlk 3"},
     {"command": "new", "description": "CoinMarketCap yeni coinler: dolandırıcılık taraması"},
     {"command": "check", "description": "Kontrat adresiyle anında dolandırıcılık taraması: /check <adres>"},
     {"command": "altcoin", "description": "Altcoin izleme: arz, gelir, değerleme (uzun vade, araştırma)"},
-    {"command": "radar", "description": "Radara giren long sinyalleri ve stop durumu"},
     {"command": "d1", "description": "D1 döngü: gölge pozisyonlar, çıkış seviyesi ve acil stop"},
     {"command": "status", "description": "Tarama sağlığı ve veri durumu"},
-    {"command": "scan", "description": "Şimdi yeniden tara"},
+    {"command": "scan", "description": "Yeni coin taramasını şimdi yap"},
 ]
 
 
@@ -259,7 +195,7 @@ def _plain(text: str) -> str:
 
 
 def send(text: str, *, keyboard: dict[str, Any] | None = None, html_mode: bool = False) -> None:
-    """Send a message. ``html_mode`` texts must escape every untrusted value (long_alerts.esc)."""
+    """Send a message. ``html_mode`` texts must escape every untrusted value (acce_unified.text.esc)."""
 
     if not TOKEN or not CHAT_ID:
         log.info("Telegram kapalı: %s", (_plain(text) if html_mode else text).replace("\n", " | ")[:180])
@@ -286,13 +222,10 @@ def send(text: str, *, keyboard: dict[str, Any] | None = None, html_mode: bool =
 
 def panel_keyboard() -> dict[str, Any]:
     return {"inline_keyboard": [
-        [{"text": "₿ BTC / Ξ ETH Long", "callback_data": "TACTICAL"}],
-        [{"text": "💧 Long İlk 3", "callback_data": "LONGS"}],
-        [{"text": "📋 Radar kaydı", "callback_data": "RADAR"}],
+        [{"text": "🔭 Altcoin İzleme", "callback_data": "ALTCOIN"}],
         [{"text": "📈 D1 Döngü", "callback_data": "D1"}],
         [{"text": "🆕 Yeni Coinler (CMC)", "callback_data": "NEW"},
          {"text": "🔎 Kontrat Kontrol", "callback_data": "CHECK"}],
-        [{"text": "🔭 Altcoin İzleme", "callback_data": "ALTCOIN"}],
         [
             {"text": "📊 Durum", "callback_data": "STATUS"},
             {"text": "🔄 Şimdi Tara", "callback_data": "SCAN"},
@@ -300,591 +233,28 @@ def panel_keyboard() -> dict[str, Any]:
     ]}
 
 
-def _snapshot() -> dict[str, Any] | None:
-    value = STATE.get("snapshot")
-    return value if isinstance(value, dict) else None
-
-
-def _tactical_snapshot() -> dict[str, Any] | None:
-    value = STATE.get("tactical_snapshot")
-    return value if isinstance(value, dict) else None
-
-
-def _money(value: Any) -> str:
-    try:
-        amount = float(value or 0)
-    except (TypeError, ValueError):
-        amount = 0.0
-    for threshold, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
-        if abs(amount) >= threshold:
-            return f"${amount / threshold:.2f}{suffix}"
-    return f"${amount:.0f}"
-
-
-def _quantity(value: Any, *, missing: str = "yok") -> str:
-    try:
-        amount = float(value)
-    except (TypeError, ValueError):
-        return missing
-    for threshold, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
-        if abs(amount) >= threshold:
-            return f"{amount / threshold:.2f}{suffix}"
-    return f"{amount:g}"
-
-
-def _price(value: Any) -> str:
-    try:
-        amount = float(value)
-    except (TypeError, ValueError):
-        return "veri yok"
-    if amount >= 1000:
-        return f"${amount:,.0f}"
-    if amount >= 1:
-        return f"${amount:,.2f}"
-    return f"${amount:.6f}".rstrip("0").rstrip(".")
-
-
-def _pct(value: Any, *, missing: str = "?") -> str:
-    try:
-        return f"%{float(value):+.1f}"
-    except (TypeError, ValueError):
-        return missing
-
-
-FUNDAMENTAL_KEYS = (
-    "status", "circulating_supply", "total_supply", "max_supply", "circulation_pct",
-    "ath_price_usd", "ath_change_pct", "ath_date", "atl_price_usd", "atl_change_pct", "atl_date",
-)
-# Title tells CoinGecko's resolver which project the symbol means (fake tokens reuse BTC/ETH).
-TACTICAL_TITLES = {"BTCUSDT": "Bitcoin (BTC)", "ETHUSDT": "Ethereum (ETH)"}
-
-
-def _fundamental_lines(fundamental: dict[str, Any] | None, *, indent: str = "   ") -> list[str]:
-    """Supply and ATH/ATL facts from CoinGecko; missing data is named, never shown as zero."""
-
-    f = fundamental or {}
-    if f.get("status") != "READY":
-        return [f"{indent}Arz ve ATH/ATL: {f.get('status') or 'DATA_PENDING'}"]
-    supply = (
-        f"{indent}Arz: dolaşan {_quantity(f.get('circulating_supply'))} · toplam {_quantity(f.get('total_supply'))} · "
-        f"max {_quantity(f.get('max_supply'), missing='açıklanmamış/sınırsız')}"
-    )
-    if f.get("circulation_pct") is not None:
-        supply += f" · dolaşımda %{float(f['circulation_pct']):.1f}"
-    lines = [
-        supply,
-        f"{indent}ATH {_price(f.get('ath_price_usd'))} ({_pct(f.get('ath_change_pct'))}) · "
-        f"ATL {_price(f.get('atl_price_usd'))} ({_pct(f.get('atl_change_pct'))})",
-    ]
-    dates = [f"{label} {str(f[key])[:10]}" for label, key in (("ATH", "ath_date"), ("ATL", "atl_date")) if f.get(key)]
-    if dates:
-        lines.append(f"{indent}Tarih: " + " · ".join(dates))
-    return lines
-
-
-def _fundamental_rows(fundamental: dict[str, Any] | None) -> list[tuple[str, str]]:
-    """The same facts as table rows for alerts; missing data is named, never shown as zero."""
-
-    f = fundamental or {}
-    if f.get("status") != "READY":
-        return [("Arz/ATH", str(f.get("status") or "DATA_PENDING"))]
-    circulating = _quantity(f.get("circulating_supply"))
-    if f.get("circulation_pct") is not None:
-        circulating += f" · %{float(f['circulation_pct']):.0f}"
-    rows = [
-        ("Dolaşan arz", circulating),
-        ("Toplam arz", _quantity(f.get("total_supply"))),
-        ("Max arz", _quantity(f.get("max_supply"), missing="açıklanmamış")),
-    ]
-    for label, prefix in (("ATH", "ath"), ("ATL", "atl")):
-        rows.append((label, f"{_price(f.get(prefix + '_price_usd'))} · {_pct(f.get(prefix + '_change_pct'))}"))
-        if f.get(prefix + "_date"):
-            day = str(f[prefix + "_date"])[:10]
-            rows.append((f"{label} tarihi", ".".join(reversed(day.split("-"))) if len(day) == 10 else day))
-    return rows
-
-
-def _tactical_fundamentals(symbols: Any) -> dict[str, dict[str, Any]]:
-    """CoinGecko facts for BTC/ETH (cached by the provider); empty on any failure."""
-
-    rows = [
-        MexcListing(symbol=s[:-4], pair=s, title=TACTICAL_TITLES.get(s, f"{s[:-4]} ({s[:-4]})"), rank=1,
-                    spot_status="OPEN", last_price=0.0, change_pct=0.0, quote_volume=0.0,
-                    volume_acceleration=0.0, discovery_source="TACTICAL")
-        for s in sorted({str(x).upper() for x in symbols}) if s.endswith("USDT")
-    ]
-    if not rows:
-        return {}
-    try:
-        return dict(FUNDAMENTAL_PROVIDER.fetch_many(rows))
-    except Exception as exc:
-        log.warning("Taktik temel veri alınamadı: %s", _safe_error(exc))
-        return {}
-
-
-def format_longs(snapshot: dict[str, Any] | None) -> str:
-    if not snapshot:
-        return "💧 MEXC LİKİT 100 — LONG İLK 3\n\nİlk tarama bekleniyor."
-    rows = (snapshot.get("liquid_long_candidates") or [])[:3]
-    context = snapshot.get("liquid_market_context") or {}
-    lines = [
-        "💧 MEXC LİKİT 100 — LONG İLK 3",
-        f"Rejim: {context.get('regime') or '?'} · Pozitif genişlik %{float(context.get('positive_breadth_pct') or 0):.1f}",
-        "",
-    ]
-    if not rows:
-        lines.append("Şu anda bütün kalite ve risk kapılarını geçen aday yok.")
-    now = int(time.time())
-    for index, item in enumerate(rows, 1):
-        meta = item.get("metadata") or {}
-        metrics = meta.get("long_metrics") or {}
-        fundamentals = meta.get("fundamentals") or {}
-        decision = liquid_long_gate(
-            item,
-            market_regime=context.get("regime"),
-            generated_at=snapshot.get("generated_at"),
-            now=now,
-            max_age_seconds=MAIN_MAX_AGE_SECONDS,
-        )
-        quality = _f1_label(str(item.get("symbol") or ""), meta, now)
-        lines.extend([
-            f"{index}. {item.get('symbol', '?')} — radar puanı {int(item.get('score') or 0)}/100 · {item.get('stage') or '-'}",
-            f"   {status_line(decision)}",
-            f"   Kalite filtresi (F1): {quality.text} — {quality.detail}",
-            f"   1s %{float(metrics.get('change_1h_pct') or 0):+.1f} · 4s %{float(metrics.get('change_4h_pct') or 0):+.1f} · RSI {float(metrics.get('rsi14') or 0):.0f}",
-            f"   Hacim ivmesi {float(metrics.get('volume_ratio') or 0):.1f}x · Spread {float(meta.get('spread_bps') or 0):.1f} bp",
-            f"   MEXC 24s {_money(meta.get('quote_volume'))}",
-            *_fundamental_lines(fundamentals),
-            "",
-        ])
-    lines.append(liquid_evidence_line())
-    lines.append("Radar puanı kalibre edilmemiş bir sıralamadır; işlem emri değildir.")
-    lines.append(EVIDENCE_FOOTER)
-    return "\n".join(lines)
-
-
-def format_tactical(report: dict[str, Any] | None, *, fundamentals: dict[str, dict[str, Any]] | None = None) -> str:
-    lines = ["₿ BTC / Ξ ETH — TAKTİK LONG RADARI", "MEXC Spot · SHADOW", ""]
-    if not report:
-        lines.extend(["Henüz geçerli radar taraması yok.", str(STATE.get("tactical_last_error") or "")])
-        return "\n".join(line for line in lines if line)
-    now = int(time.time())
-    for item in report.get("assessments") or []:
-        symbol = str(item.get("symbol") or "?")
-        state = str(item.get("state") or "NO_LONG")
-        setup = str(item.get("setup") or "-")
-        structure = str(item.get("structure_4h") or "?")
-        decision = tactical_gate(item, now=now, max_age_seconds=TACTICAL_MAX_AGE_SECONDS)
-        lines.append(f"{symbol} — setup durumu {state}")
-        lines.append(status_line(decision))
-        lines.append(f"Yapı: {structure} · Setup: {setup}")
-        if fundamentals is not None:
-            lines.extend(_fundamental_lines(fundamentals.get(symbol), indent=""))
-        plan = item.get("plan") or {}
-        if plan:
-            lines.extend([
-                f"Giriş bölgesi: {_price(plan.get('entry_low'))} – {_price(plan.get('entry_high'))}",
-                f"Teknik geçersizlik: {_price(plan.get('technical_invalidation'))}",
-                f"Hard stop: {_price(plan.get('hard_stop'))}",
-                f"Hedef 1: {_price(plan.get('target_1'))} · net R/R {float(plan.get('net_rr_1') or 0):.2f}",
-                f"Hedef 2: {_price(plan.get('target_2'))} · net R/R {float(plan.get('net_rr_2') or 0):.2f}",
-                evidence_line(item.get("setup")),
-                "Sinyal bazında kalibre olasılık: YOK (yukarıdaki oran aile ortalamasıdır)",
-            ])
-        reasons = item.get("reasons") or []
-        risks = item.get("risk_flags") or []
-        evidence = item.get("evidence") or []
-        if evidence:
-            lines.append("Kanıt: " + ", ".join(evidence))
-        if risks:
-            lines.append("Risk: " + ", ".join(risks))
-        if reasons:
-            lines.append("Karar nedeni: " + ", ".join(reasons))
-        lines.append("")
-    lines.append("Plan araştırma çıktısıdır; otomatik emir veya pozisyon yetkisi yoktur.")
-    lines.append(EVIDENCE_FOOTER)
-    return "\n".join(lines)
-
-
 def format_new() -> str:
     with LOCK:
         snapshot, error = STATE.get("new_coins"), STATE.get("new_coins_error")
     return new_coins.render(
         snapshot, now=int(time.time()), error=error, enabled=NEW_COINS_ENABLED,
-        max_age=NEW_COINS_MAX_AGE_SECONDS,
-        base_rate=listing_evidence_line(venue_note="CoinMarketCap yeni coinleri için test yok."),
+        max_age=NEW_COINS_MAX_AGE_SECONDS, base_rate=NEW_COINS_BASE_RATE,
     )
 
 
-def format_status(snapshot: dict[str, Any] | None) -> str:
-    errors = (snapshot or {}).get("errors") or []
-    generated = int((snapshot or {}).get("generated_at") or 0)
-    tactical = _tactical_snapshot() or {}
-    tactical_age = max(0, int(time.time()) - int(tactical.get("generated_at") or 0)) if tactical else 0
-    age = max(0, int(time.time()) - generated) if generated else 0
-    error_text = ", ".join(errors) if errors else str(STATE.get("last_error") or "yok")
+def format_status() -> str:
+    now = int(time.time())
     return "\n".join(line for line in [
         "📊 SIGNAL BOT v5 CORE",
         "Mod: SHADOW / RADAR ONLY",
-        f"Ana tarama: {age} sn önce" if generated else "Ana tarama: henüz yok",
-        f"Taktik radar: {tactical_age} sn önce" if tactical else "Taktik radar: henüz yok",
-        f"Likit evren: {int((snapshot or {}).get('liquid_universe_size') or 0)}/100",
-        f"Long aday: {len((snapshot or {}).get('liquid_long_candidates') or [])}/3",
-        new_coins.status_line(STATE.get("new_coins"), now=int(time.time()), enabled=NEW_COINS_ENABLED,
-                              configured=CMC.configured, error=STATE.get("new_coins_error")),
-        altcoin_watch.status_line(STATE.get("altcoin_watch"), now=int(time.time()), enabled=ALTCOIN_WATCH_ENABLED,
+        altcoin_watch.status_line(STATE.get("altcoin_watch"), now=now, enabled=ALTCOIN_WATCH_ENABLED,
                                   error=STATE.get("altcoin_watch_error"), keyed=ALTCOIN_WATCH.gecko.keyed),
-        f"Ana hata: {error_text}",
-        f"Taktik hata: {STATE.get('tactical_last_error') or 'yok'}",
-        evidence_status_text(),
-        str(STATE.get("forward_ledger_status") or "İleriye dönük kayıt: henüz yok"),
-        str(STATE.get("forward_vs_replay") or ""),
-        _radar_status_line(),
+        new_coins.status_line(STATE.get("new_coins"), now=now, enabled=NEW_COINS_ENABLED,
+                              configured=CMC.configured, error=STATE.get("new_coins_error")),
         TREND_LOOP.status_line() if TREND_LOOP_ENABLED else "D1 döngü: kapalı",
         f"D1 hata: {STATE.get('trend_loop_error')}" if STATE.get("trend_loop_error") else "",
-        f"Kayıt hatası: {STATE.get('forward_ledger_error')}" if STATE.get("forward_ledger_error") else "",
         "Emir yetkisi: YOK",
     ] if line)
-
-
-def _update_forward_ledger(snapshot: Any, new_items: list[dict[str, Any]]) -> None:
-    """Advance the shadow track record; never breaks the radar, never overwrites a corrupt ledger."""
-
-    try:
-        records = FORWARD_LEDGER.load()
-        m5 = {
-            symbol: snapshot.candles[symbol][TacticalTimeframe.M5]
-            for symbol in TACTICAL_SYMBOLS
-        }
-        updated = update_records(records, new_assessments=new_items, m5_by_symbol=m5)
-        if updated != records:
-            FORWARD_LEDGER.save(updated)
-        STATE["forward_ledger_status"] = status_text(updated)
-        STATE["forward_vs_replay"] = live_vs_replay_text(updated)
-        STATE["forward_ledger_error"] = None
-    except Exception as exc:
-        error = _safe_error(exc)
-        log.warning("İleriye dönük kayıt güncellenemedi: %s", error)
-        STATE["forward_ledger_error"] = error
-
-
-# ---------------------------------------------------------------------------
-# Long alerts, stop levels and the radar log (acce_unified.long_alerts)
-# ---------------------------------------------------------------------------
-
-
-def _stop_plan_for(symbol: str, price: float, now: int) -> long_alerts.StopPlan | None:
-    try:
-        rows = KLINES.fetch_klines(symbol, long_alerts.STOP_INTERVAL_SECONDS, 40)
-    except Exception as exc:
-        log.warning("Stop için kline alınamadı (%s): %s", symbol, _safe_error(exc))
-        return None
-    return long_alerts.compute_stop_plan(rows, price, now=now)
-
-
-def _track_radar(rows: list[dict[str, Any]], now: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Advance open entries with closed 15m candles; returns (updated entries, entries that hit the stop)."""
-
-    updated, stopped = [], []
-    for entry in rows:
-        if entry.get("status") != long_alerts.OPEN:
-            continue
-        candles: list[Any] = []
-        if now >= long_alerts.next_check_due(entry):
-            try:
-                candles = KLINES.fetch_klines(entry["symbol"], long_alerts.TRACK_INTERVAL_SECONDS,
-                                              long_alerts.candles_needed(entry, now=now))
-            except Exception as exc:
-                log.warning("Radar takibi için kline alınamadı (%s): %s", entry["symbol"], _safe_error(exc))
-        new, event = long_alerts.track_entry(entry, candles, now=now)
-        if new != entry:
-            updated.append(new)
-        if event == long_alerts.STOPPED:
-            stopped.append(new)
-    return updated, stopped
-
-
-def _merge_radar(fresh: list[dict[str, Any]], updated: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Apply tracking updates and append new entries under the lock; returns the entries appended."""
-
-    with LOCK:
-        rows = [dict(e) for e in STATE.get("radar_log") or []]
-        by_id = {e["id"]: e for e in updated}
-        rows = [by_id.get(e.get("id"), e) for e in rows]
-        opened = []
-        for entry in fresh:
-            if long_alerts.can_open(rows, entry["source"], entry["symbol"], now=int(entry["opened_at"])):
-                rows.append(entry)
-                opened.append(entry)
-        STATE["radar_log"] = long_alerts.trim(rows)
-        _save_state()
-    return opened
-
-
-F1_LOCK = threading.Lock()
-F1_CACHE: dict[str, Any] = {}
-
-
-def _f1_closed_changes(now: int) -> dict[str, Any]:
-    """Closed-candle 24h changes of the current MEXC top-100 and their median, once per 15m bar.
-
-    The research feature used closed candles only; the ticker's 24h change
-    includes the forming candle, so it is never used for the F1 label.
-    Failures leave changes missing, which makes the label UNKNOWN.
-    """
-
-    bar = now - now % 900
-    with F1_LOCK:
-        if F1_CACHE.get("bar") == bar:
-            return dict(F1_CACHE)
-        changes: dict[str, float | None] = {}
-        try:
-            universe = select_liquid_universe(
-                ENGINE.cex_provider.fetch_tickers(), size=CONFIG.liquid_universe_size,
-                min_quote_volume=CONFIG.liquid_min_quote_volume, required_venue="MEXC",
-            )
-        except Exception as exc:
-            log.warning("F1 için evren alınamadı: %s", _safe_error(exc))
-            universe = []
-
-        def one(symbol: str) -> tuple[str, float | None]:
-            try:
-                rows = KLINES.fetch_klines(symbol, 900, 98)
-            except Exception:
-                return symbol, None
-            return symbol, closed_change_24h(rows, now=now)
-
-        if universe:
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                changes = dict(pool.map(one, [item.symbol for item in universe]))
-        F1_CACHE.clear()
-        F1_CACHE.update(bar=bar, changes=changes, median=universe_median_change(changes))
-        return dict(F1_CACHE)
-
-
-def _f1_label(symbol: str, meta: dict[str, Any], now: int) -> Any:
-    closed = _f1_closed_changes(now)
-    change = closed["changes"].get(symbol)
-    if change is None and symbol not in closed["changes"]:
-        try:
-            change = closed_change_24h(KLINES.fetch_klines(symbol, 900, 98), now=now)
-        except Exception:
-            change = None
-    return likit_quality_label(atr15_pct=atr15_from_metadata(meta), change_24h=change,
-                               universe_median=closed["median"])
-
-
-def _liquid_radar(snapshot: dict[str, Any]) -> None:
-    now = int(time.time())
-    with LOCK:
-        rows = [dict(e) for e in STATE.get("radar_log") or []]
-    context = snapshot.get("liquid_market_context") or {}
-    fresh: list[dict[str, Any]] = []
-    for index, item in enumerate((snapshot.get("liquid_long_candidates") or [])[:3], 1):
-        symbol = str(item.get("symbol") or "").upper()
-        if not symbol or not long_alerts.can_open(rows + fresh, "LIKIT100", symbol, now=now):
-            continue
-        meta = item.get("metadata") or {}
-        price = float(meta.get("last_price") or 0)
-        decision = liquid_long_gate(item, market_regime=context.get("regime"), generated_at=snapshot.get("generated_at"),
-                                    now=now, max_age_seconds=MAIN_MAX_AGE_SECONDS)
-        entry = long_alerts.open_entry(source="LIKIT100", symbol=symbol, now=now, gate_status=decision.status,
-                                       detail=status_line(decision), plan=_stop_plan_for(symbol, price, now),
-                                       entry_price=price or None)
-        fundamentals = dict(meta.get("fundamentals") or {})
-        quality = _f1_label(symbol, meta, now)
-        entry.update(rank=index, radar_score=int(item.get("score") or 0),
-                     fundamentals={key: fundamentals.get(key) for key in FUNDAMENTAL_KEYS},
-                     quality=quality.status, quality_text=quality.text, quality_detail=quality.detail,
-                     quality_inputs={"atr15_pct": quality.atr15_pct, "rel_24h": quality.rel_24h},
-                     muted=quality.status == "AVOID" and not LIQUID_AVOID_ALERTS)
-        fresh.append(entry)
-    updated, stopped = _track_radar(rows, now)
-    opened = _merge_radar(fresh, updated)
-    messages = []
-    if LIQUID_LONG_ALERTS:
-        for entry in opened:
-            if entry.get("muted"):
-                continue        # KAÇIN: logged and tracked, not pushed
-            icon = "⛔" if entry["gate_status"] == "REJECT" else "👀"
-            messages.append(long_alerts.alert_text(
-                entry, icon=icon, title=f"LONG SİNYALİ · Likit-100 #{entry['rank']}", evidence=liquid_evidence_line(),
-                head_rows=[("Radar puanı", f"{entry['radar_score']}/100"), ("Kalite (F1)", entry["quality_text"])],
-                fact_rows=_fundamental_rows(entry.get("fundamentals")),
-                notes=[f"Kalite filtresi: {entry['quality_detail']}"],
-            ))
-    for entry in stopped:
-        if entry.get("muted"):
-            continue            # its opening alert was never sent
-        if (LIQUID_LONG_ALERTS if entry["source"] == "LIKIT100" else TACTICAL_ALERTS):
-            messages.append(long_alerts.stop_alert_text(entry))
-    for message in messages:
-        try:
-            send(message, keyboard=panel_keyboard(), html_mode=True)
-        except Exception:
-            log.warning("Long uyarısı gönderilemedi", exc_info=True)
-
-
-def _radar_status_line() -> str:
-    with LOCK:
-        rows = [dict(e) for e in STATE.get("radar_log") or []]
-    open_count = sum(e.get("status") == long_alerts.OPEN for e in rows)
-    avoid = "gönderiliyor" if LIQUID_AVOID_ALERTS else "gönderilmiyor, kayıtta"
-    reject = "gönderiliyor" if TACTICAL_REJECTED_ALERTS else "gönderilmiyor, kayıtta"
-    return (f"Radar kaydı: {open_count} açık · " + long_alerts.summary_line(rows, now=int(time.time()))
-            + f" · KAÇIN etiketli Likit-100 uyarıları: {avoid} · REJECT taktik uyarıları: {reject}")
-
-
-def scan_once() -> dict[str, Any] | None:
-    try:
-        snapshot = ENGINE.scan_once().to_dict()
-    except Exception as exc:
-        error = _safe_error(exc)
-        log.warning("Tarama başarısız: %s", error)
-        with LOCK:
-            STATE["last_error"] = error
-            _save_state()
-        return None
-    with LOCK:
-        STATE["snapshot"] = snapshot
-        STATE["last_error"] = None
-        _save_state()
-    try:
-        _liquid_radar(snapshot)
-    except Exception as exc:  # the radar log must never break the scan
-        log.warning("Radar kaydı güncellenemedi: %s", _safe_error(exc))
-    return snapshot
-
-
-def _tactical_radar_entry(market: Any, item: dict[str, Any], decision: Any, now: int) -> long_alerts.StopPlan | None:
-    """Record a tactical setup in the radar log with the engine's own levels (call under LOCK)."""
-
-    symbol = str(item.get("symbol") or "").upper()
-    levels = item.get("plan") or {}
-    try:
-        m5 = market.candles[symbol][TacticalTimeframe.M5]
-        last = m5[-1]
-    except (KeyError, IndexError, TypeError, AttributeError):
-        return None
-    plan = long_alerts.plan_from_levels(
-        float(last.close), float(levels.get("technical_invalidation") or 0), float(levels.get("hard_stop") or 0),
-        last_candle_open=int(last.open_time),
-    )
-    rows = [dict(e) for e in STATE.get("radar_log") or []]
-    if long_alerts.can_open(rows, "TAKTIK", symbol, now=now):
-        entry = long_alerts.open_entry(source="TAKTIK", symbol=symbol, now=now, gate_status=decision.status,
-                                       detail=status_line(decision), plan=plan, entry_price=float(last.close))
-        entry["setup"] = str(item.get("setup") or "-")
-        entry["muted"] = decision.status == "REJECT" and not TACTICAL_REJECTED_ALERTS   # no opening, no stop alert
-        STATE["radar_log"] = long_alerts.trim(rows + [entry])
-    return plan
-
-
-SETUP_LABELS = {
-    "TREND_PULLBACK": "Trend geri çekilme",
-    "BREAKOUT_RETEST": "Kırılım retest",
-    "RANGE_RECLAIM": "Aralık geri alma",
-    "LIQUIDITY_SWEEP_RECLAIM": "Likidite süpürme",
-}
-STRUCTURE_LABELS = {"BULLISH": "yükseliş", "BEARISH": "düşüş", "RANGE_OR_TRANSITION": "yatay"}
-
-
-def _tactical_alert(item: dict[str, Any], decision: Any, plan: long_alerts.StopPlan | None, now: int) -> Any:
-    """Alert builder; the fundamentals rows are fetched later, outside the state lock."""
-
-    symbol = str(item.get("symbol") or "?")
-    setup = str(item.get("setup") or "-")
-    levels = item.get("plan") or {}
-    icon = "⛔" if decision.status == "REJECT" else "👀"
-    entry = {"symbol": symbol, "source": "TAKTIK", "opened_at": now, "gate_status": decision.status,
-             "detail": status_line(decision), "plan": plan.to_dict() if plan else None}
-    zone = ("Giriş", f"{long_alerts._num(levels['entry_low'])} – {long_alerts._num(levels['entry_high'])}") \
-        if levels.get("entry_low") and levels.get("entry_high") else None
-    targets = [
-        (f"Hedef {k}", f"{long_alerts._num(levels[f'target_{k}'])} · R/R {float(levels.get(f'net_rr_{k}') or 0):.1f}")
-        for k in (1, 2) if levels.get(f"target_{k}")
-    ]
-    risks = [str(r) for r in item.get("risk_flags") or []]
-    head = [("Setup", SETUP_LABELS.get(setup, setup)),
-            ("Durum", f"{item.get('state')} · 4s {STRUCTURE_LABELS.get(str(item.get('structure_4h')), '?')}")]
-
-    def render(fact_rows: list[tuple[str, str]]) -> str:
-        return long_alerts.alert_text(
-            entry, icon=icon, title="LONG SİNYALİ · Taktik", evidence=evidence_line(setup), head_rows=head,
-            zone=zone, targets=targets, fact_rows=fact_rows, invalidation="motorun teknik seviyesi",
-            notes=[*([f"Risk: {', '.join(risks)}"] if risks else []),
-                   "Sinyal bazında kalibre olasılık: YOK (aşağıdaki oran aile ortalamasıdır)."],
-        )
-    return render
-
-
-def tactical_scan_once(*, emit_alerts: bool = True) -> dict[str, Any] | None:
-    try:
-        market = TACTICAL_DATA.snapshot()
-        report = TACTICAL_ENGINE.analyze(market).to_dict()
-    except Exception as exc:
-        error = _safe_error(exc)
-        log.warning("Taktik radar taraması başarısız: %s", error)
-        with LOCK:
-            STATE["tactical_last_error"] = error
-            _save_state()
-        return None
-    alerts: list[tuple[str | None, Any]] = []
-    now = int(time.time())
-    with LOCK:
-        previous = dict(STATE.get("tactical_last_states") or {})
-        muted = dict(STATE.get("tactical_muted") or {})
-        current: dict[str, str] = {}
-        new_setups: list[dict[str, Any]] = []
-        for item in report.get("assessments") or []:
-            symbol = str(item.get("symbol") or "?")
-            state = str(item.get("state") or "NO_LONG")
-            setup = str(item.get("setup") or "-")
-            current[symbol] = f"{state}:{setup}"
-            old = previous.get(symbol)
-            if old != current[symbol] and state in {"READY", "TRIGGERED"}:
-                new_setups.append(item)  # the ledger records REJECT setups too: live check of the replay
-                decision = tactical_gate(item, now=now, max_age_seconds=TACTICAL_MAX_AGE_SECONDS)
-                plan = _tactical_radar_entry(market, item, decision, now)
-                if decision.status == "REJECT" and not TACTICAL_REJECTED_ALERTS:
-                    muted[symbol] = current[symbol]   # whatever made it REJECT (family, staleness, geometry)
-                    continue
-                muted.pop(symbol, None)
-                alerts.append((symbol, _tactical_alert(item, decision, plan, now)))
-            elif old and old.split(":", 1)[0] in {"READY", "TRIGGERED"} and state == "NO_LONG":
-                was_muted = muted.pop(symbol, None) is not None
-                if was_muted or (family_disqualified(old.split(":", 1)[1]) and not TACTICAL_REJECTED_ALERTS):
-                    continue  # its opening alert was never sent
-                reasons = ", ".join(str(r) for r in item.get("reasons") or ["NO_VALID_SETUP"])
-                alerts.append((None, f"⚠️ <b>{long_alerts.esc(symbol)}</b> Long formasyonu bozuldu.\n"
-                                     f"Neden: {long_alerts.esc(reasons)}"))
-        _update_forward_ledger(market, new_setups)
-        STATE["tactical_snapshot"] = report
-        STATE["tactical_last_states"] = current
-        STATE["tactical_muted"] = {s: v for s, v in muted.items() if s in current}
-        STATE["tactical_last_error"] = None
-        _save_state()
-    if emit_alerts and TACTICAL_ALERTS and alerts:
-        facts = _tactical_fundamentals(symbol for symbol, _ in alerts if symbol)
-        for symbol, alert in alerts:
-            text = alert(_fundamental_rows(facts.get(symbol))) if callable(alert) else alert
-            try:
-                send(text, keyboard=panel_keyboard(), html_mode=True)
-            except Exception:
-                log.warning("Taktik uyarı gönderilemedi", exc_info=True)
-    return report
-
-
-def scanner_loop() -> None:
-    while True:
-        scan_once()
-        time.sleep(CONFIG.scan_interval_seconds)
-
-
-def tactical_scanner_loop() -> None:
-    while True:
-        tactical_scan_once()
-        time.sleep(TACTICAL_SCAN_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -1031,18 +401,18 @@ def format_altcoin(text: str = "") -> str:
     parts = str(text or "").split()
     query = parts[1] if len(parts) == 2 and parts[0].startswith("/") else None
     if len(parts) > 2 or (query is not None and not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", query)):
-        return long_alerts.esc("Kullanım: /altcoin ya da /altcoin <sembol>")
+        return esc("Kullanım: /altcoin ya da /altcoin <sembol>")
     if query is None:
         return altcoin_watch.render(snapshot, now=now, error=error, enabled=ALTCOIN_WATCH_ENABLED,
                                     max_age=ALTCOIN_WATCH_MAX_AGE_SECONDS, keyed=ALTCOIN_WATCH.gecko.keyed,
                                     retry_at=int(STATE.get("altcoin_watch_retry_at") or 0))
     found = altcoin_watch.find(snapshot, query)
     if not found:
-        return long_alerts.esc(f"{query[:20]} izleme evreninde yok (ilk {altcoin_watch.UNIVERSE_SIZE} altcoin) "
-                               "ya da henüz tarama yapılmadı.")
+        return esc(f"{query[:20]} izleme evreninde yok (ilk {altcoin_watch.UNIVERSE_SIZE} altcoin) "
+                   "ya da henüz tarama yapılmadı.")
     if len(found) > 1:
         ids = ", ".join(str(c.get("id"))[:40] for c in found[:5])
-        return long_alerts.esc(f"Bu sembolde birden çok coin var: {ids}. CoinGecko kimliğiyle sor: /altcoin <kimlik>")
+        return esc(f"Bu sembolde birden çok coin var: {ids}. CoinGecko kimliğiyle sor: /altcoin <kimlik>")
     return altcoin_watch.render_card(found[0], now=now, generated_at=int((snapshot or {}).get("generated_at") or 0))
 
 
@@ -1067,10 +437,8 @@ def trend_loop_loop() -> None:
 def _command(text: str) -> str:
     token = (text or "").strip().split(maxsplit=1)[0].lower()
     return {
-        "/start": "PANEL", "/panel": "PANEL", "/tactical": "TACTICAL",
-        "/btceth": "TACTICAL", "/longs": "LONGS", "/new": "NEW",
-        "/listings": "NEW", "/status": "STATUS", "/scan": "SCAN", "/radar": "RADAR", "/d1": "D1",
-        "/check": "CHECK", "/altcoin": "ALTCOIN",
+        "/start": "PANEL", "/panel": "PANEL", "/new": "NEW", "/listings": "NEW",
+        "/status": "STATUS", "/scan": "SCAN", "/d1": "D1", "/check": "CHECK", "/altcoin": "ALTCOIN",
     }.get(token, token.lstrip("/").upper())
 
 
@@ -1096,24 +464,12 @@ def check_address(text: str) -> None:
 
 
 def handle(action: str, text: str = "") -> None:
-    snapshot = _snapshot()
-    if action == "TACTICAL":
-        refreshed = tactical_scan_once(emit_alerts=False)
-        report = refreshed or _tactical_snapshot()
-        facts = _tactical_fundamentals(str(a.get("symbol") or "") for a in (report or {}).get("assessments") or [])
-        send(format_tactical(report, fundamentals=facts), keyboard=panel_keyboard())
-    elif action == "LONGS":
-        send(format_longs(snapshot), keyboard=panel_keyboard())
-    elif action == "NEW":
+    if action == "NEW":
         send(format_new(), keyboard=panel_keyboard(), html_mode=True)
     elif action == "CHECK":
         check_address(text)
     elif action == "ALTCOIN":
         send(format_altcoin(text), keyboard=panel_keyboard(), html_mode=True)
-    elif action == "RADAR":
-        with LOCK:
-            rows = [dict(e) for e in STATE.get("radar_log") or []]
-        send(long_alerts.format_radar(rows, now=int(time.time())), keyboard=panel_keyboard(), html_mode=True)
     elif action == "D1":
         now = int(time.time())
         if not TREND_LOOP_ENABLED:
@@ -1122,22 +478,27 @@ def handle(action: str, text: str = "") -> None:
             send(f"D1 döngü yüklenemedi; pozisyonlar bilinmiyor. Hata: {STATE.get('trend_loop_error') or 'yok'}",
                  keyboard=panel_keyboard())
         else:
-            text = TREND_LOOP.positions_text(now)
+            report = TREND_LOOP.positions_text(now)
             if not TREND_LOOP.fresh(now, stop_seconds=TREND_LOOP_STOP_SECONDS):
-                text += "\n" + long_alerts.esc(
+                report += "\n" + esc(
                     "⚠️ Döngü güncel değil: son kapanış karara bağlanmadı ya da stop kontrolü gecikti. "
                     f"Hata: {STATE.get('trend_loop_error') or 'yok'}")
-            send(text, keyboard=panel_keyboard(), html_mode=True)
+            send(report, keyboard=panel_keyboard(), html_mode=True)
     elif action == "STATUS":
-        send(format_status(snapshot), keyboard=panel_keyboard())
+        send(format_status(), keyboard=panel_keyboard())
     elif action == "SCAN":
-        send("🔄 Tüm radar taramaları başlatıldı.", keyboard=panel_keyboard())
-        refreshed = scan_once()
-        tactical_scan_once()
-        send(format_status(refreshed or _snapshot()), keyboard=panel_keyboard())
+        # The altcoin watch refreshes weekly on its own thread (a refresh takes minutes); only the
+        # new-coin scan is quick enough to run from the command thread.
+        send("🔄 Yeni coin taraması başlatıldı.", keyboard=panel_keyboard())
+        new_coins_tick()
+        send(format_status(), keyboard=panel_keyboard())
     else:
         send(
-            "🎯 SIGNAL BOT v5 CORE\n\nAktif araştırma motorları:\n• BTC/ETH Taktik Long giriş ve stop radarı\n• MEXC Likit 100 Long İlk 3\n• CoinMarketCap yeni coinler: dolandırıcılık taraması\n• Altcoin izleme: arz, gelir, değerleme (uzun vade)\n• D1 trend döngüsü (gölge kayıt, emir yok)",
+            "🎯 SIGNAL BOT v5 CORE\n\nAraştırma menüleri (emir yetkisi yok):\n"
+            "• Altcoin izleme: arz, gelir, değerleme (uzun vade)\n"
+            "• D1 trend döngüsü (gölge kayıt)\n"
+            "• CoinMarketCap yeni coinler ve /check: dolandırıcılık taraması\n\n"
+            "Uzun vadeli long pozisyon sistemi hazırlanıyor: docs/POSITION_LONG.md",
             keyboard=panel_keyboard(),
         )
 
@@ -1183,14 +544,6 @@ def telegram_loop() -> None:
             time.sleep(POLL_SECONDS)
 
 
-def _age_ok(generated_at: Any, max_age: int, now: int) -> bool:
-    try:
-        ts = int(generated_at)
-    except (TypeError, ValueError):
-        return False
-    return ts > 0 and 0 <= now - ts <= max_age
-
-
 def _error_code(value: Any) -> str | None:
     # Public endpoint: expose only the exception class, never message text.
     if not value:
@@ -1200,11 +553,7 @@ def _error_code(value: Any) -> str | None:
 
 @APP.get("/")
 def health() -> Any:
-    snapshot = _snapshot() or {}
-    tactical = _tactical_snapshot() or {}
     now = int(time.time())
-    main_fresh = _age_ok(snapshot.get("generated_at"), MAIN_MAX_AGE_SECONDS, now)
-    tactical_fresh = _age_ok(tactical.get("generated_at"), TACTICAL_MAX_AGE_SECONDS, now)
     trend_fresh = TREND_LOOP.fresh(now, stop_seconds=TREND_LOOP_STOP_SECONDS) if TREND_LOOP_ENABLED else None
     coins_fresh = (new_coins.fresh(STATE.get("new_coins"), now=now, max_age=NEW_COINS_MAX_AGE_SECONDS)
                    if NEW_COINS_ENABLED else None)
@@ -1213,20 +562,11 @@ def health() -> Any:
     return jsonify({
         # Healthy means fresh artifacts exist, not merely "no error recorded".
         "ok": (
-            main_fresh and tactical_fresh
-            and STATE.get("last_error") is None and STATE.get("tactical_last_error") is None
-            and (not TREND_LOOP_ENABLED or (trend_fresh and STATE.get("trend_loop_error") is None))
+            (not TREND_LOOP_ENABLED or (trend_fresh and STATE.get("trend_loop_error") is None))
             and (not NEW_COINS_ENABLED or (coins_fresh and STATE.get("new_coins_error") is None))
             and (not ALTCOIN_WATCH_ENABLED or (altcoin_fresh and STATE.get("altcoin_watch_error") is None))
         ),
         "service": "signal-bot-v5-core",
-        "main_scan_fresh": main_fresh,
-        "tactical_scan_fresh": tactical_fresh,
-        "last_scan_at": snapshot.get("generated_at"),
-        "tactical_last_scan_at": tactical.get("generated_at"),
-        "errors": [_error_code(e) for e in snapshot.get("errors") or []],
-        "last_error": _error_code(STATE.get("last_error")),
-        "tactical_last_error": _error_code(STATE.get("tactical_last_error")),
         "trend_loop_fresh": trend_fresh,
         "trend_loop_last_error": _error_code(STATE.get("trend_loop_error")),
         "new_coins_fresh": coins_fresh,
@@ -1239,8 +579,6 @@ def health() -> Any:
 
 def main() -> None:
     _load_state()
-    threading.Thread(target=scanner_loop, name="mexc-core-scanner", daemon=True).start()
-    threading.Thread(target=tactical_scanner_loop, name="btc-eth-tactical-scanner", daemon=True).start()
     threading.Thread(target=telegram_loop, name="telegram-command-loop", daemon=True).start()
     if TREND_LOOP_ENABLED:
         threading.Thread(target=trend_loop_loop, name="d1-trend-loop", daemon=True).start()

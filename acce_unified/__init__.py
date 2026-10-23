@@ -1,40 +1,8 @@
-"""MEXC discovery primitives used by Signal Bot v5 Core.
+"""Research modules of Signal Bot v5 Core: altcoin watch, new-coin security screen, D1 shadow loop.
 
-Importing this package has no side effects: no thread, polling loop or optional
-radar is started automatically. The application entry point owns lifecycle.
+Importing this package has no side effects: no thread, polling loop or
+provider call starts automatically. The application entry point (``bot.py``)
+owns lifecycle. No module here can place or authorize an order.
 """
 
-from .config import DEFAULT_TRADE_UNIVERSE, UnifiedConfig, build_trade_universe
-from .engine import UnifiedRadarEngine as CoreUnifiedRadarEngine
-from .models import CexTicker, MexcListing, RadarCandidate, RadarSnapshot
-from .observation_archive import (
-    LiquidObservationArchive,
-    LiquidScanObservation,
-    LiquidSymbolObservation,
-    ObservationArchivingCexProvider,
-    ObservationArchivingRadarEngine,
-)
-from .observation_runtime import (
-    CadencedObservationArchivingCexProvider,
-    ProductionUnifiedRadarEngine,
-)
-UnifiedRadarEngine = ProductionUnifiedRadarEngine
-
-__all__ = [
-    "CadencedObservationArchivingCexProvider",
-    "CexTicker",
-    "CoreUnifiedRadarEngine",
-    "DEFAULT_TRADE_UNIVERSE",
-    "LiquidObservationArchive",
-    "LiquidScanObservation",
-    "LiquidSymbolObservation",
-    "MexcListing",
-    "ObservationArchivingCexProvider",
-    "ObservationArchivingRadarEngine",
-    "ProductionUnifiedRadarEngine",
-    "RadarCandidate",
-    "RadarSnapshot",
-    "UnifiedConfig",
-    "UnifiedRadarEngine",
-    "build_trade_universe",
-]
+__all__: list[str] = []

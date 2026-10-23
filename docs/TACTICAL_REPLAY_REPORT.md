@@ -1,5 +1,7 @@
 # Taktik Long radarı — tarihsel replay protokolü
 
+> **Harness kaldırıldı (2026-10-23, ölü kod üçüncü dalga, `docs/DEAD_CODE_AUDIT.md`).** Bu çalışma kapandı; kodu `main`'in `ce953eb` commit'inde duruyor. Rapor, kanıt dosyası (`research/evidence/`) ve deneme kaydı (`research/trials/registry.jsonl`) değişmedi.
+
 **Ön-kayıt tarihi:** 2026-10-01 — bu belge ve karar kuralları **hiçbir sonuç
 görülmeden** yazıldı.
 **Deneme:** `tactical_long_engine` ailesi, trial `cff97d5d6f5b5c5d`

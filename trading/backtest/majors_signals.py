@@ -15,7 +15,7 @@ features from data visible by then:
 Outcomes: spot from the next 15m open to the close 24h or 72h later, net of
 round-trip costs and in excess of the equal-weight majors basket over the same
 span. Unknown inputs or outcomes are excluded and counted (AGENTS.md §2); a
-token-swap gap is a break, not a return (``weekly_momentum.continuous``).
+token-swap gap is a break, not a return (``market_data.continuous``).
 
 No order authority anywhere (AGENTS.md §4, §10).
 """
@@ -33,19 +33,17 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from trading.backtest import liquid_replay as lr
-from trading.backtest import signal_quality as sq
-from trading.backtest import weekly_momentum as wm
+from trading.backtest import market_data as mkt
 from trading.data.majors_data import MEMES
 
 
-BAR = lr.BAR_SECONDS
+BAR = mkt.BAR_SECONDS
 DAY = 86_400
 DECISION_START = 1_604_188_800                 # 2020-11-01: first month with 30 days of volume
-DISCOVERY = (DECISION_START, sq.DISCOVERY_END)
-CONFIRMATION = (sq.DISCOVERY_END, sq.CONFIRMATION_END)
+DISCOVERY = (DECISION_START, mkt.DISCOVERY_END)
+CONFIRMATION = (mkt.DISCOVERY_END, mkt.CONFIRMATION_END)
 DISCOVERY_HALF_AT = 1_661_990_400              # 2022-09-01
-HALF_AT = sq.HALF_AT                           # 2025-09-01
+HALF_AT = mkt.HALF_AT                           # 2025-09-01
 OI_FROM = 1_640_995_200                        # 2022-01-01: OI dumps start 2021-12 for most pairs
 
 FIXED = ("BTCUSDT", "ETHUSDT")
@@ -57,8 +55,8 @@ SEASON_DAYS = 90
 PERP_SEASON_DAYS = 30
 
 HORIZONS_H = (24, 72)
-COST_PCT = lr.ReplayCosts().round_trip_pct()                                   # 0.20
-STRESS_COST_PCT = lr.ReplayCosts().round_trip_pct(fee_mult=1.5, slip_mult=2.0)  # 0.35
+COST_PCT = mkt.ReplayCosts().round_trip_pct()                                   # 0.20
+STRESS_COST_PCT = mkt.ReplayCosts().round_trip_pct(fee_mult=1.5, slip_mult=2.0)  # 0.35
 BASKET_MIN = 8
 
 FUNDING_WINDOW = 72 * 3600
@@ -103,7 +101,7 @@ def month_starts(window: tuple[int, int]) -> list[int]:
     return out
 
 
-def decision_bar(market: lr.Market, t: int) -> int | None:
+def decision_bar(market: mkt.Market, t: int) -> int | None:
     """Grid index of the 15m bar that closes at ``t`` (None outside the grid)."""
 
     i = (t - int(market.grid_open[0])) // BAR - 1
@@ -112,7 +110,7 @@ def decision_bar(market: lr.Market, t: int) -> int | None:
     return None
 
 
-def first_trade_times(market: lr.Market) -> np.ndarray:
+def first_trade_times(market: mkt.Market) -> np.ndarray:
     ok = np.isfinite(market.close)
     first = np.where(ok.any(axis=1), ok.argmax(axis=1), -1)
     return np.where(first >= 0, market.grid_open[np.clip(first, 0, None)], np.iinfo(np.int64).max)
@@ -122,7 +120,7 @@ def is_meme(symbol: str) -> bool:
     return symbol.endswith("USDT") and symbol[:-4] in MEMES
 
 
-def listed_since(market: lr.Market, s: int, start: int, first_trade: np.ndarray, breaks: wm.Breaks) -> int:
+def listed_since(market: mkt.Market, s: int, start: int, first_trade: np.ndarray, breaks: mkt.Breaks) -> int:
     """When pair ``s`` was (re)listed as seen at ``start``: its first trade, or the end of its latest break.
 
     A break (a hole of more than a day the data resumes from) is a new listing:
@@ -142,9 +140,9 @@ def perp_live(times: np.ndarray | None, start: int) -> bool:
     return int(times[0]) <= start - PERP_SEASON_DAYS * DAY and a > 0 and int(times[a - 1]) >= start - DAY
 
 
-def monthly_universe(market: lr.Market, start: int, *, perp_of: Mapping[str, str],
+def monthly_universe(market: mkt.Market, start: int, *, perp_of: Mapping[str, str],
                      funding_times: Mapping[str, np.ndarray], first_trade: np.ndarray,
-                     breaks: wm.Breaks, require_perp: bool = True, history_start: int | None = None) -> list[str]:
+                     breaks: mkt.Breaks, require_perp: bool = True, history_start: int | None = None) -> list[str]:
     """Members for the month opening at ``start`` (docs/MAJORS_STUDY.md), from data visible then.
 
     ``require_perp=False`` drops the live-perpetual condition: before 2019-09
@@ -157,12 +155,12 @@ def monthly_universe(market: lr.Market, start: int, *, perp_of: Mapping[str, str
     """
 
     i = decision_bar(market, start)
-    lo = None if i is None else i - VOLUME_DAYS * lr.DAY_BARS + 1
+    lo = None if i is None else i - VOLUME_DAYS * mkt.DAY_BARS + 1
     if i is None or lo < 0:
         return []
     window = slice(lo, i + 1)
     volume = np.nansum(market.quote_volume[:, window], axis=1)
-    days = np.isfinite(market.close[:, window]).reshape(len(market.symbols), VOLUME_DAYS, lr.DAY_BARS).any(axis=2)
+    days = np.isfinite(market.close[:, window]).reshape(len(market.symbols), VOLUME_DAYS, mkt.DAY_BARS).any(axis=2)
     data_start = int(market.grid_open[0]) if history_start is None else history_start
     eligible = []
     for s, symbol in enumerate(market.symbols):
@@ -186,9 +184,9 @@ def monthly_universe(market: lr.Market, start: int, *, perp_of: Mapping[str, str
     return members
 
 
-def universes(market: lr.Market, window: tuple[int, int], *, perp_of: Mapping[str, str],
+def universes(market: mkt.Market, window: tuple[int, int], *, perp_of: Mapping[str, str],
               funding_times: Mapping[str, np.ndarray], require_perp: bool = True) -> dict[int, list[str]]:
-    first_trade, breaks = first_trade_times(market), wm.continuity_breaks(market)
+    first_trade, breaks = first_trade_times(market), mkt.continuity_breaks(market)
     return {m: monthly_universe(market, m, perp_of=perp_of, funding_times=funding_times, first_trade=first_trade,
                                 breaks=breaks, require_perp=require_perp) for m in month_starts(window)}
 
@@ -276,25 +274,25 @@ def oi_group(oi_change: float | None, price_change: float | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def outcomes(market: lr.Market, members: Sequence[int], i: int, hours: int,
-             breaks: wm.Breaks) -> tuple[np.ndarray, float | None]:
+def outcomes(market: mkt.Market, members: Sequence[int], i: int, hours: int,
+             breaks: mkt.Breaks) -> tuple[np.ndarray, float | None]:
     """Gross % per member (NaN when unknowable) and the equal-weight basket (None below BASKET_MIN)."""
 
     bars = hours * 3600 // BAR
-    returns, _ = lr.forward_returns(market, members, i, bars)
+    returns, _ = mkt.forward_returns(market, members, i, bars)
     for k, s in enumerate(members):
         # from the decision bar: a pair resuming on the entry bar was not tradable when the signal formed
-        if not wm.continuous(breaks, s, i, i + bars):
+        if not mkt.continuous(breaks, s, i, i + bars):
             returns[k] = np.nan
     known = returns[np.isfinite(returns)]
     return returns, (float(known.mean()) if len(known) >= BASKET_MIN else None)
 
 
-def coin_day_rows(market: lr.Market, monthly: Mapping[int, Sequence[str]], window: tuple[int, int], *,
+def coin_day_rows(market: mkt.Market, monthly: Mapping[int, Sequence[str]], window: tuple[int, int], *,
                   funding: Mapping[str, tuple[Sequence[int], Sequence[float]]],
                   taker: Mapping[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
                   oi: Mapping[str, tuple[np.ndarray, np.ndarray]]) -> list[dict[str, Any]]:
-    breaks = wm.continuity_breaks(market)
+    breaks = mkt.continuity_breaks(market)
     flows = {spot: Flow(*arrays) for spot, arrays in taker.items()}
     funding = {spot: (np.asarray(times, dtype=np.int64), np.asarray(rates, dtype=float))
                for spot, (times, rates) in funding.items()}
@@ -317,8 +315,8 @@ def coin_day_rows(market: lr.Market, monthly: Mapping[int, Sequence[str]], windo
                 if symbol in oi:
                     now, then = oi_snapshot(*oi[symbol], t), oi_snapshot(*oi[symbol], t - DAY)
                     oi_change = None if now is None or then is None else now / then - 1.0
-                c_now, c_then = market.close[s, i], (market.close[s, i - lr.DAY_BARS] if i >= lr.DAY_BARS else np.nan)
-                if np.isfinite(c_now) and np.isfinite(c_then) and wm.continuous(breaks, s, i - lr.DAY_BARS, i):
+                c_now, c_then = market.close[s, i], (market.close[s, i - mkt.DAY_BARS] if i >= mkt.DAY_BARS else np.nan)
+                if np.isfinite(c_now) and np.isfinite(c_then) and mkt.continuous(breaks, s, i - mkt.DAY_BARS, i):
                     price_change = float(c_now / c_then - 1.0)
                 row = {
                     "symbol": symbol, "decided_at": t, "month": start,
@@ -349,19 +347,19 @@ def excess(row: Mapping[str, Any], h: int, cost: float = COST_PCT) -> float | No
     return None if gross is None or basket is None else gross - cost - basket
 
 
-def summarize(pairs: sq.Pairs, *, alpha: float, half_at: int) -> dict[str, Any]:
+def summarize(pairs: mkt.Pairs, *, alpha: float, half_at: int) -> dict[str, Any]:
     values = [v for v, _ in pairs]
     first, second = [v for v, t in pairs if t < half_at], [v for v, t in pairs if t >= half_at]
     return {
         "n": len(values),
         "mean": statistics.fmean(values) if values else None,
-        "ci": sq._interval(sq.block_bootstrap_means([pairs])[:, 0], alpha) if len(values) >= 2 else None,
+        "ci": mkt._interval(mkt.block_bootstrap_means([pairs])[:, 0], alpha) if len(values) >= 2 else None,
         "h1": statistics.fmean(first) if first else None,
         "h2": statistics.fmean(second) if second else None,
     }
 
 
-def contrast(a: sq.Pairs, b: sq.Pairs, *, alpha: float, half_at: int) -> dict[str, Any]:
+def contrast(a: mkt.Pairs, b: mkt.Pairs, *, alpha: float, half_at: int) -> dict[str, Any]:
     def mean(pairs, keep=lambda t: True):
         values = [v for v, t in pairs if keep(t)]
         return statistics.fmean(values) if values else None
@@ -371,7 +369,7 @@ def contrast(a: sq.Pairs, b: sq.Pairs, *, alpha: float, half_at: int) -> dict[st
 
     return {
         "mean": gap(mean(a), mean(b)),
-        "ci": sq.diff_ci(a, b, alpha=alpha),
+        "ci": mkt.diff_ci(a, b, alpha=alpha),
         "h1": gap(mean(a, lambda t: t < half_at), mean(b, lambda t: t < half_at)),
         "h2": gap(mean(a, lambda t: t >= half_at), mean(b, lambda t: t >= half_at)),
     }
@@ -398,12 +396,12 @@ def evaluate_group(rows: Sequence[Mapping[str, Any]], family: str, group: str, h
     rest = [r for r in scope if r[family] is not None and r[family] != group]
     return {
         "family": family, "group": group, "hours": h,
-        "net": summarize(sq._pairs(inside, lambda r: net(r, h)), alpha=alpha, half_at=half_at),
-        "excess": summarize(sq._pairs(inside, lambda r: excess(r, h)), alpha=alpha, half_at=half_at),
-        "stress_net": summarize(sq._pairs(inside, lambda r: net(r, h, STRESS_COST_PCT)), alpha=alpha,
+        "net": summarize(mkt._pairs(inside, lambda r: net(r, h)), alpha=alpha, half_at=half_at),
+        "excess": summarize(mkt._pairs(inside, lambda r: excess(r, h)), alpha=alpha, half_at=half_at),
+        "stress_net": summarize(mkt._pairs(inside, lambda r: net(r, h, STRESS_COST_PCT)), alpha=alpha,
                                 half_at=half_at),
-        "minus_rest_excess": contrast(sq._pairs(inside, lambda r: excess(r, h)),
-                                      sq._pairs(rest, lambda r: excess(r, h)), alpha=alpha, half_at=half_at),
+        "minus_rest_excess": contrast(mkt._pairs(inside, lambda r: excess(r, h)),
+                                      mkt._pairs(rest, lambda r: excess(r, h)), alpha=alpha, half_at=half_at),
     }
 
 
@@ -497,20 +495,16 @@ FAMILY = "majors_perp_signals"
 FINGERPRINT_FILES = (
     "trading/backtest/majors_signals.py",
     "trading/data/majors_data.py",
-    "trading/backtest/weekly_momentum.py",
-    "trading/backtest/signal_quality.py",
-    "trading/backtest/liquid_replay.py",
+    "trading/backtest/market_data.py",
     "trading/data/universe_funding.py",
     "trading/data/binance_universe.py",
     "trading/data/binance_vision.py",
     "trading/data/binance_carry_universe.py",
     "trading/data/binance_history_identity.py",
-    "acce_unified/liquid_long.py",
     "acce_unified/cex.py",
-    "acce_unified/models.py",
 )
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DATASET = {"source": "binance_vision_spot_and_um_perpetual", "built_as_of": sq.CONFIRMATION_END,
+DATASET = {"source": "binance_vision_spot_and_um_perpetual", "built_as_of": mkt.CONFIRMATION_END,
            "confirmation_window": "2024-09..2026-08"}
 
 # Filled in only after discovery, by the rule in docs/MAJORS_STUDY.md: (family, group, hours, kind).
@@ -536,7 +530,7 @@ def trial_params() -> dict[str, Any]:
         "window": list(CONFIRMATION),
         "half_at": HALF_AT,
         "family_alpha": 0.05 / max(1, len(REGISTERED)),
-        "bootstrap": {"method": "circular_moving_block_days", "block_days": sq.BLOCK_DAYS, "resamples": 4000},
+        "bootstrap": {"method": "circular_moving_block_days", "block_days": mkt.BLOCK_DAYS, "resamples": 4000},
         "min_coin_days": MIN_CONFIRM_N,
         "completeness": {"max_unknown_feature": MAX_UNKNOWN_FEATURE, "max_missing_outcome": MAX_MISSING_OUTCOME,
                          "max_short_months": MAX_SHORT_MONTHS},
@@ -570,7 +564,7 @@ def require_registration(registry: Path) -> str:
 def load_inputs(spot_dir: Path, *, end: int):
     from trading.data.universe_funding import load_funding
 
-    market, _, excluded = sq.load_likit_market(spot_dir, end=end)
+    market, _, excluded = mkt.load_likit_market(spot_dir, end=end)
     funding = load_funding(spot_dir / "funding")
     manifest = json.loads((spot_dir / "funding" / "manifest.json").read_text("utf-8"))
     funding_times = {spot: np.asarray(times, dtype=np.int64) for spot, (times, _) in funding.items()}
@@ -601,8 +595,8 @@ def run(spot_dir: Path, perp_dir: Path, *, window: tuple[int, int], end: int, al
     stats = completeness(rows, monthly)
     results = []
     for h in HORIZONS_H:
-        always = {"net": summarize(sq._pairs(rows, lambda r: net(r, h)), alpha=alpha, half_at=half_at),
-                  "excess": summarize(sq._pairs(rows, lambda r: excess(r, h)), alpha=alpha, half_at=half_at)}
+        always = {"net": summarize(mkt._pairs(rows, lambda r: net(r, h)), alpha=alpha, half_at=half_at),
+                  "excess": summarize(mkt._pairs(rows, lambda r: excess(r, h)), alpha=alpha, half_at=half_at)}
         results.append({"family": "ALL", "group": "ALWAYS_LONG", "hours": h, **always})
         for family, groups in FAMILIES.items():
             for group in groups:
@@ -664,7 +658,7 @@ def _cli(argv: Iterable[str] | None = None) -> int:
     started = time.time()
     if args.mode == "build":
         logging.basicConfig(level=logging.INFO, format="%(message)s")
-        print(json.dumps(build_perp(args.spot_dir, args.out, window=DISCOVERY, end=sq.DISCOVERY_END), indent=1))
+        print(json.dumps(build_perp(args.spot_dir, args.out, window=DISCOVERY, end=mkt.DISCOVERY_END), indent=1))
         return 0
     if args.mode == "build-confirm":
         from trading.data.binance_universe import build_universe
@@ -673,20 +667,20 @@ def _cli(argv: Iterable[str] | None = None) -> int:
         trial = require_registration(args.trial_registry)
         logging.basicConfig(level=logging.INFO, format="%(message)s")
         spot = args.out / "spot"
-        build_universe(spot, lookback_months=sq.CONFIRMATION_MONTHS, decision_at=sq.CONFIRMATION_END)
-        build_funding(spot, spot / "funding", decision_at=sq.CONFIRMATION_END)
-        summary = build_perp(spot, args.out / "perp", window=CONFIRMATION, end=sq.CONFIRMATION_END)
+        build_universe(spot, lookback_months=mkt.CONFIRMATION_MONTHS, decision_at=mkt.CONFIRMATION_END)
+        build_funding(spot, spot / "funding", decision_at=mkt.CONFIRMATION_END)
+        summary = build_perp(spot, args.out / "perp", window=CONFIRMATION, end=mkt.CONFIRMATION_END)
         print(json.dumps({"trial": trial, **summary}, indent=1))
         return 0
     if args.mode == "discover":
-        report = run(args.spot_dir, args.perp_dir, window=DISCOVERY, end=sq.DISCOVERY_END, alpha=0.05,
+        report = run(args.spot_dir, args.perp_dir, window=DISCOVERY, end=mkt.DISCOVERY_END, alpha=0.05,
                      half_at=DISCOVERY_HALF_AT)
         report["candidates"] = select_candidates([r for r in report["results"] if r["family"] != "ALL"
                                                   and not r.get("incomplete")])
         trial = None
     else:
         trial = require_registration(args.trial_registry)
-        report = run(args.spot_dir, args.perp_dir, window=CONFIRMATION, end=sq.CONFIRMATION_END,
+        report = run(args.spot_dir, args.perp_dir, window=CONFIRMATION, end=mkt.CONFIRMATION_END,
                      alpha=0.05 / len(REGISTERED), half_at=HALF_AT)
         registered = {(f, g, h): k for f, g, h, k in REGISTERED}
         kept = []

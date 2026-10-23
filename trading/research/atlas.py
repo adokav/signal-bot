@@ -366,7 +366,7 @@ class Panel:
 
 
 def atlas_breaks(market: Any) -> dict[int, np.ndarray]:
-    """Continuity breaks (``weekly_momentum.continuity_breaks``) minus exchange-wide halts.
+    """Continuity breaks (``market_data.continuity_breaks``) minus exchange-wide halts.
 
     A pair's hole of more than a day that BTCUSDT shares, starting and ending
     within a day of BTC's, is the exchange stopping (Binance, 2018-02-08..10),
@@ -374,10 +374,9 @@ def atlas_breaks(market: Any) -> dict[int, np.ndarray]:
     market nothing can be told apart, so every break stays a break.
     """
 
-    from trading.backtest import liquid_replay as lr
-    from trading.backtest import weekly_momentum as wm
+    from trading.backtest import market_data as mkt
 
-    breaks = wm.continuity_breaks(market)
+    breaks = mkt.continuity_breaks(market)
     if "BTCUSDT" not in market.symbols:
         return breaks
     b = market.symbols.index("BTCUSDT")
@@ -387,7 +386,7 @@ def atlas_breaks(market: Any) -> dict[int, np.ndarray]:
     out = {}
     for s, bars in breaks.items():
         keep = [int(r) for r in bars
-                if not any(abs(int(r) - br) <= lr.DAY_BARS and abs(_hole_start(market, s, int(r)) - bs) <= lr.DAY_BARS
+                if not any(abs(int(r) - br) <= mkt.DAY_BARS and abs(_hole_start(market, s, int(r)) - bs) <= mkt.DAY_BARS
                            for br, bs in btc)]
         if keep:
             out[s] = np.asarray(keep, dtype=np.int64)
@@ -452,7 +451,7 @@ def build_panel(markets: Sequence[Any], *, start: int = ATLAS_START, end: int = 
     return or trend is measured across a possible token swap.
     """
 
-    from trading.backtest import liquid_replay as lr
+    from trading.backtest import market_data as mkt
 
     symbols = sorted({s for m in markets for s in m.symbols})
     index = {s: k for k, s in enumerate(symbols)}
@@ -464,11 +463,11 @@ def build_panel(markets: Sequence[Any], *, start: int = ATLAS_START, end: int = 
         day0 = int(market.grid_open[0])
         if day0 % DAY:
             raise ValueError("the 15m grid must start at 00:00 UTC")
-        days = market.n_grid // lr.DAY_BARS
-        shape = (len(market.symbols), days, lr.DAY_BARS)
-        closes = _daily_close(market.close, lr.DAY_BARS)
-        vols = np.nansum(market.quote_volume[:, : days * lr.DAY_BARS].reshape(shape), axis=2)
-        known = np.isfinite(market.close[:, : days * lr.DAY_BARS].reshape(shape)).any(axis=2)
+        days = market.n_grid // mkt.DAY_BARS
+        shape = (len(market.symbols), days, mkt.DAY_BARS)
+        closes = _daily_close(market.close, mkt.DAY_BARS)
+        vols = np.nansum(market.quote_volume[:, : days * mkt.DAY_BARS].reshape(shape), axis=2)
+        known = np.isfinite(market.close[:, : days * mkt.DAY_BARS].reshape(shape)).any(axis=2)
         offset = (day0 - start) // DAY
         lo, hi = max(0, -offset), min(days, n_days - offset)
         for s, symbol in enumerate(market.symbols):
@@ -476,7 +475,7 @@ def build_panel(markets: Sequence[Any], *, start: int = ATLAS_START, end: int = 
             close[g, offset + lo: offset + hi] = closes[s, lo:hi]
             volume[g, offset + lo: offset + hi] = np.where(known[s, lo:hi], vols[s, lo:hi], np.nan)
             for bar in breaks.get(s, ()):
-                d = int(bar) // lr.DAY_BARS + offset
+                d = int(bar) // mkt.DAY_BARS + offset
                 if 0 <= d < n_days:
                     resumed[g, d] = True
     return Panel(symbols, start, close, volume, resumed)
@@ -790,12 +789,12 @@ def _cli(argv: Iterable[str] | None = None) -> int:
               + json.dumps({k: len(v) for k, v in series.items()}, sort_keys=True))
         return 0
 
-    from trading.backtest import signal_quality as sq
+    from trading.backtest import market_data as mkt
 
     markets, ends, universes = [], [], {}
     for spot_dir, manifest in zip(args.spot_dir, verify_datasets(args.spot_dir)):
         ends.append(int(manifest["data_end"]) + 1)
-        markets.append(sq.load_likit_market(spot_dir, end=ends[-1])[0])
+        markets.append(mkt.load_likit_market(spot_dir, end=ends[-1])[0])
     for market, end, (first_trade, breaks) in zip(markets, ends, market_history(markets)):
         for label, members in market_universes(market, end, first_trade=first_trade, breaks=breaks).items():
             universes.setdefault(label, members)
