@@ -145,7 +145,9 @@ kayıt denemesi `b57b9eb0a6073085`; `/d1` D1 gölge kaydı (`1fcc8f2ef5d92516`).
 
 ### Dördüncü dalga — yeni sistem çalışınca
 
-`trading/` araştırma şasisinden kapanmış çalışmalar (`carry_*`,
-`listing_replay`, `walk_forward`/`tsmom`, `atlas`) ve `research/` Faz 0
-boru hattı. `trade_loop` ve `majors_signals` kalır: D1 canlı testi ve
+`acce_unified/altcoin_watch.py` 150 coinlik tarama, sıralama ve ölçütler
+(`/long` kayıt coinleriyle çalışınca; sağlayıcılar ve kapı kontrolleri kalır,
+trial `b6e0fec86714efc2` SUPERSEDED olarak kapanır). `trading/` araştırma
+şasisinden kapanmış çalışmalar (`carry_*`, `listing_replay`,
+`walk_forward`/`tsmom`, `atlas`) ve `research/` Faz 0 boru hattı. `trade_loop` ve `majors_signals` kalır: D1 canlı testi ve
 `docs/POSITION_LONG.md` §8.1 haftalık testi bunları kullanır.

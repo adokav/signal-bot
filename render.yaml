@@ -48,6 +48,23 @@ services:
       - key: COINGECKO_DEMO_API_KEY
         sync: false
 
+      # Long tracking of the v3.2 report's coins (docs/POSITION_LONG.md §13–§14): the list lives in
+      # research/register (the bot never selects); one decision a week after the Sunday close on MEXC
+      # perpetual data (wick reference, leverage cap, funding, OI, weekly channel) and CoinGecko (regime).
+      # Research only, no orders. The POSITION_* values are the user's risk budget, not system parameters.
+      - key: LONG_WATCH_ENABLED
+        value: "1"
+      - key: LONG_WATCH_LEDGER_FILE
+        value: /data/long_watch_ledger.jsonl
+      - key: POSITION_MAINTENANCE_MARGIN
+        value: "0.05"
+      - key: POSITION_FUNDING_MAX
+        value: "0.20"
+      - key: POSITION_LOSS_BUDGET_ALTCOIN
+        value: "0.01"
+      - key: POSITION_LOSS_BUDGET_MEME
+        value: "0.005"
+
       # D1 trend loop, shadow record (docs/TREND_LOOP_LIVE.md): daily 00:00 UTC
       # decisions on the majors, intraday acute stops, append-only ledger.
       # Alerts carry the RİSK_AZALTIR label (user decision 2026-10-02); no orders.

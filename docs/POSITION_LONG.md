@@ -15,10 +15,17 @@ planı üreten bir gölge kayıt sistemine** dönüşür. Dört soruya cevap ver
 
 | Soru | Katman | Cevap |
 |---|---|---|
-| Hangi coin? | Seçim (v3.2 kapıları ve puanı) | Çekirdek sepet: bütün kapıları geçen, puanla sıralanan ilk N |
+| Hangi coin? | Kayıt: v3.2 raporunun kendi listesi (`research/register/`) | Raporun çekirdek sepeti; bot seçmez, yükseltmez, yalnız düşürür |
 | Ne zaman, ne kadar? | Rejim (v3.2 K0) | Dilim durumu: BEKLE / DİLİM 1 / DİLİM 2 / AZALT |
 | Hangi referansla? | Pozisyon planı | Haftalık karar fiyatı, pay, likidite üst sınırı |
 | Ne zaman çıkılır? | Çıkış kuralları | Tez geçersizliği, trend durumu, hedef, yeniden puanlama, süre |
+
+**Düzeltme (2026-10-23, kullanıcı):** ilk taslak "hangi coin" sorusunu bota yeniden
+cevaplatıyordu (150 coinlik evrende v3.2 kapıları ve puanı). Yanlıştı. Rapor seçimi
+yapmıştır ve kendisi "tarama motoru değil, filtre; adaylar dışarıdan gelir" der.
+Botun işi, raporda **adıyla verilen** coin ve meme coinler için long takibidir: rejim
+dilimi, vadeli fitil diplerine göre stop/kaldıraç, 2×/4× kısmi satış, tez geçersizliği.
+Seçim motoru planı (eski PR D) iptal; yerine kayıt (§3.5) geldi.
 
 Sınırlar, baştan:
 
@@ -61,12 +68,12 @@ sınırdır; hangisi alınırsa alınsın sonuç aynıdır:
 
 | Konu | v3.2 | Bu tasarım | Neden |
 |---|---|---|---|
-| Dört katman (kapı, puan, olasılık, rejim) | Var | Kapı, puan, rejim aynen; olasılık **sıralamaya girmez** | P(≥2×) coin başına elle atanan senaryo medyanlarına dayanır; v3.2 kendisi "kalibre edilmemiş" der. Mekanikleştirilirse uydurma sayı çıktı olur. Yerine §3.4'teki mekanik yol riski gösterilir. |
-| Birleşik skor S = 0,6·Puan + 0,4·P | Sıralama ölçütü | Sıralama yalnız Puan ile | Aynı neden. Kullanıcı P değerini kayıt defterine girerse kartta "elle, senaryo türevli" etiketiyle görünür, sıraya girmez. |
-| Kapı eşikleri (G1–G4, M1–M3) | Var | Aynen; veri yoksa ❔ | Eşikler v3.2'den; veriden öğrenilmedi, bu etiketle gösterilir. |
-| Puan ağırlıkları (A20 B20 C15 D15 E10 F10 G5 H5; K1–K6) | Var | Aynen | `docs/ALTCOIN_WATCH.md` eşit ağırlık seçmişti; v3.2 kullanıcının nihai çerçevesi. Ağırlıklar yine kanıtsızdır; ileri kayıt ikisini de ölçebilsin diye eşit ağırlıklı sıra ikincil olarak da kaydedilir. |
-| Doğrulanamayan alt metrik 0,2 | Var | Aynen; çekirdeğe girmez | AGENTS.md §2 ile aynı. |
-| Arz defteri (24 ay), değer aktarım defteri | Elle hesaplandı | Kayıt defteri (§3.5) + mekanik gerçekleşen akış | Kilit açılış takvimi ücretsiz veride yok. |
+| Dört katman (kapı, puan, olasılık, rejim) | Var | Kapı, puan ve olasılık raporun çıktısı olarak **kayıttan okunur**; bot yeniden hesaplamaz. Rejim mekanik. | P(≥2×) coin başına elle atanan senaryo medyanlarına dayanır; v3.2 kendisi "kalibre edilmemiş" der. Mekanikleştirilirse uydurma sayı çıktı olur. Yerine §3.4'teki mekanik yol riski gösterilir. |
+| Birleşik skor S = 0,6·Puan + 0,4·P | Sıralama ölçütü | Raporun sırası kayıttan; bot sıralamaz (S yalnız doğrulanır) | Aynı neden. Kullanıcı P değerini kayıt defterine girerse kartta "elle, senaryo türevli" etiketiyle görünür, sıraya girmez. |
+| Kapı eşikleri (G1–G4, M1–M3) | Var | Raporun kapı sonucu kayıtta; botun günlük kontrolleri (hack, kontrat, hacim) yalnız **düşürür** (§5.1) | Eşikler v3.2'den; veriden öğrenilmedi, bu etiketle gösterilir. |
+| Puan ağırlıkları (A20 B20 C15 D15 E10 F10 G5 H5; K1–K6) | Var | Kayıtta; bot puanlamaz (ağırlıklar yalnız doğrulama sınırı) | `docs/ALTCOIN_WATCH.md` eşit ağırlık seçmişti; v3.2 kullanıcının nihai çerçevesi. Ağırlıklar yine kanıtsızdır; ileri kayıt ikisini de ölçebilsin diye eşit ağırlıklı sıra ikincil olarak da kaydedilir. |
+| Doğrulanamayan alt metrik 0,2 | Var | Raporda; koşullu coin (BNB, INJ) koşul bayrağı kalkana kadar sinyal almaz | AGENTS.md §2 ile aynı. |
+| Arz defteri (24 ay), değer aktarım defteri | Elle hesaplandı | Raporda; bot yeniden hesaplamaz. Tetikleyici bayrakları (§3.5) elle, PR ile | Kilit açılış takvimi ücretsiz veride yok. |
 | Rejim kuralı (endeks, BTC.D) | Var | Aynen, mekanik; ilk haftalar BİLİNMİYOR | Kendi haftalık arşivimiz oluşana kadar "düşüyor/yükseliyor" bilinmez → dilim yok. |
 | Pozisyon kuralları (hacmin %10'u, dilim, −%80 taşınabilirlik) | Var | Aynen, sayısallaştırıldı (§4) | |
 | İzleme tetikleyicileri | Coin bazlı liste | Kurala çevrildi (§5.1) | |
@@ -142,24 +149,31 @@ Her çekirdek adayı için, **beklenen getiri sıfır** varsayımıyla (ν = −
 
 Bunlar "ne kadar katlanır" tahmini **değildir**; "bu oynaklıkta yol ne kadar sarsar" ölçüsüdür. Kartta "yol riski (sıfır getiri varsayımı)" etiketiyle görünür ve §4.2'deki boyut kuralına girer. v3.2'nin senaryo medyanlı P(≥2×) değeri hesaplanmaz.
 
-### 3.5 Kayıt defteri — elle girilen, kaynaklı, tarihli veri
+### 3.5 Kayıt — raporun listesi, veri olarak
 
-`research/register/position_long.json`, depoda, yalnız PR ile değişir. Her kayıt:
+`research/register/v3_2_2026-10-23.json` (şema `v32-register/v1`), depoda, yalnız PR ile
+değişir. Raporun kendi çıktısıdır: her coin için sepet (çekirdek, koşullu, izleme, büyüme
+havuzu, doğrulanamadı, başarısız; meme için spekülatif havuz, likidite sınırı), rapor sırası,
+grup puanları ve toplam, senaryo medyanları (ayı/baz/boğa), P(≥2×), S, risk çıktıları (σ,
+medyan çarpan, 2× ve 0,5× dokunma olasılıkları, en kötü %5, CVaR₅, likidite üst sınırı),
+rapor anındaki anlık değerler (fiyat, piyasa değeri, arz, ATH/ATL, spot hacim, OI/pd,
+perp/spot), tetikleyici bağları ve rapor sayfası. Kaynak PDF'in sha256'sı kayıtta; kaydın
+kendi sha256'sı her defter olayına yazılır (hangi listeyle karar verildi).
 
-```json
-{"gecko_id": "uniswap", "as_of": "2026-10-22", "source": "https://…",
- "supply_24m": {"emission_pct": 0.0, "unlock_12m_pct_float": 0.0, "sell_coefficient": 1.0},
- "mechanism": {"kind": "burn", "status": "active", "since": "2025-12"},
- "buyback_treasury_usd_12m": null,
- "catalyst": {"what": "…", "date": "…", "measurable_effect": "…"},
- "collateral_in_own_protocol": false,
- "resolved_critical_issue": true,
- "scenario_p_2x": null}
-```
-
-- Alanı boş olan coin o alt metrikte ❔ / 0,2 kalır. Bot kaydı doldurmaz; dış metin okumaz.
-- Kayıt 180 günden eskiyse "bayat" olur: kapı ❔, puan 0,2. Çeyreklik yeniden puanlama (§5.4) kayıtların tazelenmesini ister.
-- Kayıt değişikliği, o coinin açık pozisyonunu etkiliyorsa, değişiklik tarihli olarak deftere yazılır (hangi hafta hangi veriyle karar verildi).
+- `acce_unified/register.py` kaydı okur ve doğrular: şema, benzersiz sembol/CoinGecko
+  kimliği/perp sembolü, sepet adı, koşul yalnız koşullu sepette, grup puanı ≤ ağırlık,
+  toplam = grup toplamı ± 2 (rapor yuvarlar), S = 0,6·Puan/100 + 0,4·P ± 0,01, olasılıklar
+  [0, 1], ayı ≤ baz ≤ boğa, sonlu sayılar, tanımlı tetikleyiciler. Tek alan bozuksa hiçbir
+  şey yüklenmez (`RegisterError`); yarım kayıt coin düşürür ya da yanlış etiketler.
+- **Bot kaydı doldurmaz, yükseltmez, dış metin okumaz.** Sepet raporundur; botun günlük
+  kontrolleri (§5.1) yalnız düşürür. Koşullu coin (BNB: kazanç verisi; INJ: emisyon) koşul
+  bayrağı PR ile kaldırılana kadar dilim sinyali almaz.
+- Raporun tetikleyicileri (`triggers`): BTC.D 55 haftalık kapanış ve "OI/pd > %20 ve
+  perp/spot > 6" mekanik (bot ölçer); AAVE geri alımı, SKY spot 10 M, BNB/INJ veri, ETF
+  kararı, LINK hazine, HYPE kilit takvimi, PENGU unlock elle (PR ile `status` değişir).
+  SKY hacmi de ölçülebilir ama sepet değişikliği yine rapor/PR işidir.
+- Kayıt raporun tarihini taşır; 180 günden eskiyse "bayat" (⚠️, yeni dilim yok). Raporun
+  çeyreklik yeniden puanlaması yeni bir kayıt sürümü olarak gelir; eski sürüm silinmez.
 
 ## 4. Pozisyon planı
 
@@ -357,7 +371,7 @@ Doğrulandı (2026-10-23, ücretsiz, anahtarsız): CoinGecko `global` (BTC.D), m
 | `bot.py` | 1.260 → ~650 | Küçülür | `/tactical`, `/longs`, `/radar`, tarayıcı döngüleri, radar kaydı, ileri kayıt gider |
 | `acce_unified/new_coins.py` `/new` tarayıcısı (CMC yeni coinler, 72 saatlik pencere, defter, trial) | ~600 | **Bu dalgada kaldı; karar bekliyor** | v3.2 meme evreni 18 aydan genç coini zaten eler (M1); kaldırılırsa trial `b57b9eb0a6073085` ABANDONED olur. `SecurityProviders`, kimlik referansı ve `/check` her durumda **kalır** (G4, K6, M2). |
 | `acce_unified/trend_loop.py`, `/d1` | 827 | **Kaldı (karar bekliyor; öneri: kalsın)** | Depodaki tek kanıtlı çıkış ailesi; canlı gölge kaydı 2026-10-02'de kullanıcı onayıyla başladı; `Ledger` sınıfı yeni deftere de hizmet eder. |
-| `acce_unified/altcoin_watch.py` | 1.206 | Kalır, **dönüşür** | Seçim motorunun gövdesi: evren, kapılar, DefiLlama eşlemesi, kohort kaydı. v3.2 kapı/puanı üstüne yazılır. |
+| `acce_unified/altcoin_watch.py` | 1.206 | **Daralır** | 150 coinlik tarama, sıralama ve ölçütler kalkar; DefiLlama hack/ücret, kontrat ve hacim sağlayıcıları yalnız kayıt coinlerinde §5.1 tez geçersizliği kontrolü için çalışır. Trial `b6e0fec86714efc2` dürüstçe kapatılır (SUPERSEDED). |
 | `trading/risk/*`, `trading/research/*`, `trading/data/*`, `trading/backtest/{trade_loop, majors_signals, walk_forward, benchmark, cost_model, carry_replay, carry_audit, listing_replay, atlas}` ve dossier'ları | ~9.000 | Kalır, ikinci dalga kararı | Botta çalışmaz; §8.1 testi `trade_loop` ve `majors_signals` altyapısını kullanır. Kapanmış çalışmalar (carry, listing, TSMOM, atlas) yeni sistem çalışır hale gelince ayrı kararla elenir. |
 
 Toplam: ≈ 44.600 satırdan ≈ 20.000 satır gider. `render.yaml`'dan `UNIFIED_*`, `LIQUID_*`, `TACTICAL_*` ayarları; `README.md`, `docs/DEAD_CODE_AUDIT.md`, `docs/EVOLUTION_ROADMAP.md` güncellenir. Silinen her modülün son commit'i ilgili rapora yazılır; git geçmişi tam kalır.
@@ -370,8 +384,8 @@ Toplam: ≈ 44.600 satırdan ≈ 20.000 satır gider. `render.yaml`'dan `UNIFIED
 |---|---|---|
 | A ✅ | Temizlik (§10) | Küçük bot: `/long` henüz yok; `/altcoin`, `/new`, `/check`, `/d1`, `/status` çalışır. Trial kayıtları değişmedi. |
 | B | Haftalık D1 analoğu majör testi (§8.1) | Ön-kayıt → workflow → tek koşu → rapor. §5.2'nin kaderi belli olur. |
-| C | Rejim katmanı + kayıt defteri şeması + `/rejim` | Haftalık K0 arşivi birikmeye başlar (4 hafta sonra yön bilinir). |
-| D | Seçim motoru v2: v3.2 kapıları ve puanı (altcoin + meme), yol riski, `/long`, `/long <sembol>` | `b6e0fec86714efc2` SUPERSEDED; seçim kohortu yeni şemayla. |
+| C ✅ | **Kayıt** (raporun listesi, `acce_unified/register.py`) + `acce_unified/long_watch.py`: MEXC vadeli veri katmanı (fitil dipleri, funding, OI, sürdürme marjı), CoinGecko (piyasa, toplu OI, BTC.D, ALT90), haftalık kanal, rejim K0, `/long`, `/long <sembol>`, karar defteri | Liste coinleri kartta: sepet, fitil referansı, likidasyon fiyatı, L_max, funding, OI/pd, kanal, eksik koşullar; haftalık BTC.D arşivi birikmeye başlar (yön 4 hafta sonra). |
+| D | `/altcoin` daraltma: tarama kalkar, kapı bekçisi yalnız kayıt coinlerinde (§5.1) | `b6e0fec86714efc2` SUPERSEDED. ~~Seçim motoru v2~~ iptal (§0 düzeltmesi). |
 | E | Pozisyon planı, çıkışlar, defter, bildirimler; ileri kayıt ön-kaydı (§8.2) | İlk karar haftası; gölge kayıt başlar. |
 
 Her PR Codex incelemesinden geçer; kanıt dosyaları ve parmak izleri mevcut
@@ -379,7 +393,7 @@ kurallarla korunur (değişen kod = yeni deneme).
 
 ## 12. Kullanıcıdan beklenen kararlar
 
-**Verilen kararlar (2026-10-23):** temizlik uygulandı (PR #163); `/new` ve `/d1` kalır; pozisyonlar vadeli; en kötü senaryo = likidasyon fitil dipleri (§13); atılım kohortu protokolü yazıldı (`docs/BREAKOUT_COHORT.md`).
+**Verilen kararlar (2026-10-23):** temizlik uygulandı (PR #163); `/new` ve `/d1` kalır; pozisyonlar vadeli; en kötü senaryo = likidasyon fitil dipleri (§13); atılım kohortu protokolü yazıldı (`docs/BREAKOUT_COHORT.md`); **liste raporun kendisidir, bot seçmez** (§0 düzeltmesi; kayıt §3.5).
 
 **Açık kararlar:**
 
@@ -489,11 +503,16 @@ kısmıdır.
 - **İleri kayıt:** sonuçlar gerçekleşen funding'den net; giriş/çıkış
   referansı perp fiyatıdır (MEXC vadeli günlük mumlar), spot değil.
 
-### 13.5 Veri (MEXC vadeli, doğrulanacak)
+### 13.5 Veri (MEXC vadeli; 2026-10-23'te doğrulandı)
 
-PR C'de doğrulanır: `contract.mexc.com` kline (gün içi düşük için),
-funding geçmişi, OI. Hepsi tek borsa; kartta "MEXC vekili" etiketi.
-Binance geçmişi yalnız araştırmada (atılım kohortu).
+`contract.mexc.com/api/v1/contract/` anahtarsız: `kline/<SEMBOL>?interval=Day1`
+tek istekte 800+ günlük mum (gün içi düşük dahil), `funding_rate/history`
+sayfalı (UNI için 1.620 ödeme), `ticker` (holdVol = OI, amount24 = 24 saatlik
+USDT hacmi, anlık funding), `detail` (sürdürme marjı oranı, kontrat büyüklüğü;
+PEPE_USDT ×10 M, 1000BONK_USDT ×10 000, FLOKI_USDT ×100 000, SHIB_USDT ×1 000).
+Hepsi tek borsa; kartta "MEXC" etiketi. Binance geçmişi (data.binance.vision)
+yalnız araştırmada (atılım kohortu) ve `POSITION_VENUE=binance` seçilirse
+günlük dosyalardan (bir gün gecikme; funding yalnız aylık). Ayrıntı §14.1.
 
 ### 13.6 Bu eklerin §4–§5'e etkisi
 
@@ -503,3 +522,94 @@ Binance geçmişi yalnız araştırmada (atılım kohortu).
   boyut ve maliyet kuralıdır. Marj koruma stopu dolarsa kayıt LİKİDASYON_KORUMA
   nedeniyle kapanır (yeni neden; §4.3 listesine eklenir).
 - §8.2 ileri kayıt ön-kaydı funding'i ve perp fiyatını ölçüm tanımına alır.
+
+## 14. Uygulama tasarımı: `/long` (2026-10-23, §0 düzeltmesinden sonra)
+
+Girdi kayıttır (§3.5). Bot listedeki her coin için aşağıdaki seriyi toplar,
+haftalık kararda durumu yazar ve karar olaylarını deftere ekler. Hiçbir
+sağlayıcı hatası sıfır, nötr ya da güvenli sayılmaz: eksik seri BİLİNMİYOR
+olur ve o coinin sinyali düşer (AGENTS.md §2).
+
+### 14.1 Seriler ve kaynaklar (hepsi anahtarsız; 2026-10-23'te doğrulandı)
+
+| Seri | Kaynak | Not |
+|---|---|---|
+| Perp günlük mum, 730 gün → `WICK365`, `FLASH365`, `CYCLE_LOW`, haftalık kapanışlar | MEXC `contract/kline` Day1 (iki istek) | Varsayılan borsa; `POSITION_VENUE=binance` ile data.binance.vision günlük dosyaları (bir gün gecikme). Sembol haritası kayıtta. |
+| Funding, 90 gün (≈ 270 ödeme) → `FUND90` (yıllık) | MEXC `funding_rate/history` | Binance'ta yalnız aylık dosya (bir ay gecikme) |
+| OI, 24 saatlik perp hacmi, sürdürme marjı | MEXC `ticker`, `contract/detail` | Tek borsa; L_max için sürdürme marjı: max(borsanın oranı, `POSITION_MAINTENANCE_MARGIN` = %5) — muhafazakâr olan |
+| Toplu OI ve perp hacim (rapor E/K4 ölçüsü; `LEVERAGE_BUILDUP` tetiği) | CoinGecko `/derivatives`, perpetual sözleşmeler, **sabit borsa listesi** (`binance_futures`, `bybit`, `okex_swap`, `bitget_futures`, `gate_futures`, `hyperliquid`, `mexc_futures`, `kucoin_futures`, `htx_futures`) | Raporun kaynağı DefiLlama token sayfası (ücretli API); eşdeğerlik iddia edilmez, kart kaynağı ve borsa sayısını yazar. Doğrulama (2026-10-23): tüm borsalar toplamı PEPE için 339 M$ (rapor 22 Ekim: OI/pd %9,4) — liste daraltılmadan eşik anlamsız. |
+| Piyasa değeri, spot hacim, fiyat | CoinGecko `/coins/markets` (kaydın gecko_id'leri, tek istek) | spot hacim = CoinGecko `total_volume` (türev hariç) |
+| BTC.D, toplam piyasa değeri | CoinGecko `/global` | Geçmişi ücretsiz değil → haftalık arşiv botta birikir; "düşüyor / yükseliyor" 4 haftalık arşivden, ondan önce BİLİNMİYOR |
+| Altcoin sezonu endeksi `ALT90` | İlk 50 altcoin (stabil, sarılı, stake türevleri hariç) içinde 90 günlük getirisi BTC'yi geçenlerin payı; CoinGecko `market_chart` (365 gün) | Blockchaincenter tanımının kendi hesabımız; `/coins/markets` 90 günlük değişim vermiyor |
+| Korku-açgözlülük | alternative.me | Yalnız gösterge; kuralda yok |
+
+### 14.2 Haftalık karar
+
+Pazartesi 00:00 UTC'den sonraki ilk tick'te (Pazar günlük mumu kapanmış):
+her coin için seriler çekilir, §13.2 fitil referansı, likidasyon fiyatı ve
+`L_max`, `FUND90`, OI/pd ve perp/spot, haftalık kanal durumu (§14.3) ve rejim
+dilimi (§3.1) hesaplanır; kart yenilenir; karar olayı deftere yazılır (kayıt
+sha256, trial, `can_authorize_trade: false`). Hafta içi `/long` son kararı
+gösterir ve yaşını yazar; fiyat satırı anlıktır ve "karar fiyatı değil"
+etiketi taşır.
+
+### 14.3 Coin durum makinesi — fiyata bağlı tek kural
+
+Haftalık kapanış serisi günlük mumlardan kurulur (Pazartesi 00:00 → Pazar
+kapanışı). Kanal, D1 ailesinin haftalık analoğudur (§5.2):
+
+- **YUKARI:** haftalık kapanış > önceki 10 haftanın en yüksek kapanışı
+  (kırılım); durum, kapanış < önceki 10 haftanın en düşük kapanışı olana kadar
+  YUKARI kalır.
+- **AŞAĞI:** tersi. Başlangıç durumu 104 haftalık geçmiş yürütülerek bulunur;
+  20 haftadan az veri → BİLİNMİYOR.
+- **DİLİM sinyali** = sepet çekirdek **ve** koşul yok **ve** rejim DİLİM 1/2
+  **ve** kanal YUKARI **ve** fitil referansı biliniyor **ve** `FUND90` ≤ %20
+  **ve** `LEVERAGE_BUILDUP` (OI/pd > %20 ve perp/spot > 6) tetiklenmemiş.
+  Sağlanmayan her koşul kartta adıyla yazılır; "BEKLE" bir sinyal değildir.
+- Kanıt etiketi: KANIT YOK. §8.1 haftalık majör testi ve atılım kohortu
+  (`docs/BREAKOUT_COHORT.md`) bu filtreyi değiştirebilir; parametreler
+  (10 hafta, %20 funding) deneme kaydına girer.
+
+### 14.4 Kart (`/long <sembol>`)
+
+Sepet ve rapor sırası, koşul ve tetikleyiciler (durumuyla); fiyat (anlık,
+etiketli) ve haftalık karar fiyatı; fitil referansı üçlüsü ve en düşüğü;
+1× likidasyon fiyatı, `L_max`, marj koruma stop seviyesi (yalnız 1× üstü);
+`FUND90` ve birikmiş funding (pozisyon varsa); OI/pd ve perp/spot (iki
+kaynak, etiketli); kanal durumu ve 10 haftalık seviyeler; 2× / 4× seviyeleri
+(funding düzeltmeli); raporun risk satırı (σ, medyan çarpan, 2× ve 0,5×
+dokunma, en kötü %5, likidite üst sınırı); "elle bakılacaklar". Altbilgi:
+"Gölge kayıt: emir yok, karar senin. KANIT YOK — ileri kayıt sürüyor."
+
+### 14.5 Soğuk başlangıç ve kapalı hata
+
+| Eksik | Sonuç |
+|---|---|
+| Kayıt yüklenemiyor | `/long` hata; hiçbir coin gösterilmez (kısmi liste yok) |
+| Perp mum < 365 gün | fitil referansı BİLİNMİYOR → sinyal yok; kart gösterir |
+| Perp mum < 20 hafta | kanal BİLİNMİYOR → sinyal yok |
+| Funding < 60 ödeme | `FUND90` BİLİNMİYOR → sinyal yok |
+| OI / piyasa değeri eksik | tetik değerlendirilemez → sinyal yok (bilinmeyen güvenli değil) |
+| BTC.D arşivi < 4 hafta | rejim yönü BİLİNMİYOR → dilim yok |
+| CoinGecko hatası | ilgili satırlar BİLİNMİYOR; önceki karar yaşıyla gösterilir |
+
+### 14.6 Durum ve ayarlar
+
+Uygulandı (aynı PR): kayıt ve doğrulayıcı, `acce_unified/long_watch.py`
+(MEXC ve CoinGecko istemcileri, seriler, fitil/likidasyon/kanal/funding
+hesapları, rejim, karar defteri `long_watch_ledger.jsonl`), `/long` ve
+`/long <sembol>`, panel düğmesi, durum satırı ve sağlık kontrolü. Testler:
+oluşan mumun reddi, imkânsız OHLC, eksik seri → BİLİNMİYOR, kısa/delikli
+geçmiş, L_max örnekleri (−%55 → 1,45; sığ fitilde 2× tavanı; −%95'te 1× bile
+yetmez), kanal durum makinesi, sinyal koşullarının her birinin tek başına
+düşürmesi, sağlayıcı hatasında URL sızmaması, haftada bir karar kaydı,
+piyasa verisi hatasında boş anlık görüntü yerine hata.
+
+Ortam değişkenleri (`render.yaml`): `LONG_WATCH_ENABLED`, `LONG_WATCH_LEDGER_FILE`,
+`LONG_WATCH_REGISTER` (varsayılan depodaki kayıt), `POSITION_MAINTENANCE_MARGIN`
+(0,05; borsanın oranı yüksekse o), `POSITION_FUNDING_MAX` (0,20),
+`POSITION_LOSS_BUDGET_ALTCOIN` (0,01), `POSITION_LOSS_BUDGET_MEME` (0,005).
+Kaldıraç tavanı 2× kod sabitidir. Pozisyon açma/kapama, kısmi satış ve
+birikmiş funding takibi (§4.3, §5.3) ileri kayıt ön-kaydıyla (§8.2) gelir;
+şimdilik kart yalnız seviyeleri gösterir. Sonra: `/altcoin` daraltma.
