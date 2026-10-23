@@ -26,7 +26,7 @@ def _all_fresh(monkeypatch):
 
 
 def test_public_commands_are_the_retained_research_menus():
-    assert [row["command"] for row in bot.COMMANDS] == ["panel", "long", "new", "check", "altcoin", "d1", "status", "scan"]
+    assert [row["command"] for row in bot.COMMANDS] == ["panel", "long", "puan", "new", "check", "altcoin", "d1", "status", "scan"]
     buttons = [b["callback_data"] for row in bot.panel_keyboard()["inline_keyboard"] for b in row]
     assert buttons == ["LONG", "ALTCOIN", "D1", "NEW", "CHECK", "STATUS", "SCAN"]
 
@@ -49,12 +49,15 @@ def test_status_names_every_module_and_denies_order_authority(monkeypatch):
     assert "429" in text and "Emir yetkisi: YOK" in text
 
 
-def test_scan_runs_the_new_coin_scan_from_the_command_thread(monkeypatch):
+def test_scan_runs_the_new_coin_scan_and_requests_the_long_interim_refresh(monkeypatch):
     calls, sent = [], []
     monkeypatch.setattr(bot, "new_coins_tick", lambda now=None: calls.append(now))
     monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append(text))
+    bot.LONG_WATCH_FORCE.clear()
     bot.handle("SCAN")
-    assert calls == [None] and "başlatıldı" in sent[0] and "SIGNAL BOT v5 CORE" in sent[1]
+    assert calls == [None] and "başlatıldı" in sent[0] and "puan tabloları" in sent[0] and "SIGNAL BOT v5 CORE" in sent[1]
+    assert bot.LONG_WATCH_FORCE.is_set()                                  # the long thread picks it up
+    bot.LONG_WATCH_FORCE.clear()
 
 
 def test_new_coins_menu_reads_coinmarketcap_and_says_unknown_without_a_key(monkeypatch):
@@ -430,12 +433,15 @@ def test_long_tick_decides_once_a_week_keeps_the_snapshot_on_failure_and_redacts
         calls = []
 
         class Watch:
-            def refresh(self, at, previous=None, gates=None):
+            def refresh(self, at, previous=None, gates=None, kind="karar"):
                 calls.append((at, previous))
                 if len(calls) == 2:
                     raise RuntimeError("HTTPError 429 for url https://api.coingecko.com/x?x-cg-demo-api-key=SECRET")
                 return {"generated_at": at, "week0": bot.long_watch.week_start(at), "week": "w", "cards": [],
                         "counts": {}, "register": {}, "regime": {}}
+
+            def outbox(self):
+                return []
         monkeypatch.setattr(bot, "LONG_WATCH", Watch())
         bot.long_watch_tick(now)
         assert len(calls) == 1 and bot.STATE["long_watch"]["generated_at"] == now and bot.STATE["long_watch_error"] is None
@@ -499,10 +505,13 @@ def test_the_long_tick_hands_the_gate_guards_result_to_the_long_watch(monkeypatc
         seen = {}
 
         class Watch:
-            def refresh(self, at, previous=None, gates=None):
+            def refresh(self, at, previous=None, gates=None, kind="karar"):
                 seen["gates"] = gates
                 return {"generated_at": at, "week0": bot.long_watch.week_start(at), "week": "w", "cards": [],
                         "counts": {}, "register": {}, "regime": {}}
+
+            def outbox(self):
+                return []
         monkeypatch.setattr(bot, "LONG_WATCH", Watch())
         bot.long_watch_tick(now)
         assert seen["gates"] == {"UNI": {"status": "ELENDI", "fails": {"Güvenlik": "hack"}, "at": now - 3600}}
@@ -522,5 +531,116 @@ def test_the_gate_guard_is_disabled_with_the_long_watch_when_the_register_fails(
         bot.STATE["altcoin_watch"] = None
         bot.altcoin_watch_tick(1792368000)
         assert bot.STATE["altcoin_watch"] is None and "kayıt yüklenemedi" in bot.STATE["altcoin_watch_error"]
+    finally:
+        bot.STATE.update(saved)
+
+
+def test_the_long_tick_decides_weekly_and_a_forced_tick_is_an_interim_refresh(monkeypatch):
+    saved = _preserve_state("long_watch", "long_watch_error", "long_watch_retry_at")
+    try:
+        monkeypatch.setattr(bot, "_save_state", lambda: None)
+        bot.STATE["long_watch"], bot.STATE["long_watch_error"], bot.STATE["long_watch_retry_at"] = None, None, 0
+        now = 1792368000 + 86_400 + 1800
+        kinds, delivered = [], []
+
+        class Watch:
+            def __init__(self):
+                self.pending = [{"id": "w:UNI:SINYAL", "text": "🟢 <b>LONG SİNYALİ · UNI</b>"}]
+
+            def refresh(self, at, previous=None, gates=None, kind="karar"):
+                kinds.append(kind)
+                return {"generated_at": at, "week0": bot.long_watch.week_start(at), "week": "w", "cards": [],
+                        "counts": {}, "register": {}, "regime": {}}
+
+            def outbox(self):
+                return list(self.pending)
+
+            def delivered(self, message_id, *, at, sent=True):
+                delivered.append((message_id, sent))
+                self.pending = [m for m in self.pending if m["id"] != message_id]
+        sent = []
+        monkeypatch.setattr(bot, "LONG_WATCH", Watch())
+        monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append((text, kw)))
+        monkeypatch.setattr(bot, "TOKEN", "t")
+        monkeypatch.setattr(bot, "CHAT_ID", "c")
+        assert bot.long_watch_tick(now) is True and kinds == ["karar"]              # first refresh: a decision
+        assert sent[-1][0].startswith("🟢") and sent[-1][1]["html_mode"] is True and delivered == [("w:UNI:SINYAL", True)]
+        assert bot.long_watch_tick(now + 3600) is False and kinds == ["karar"]       # same week, fresh: nothing
+        assert bot.long_watch_tick(now + 7200, force=True) is True and kinds == ["karar", "ara"]   # the scan button
+        assert bot.long_watch_tick(now + 7 * 86_400) is True and kinds == ["karar", "ara", "karar"]
+        # alerts switched off: recorded as not sent, nothing pushed
+        bot.LONG_WATCH.pending = [{"id": "w2:PEPE:SINYAL", "text": "🟢 PEPE"}]
+        monkeypatch.setattr(bot, "LONG_WATCH_ALERTS", False)
+        before = len(sent)
+        bot.long_watch_tick(now + 7 * 86_400 + 60)
+        assert delivered[-1] == ("w2:PEPE:SINYAL", False) and len(sent) == before
+    finally:
+        bot.STATE.update(saved)
+
+
+def test_a_failed_push_keeps_the_alert_pending(monkeypatch):
+    class Watch:
+        def __init__(self):
+            self.pending = [{"id": "a", "text": "x"}, {"id": "b", "text": "y"}]
+            self.done = []
+
+        def outbox(self):
+            return list(self.pending)
+
+        def delivered(self, message_id, *, at, sent=True):
+            self.done.append(message_id)
+            self.pending = [m for m in self.pending if m["id"] != message_id]
+    watch = Watch()
+    monkeypatch.setattr(bot, "LONG_WATCH", watch)
+    monkeypatch.setattr(bot, "TOKEN", "t")
+    monkeypatch.setattr(bot, "CHAT_ID", "c")
+    monkeypatch.setattr(bot, "LONG_WATCH_ALERTS", True)
+
+    def failing(text, **kw):
+        raise RuntimeError("telegram_http_502 https://api.telegram.org/botSECRET/sendMessage")
+    monkeypatch.setattr(bot, "send", failing)
+    bot._deliver_long_alerts(1792368000)
+    assert watch.done == [] and len(watch.pending) == 2                           # nothing marked delivered
+    monkeypatch.setattr(bot, "send", lambda text, **kw: None)
+    bot._deliver_long_alerts(1792368000)
+    assert watch.done == ["a", "b"] and watch.pending == []
+
+
+def test_puan_command_renders_both_categories(monkeypatch):
+    assert bot._command("/puan") == "PUAN"
+    monkeypatch.setitem(bot.STATE, "long_watch", None)
+    text = bot.format_scores()
+    assert "PUANLAR" in text and "Altcoinler" in text and "Meme coinler" in text and "UNI" in text and "PEPE" in text
+    sent = []
+    monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append((text, kw)))
+    bot.handle("PUAN")
+    assert "PUANLAR" in sent[-1][0] and sent[-1][1]["html_mode"] is True
+
+
+def test_a_gate_fail_on_a_signalled_coin_is_pushed_from_the_daily_gate_check(monkeypatch):
+    saved = _preserve_state("altcoin_watch", "altcoin_watch_error", "altcoin_watch_failures", "altcoin_watch_retry_at",
+                            "altcoin_watch_failed_keyed", "long_watch")
+    try:
+        monkeypatch.setattr(bot, "_save_state", lambda: None)
+        for key, value in (("altcoin_watch", None), ("altcoin_watch_error", None), ("altcoin_watch_failures", 0),
+                           ("altcoin_watch_retry_at", 0), ("altcoin_watch_failed_keyed", None)):
+            bot.STATE[key] = value
+        bot.STATE["long_watch"] = {"generated_at": 1, "decision_signals": {"UNI": "DİLİM 2"}, "cards": [], "counts": {}}
+        snapshot = {"generated_at": 1792368000, "cards": [{"symbol": "UNI", "id": "uniswap", "status": "ELENDI",
+                                                           "fails": {"Güvenlik": "hack"}}], "counts": {}}
+        monkeypatch.setattr(bot.ALTCOIN_WATCH, "refresh", lambda now, previous=None: snapshot)
+        losses, deliveries = [], []
+
+        class Watch:
+            def gate_losses(self, snap, gates, now):
+                losses.append((snap["decision_signals"], gates["UNI"]["fails"]))
+                return ["UNI"]
+
+            def outbox(self):
+                return []
+        monkeypatch.setattr(bot, "LONG_WATCH", Watch())
+        monkeypatch.setattr(bot, "_deliver_long_alerts", lambda now: deliveries.append(now))
+        bot.altcoin_watch_tick(1792368000)
+        assert losses == [({"UNI": "DİLİM 2"}, {"Güvenlik": "hack"})] and deliveries == [1792368000]
     finally:
         bot.STATE.update(saved)

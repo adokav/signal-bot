@@ -296,15 +296,20 @@ Meme coinin nakit akışı yoktur; fiyatı dikkat × likidite × dağılımdır 
 |---|---|
 | `/long` | Rejim satırı; altcoin çekirdek ilk N (puan, kapı durumu, plan durumu); meme çekirdek ilk N; açık gölge pozisyonlar (giriş referansı, dilim, 10 haftalık çıkış seviyesi, 2×/4× seviyeleri, süre) |
 | `/long <sembol>` | Kart: kapılar, puan grupları, yol riski, pay ve likidite üst sınırı, kayıt defteri alanları ve tarihi, "elle bakılacaklar" |
+| `/puan` | İki kategorinin rapor puanları (Puan, P(≥2×), S) ve botun o coindeki durumu (sinyal ya da eksik ilk koşul); bot puanlamaz |
+| `/scan` ve "🔄 Şimdi Tara" | Yeni coin taraması + long **ara taraması** (karar değil: seviyeler ve koşullar yenilenir, yeni sinyal ilan edilmez); bitince `/puan` tabloları gönderilir |
 | `/rejim` | K0 göstergeleri, 4 haftalık yön, dilim durumu, BTC trend bilgisi |
 | `/check <adres>` | Mevcut kontrat taraması (kalır) |
 | `/d1` | D1 gölge kaydı (kalırsa, §10) |
 | `/status`, `/scan`, `/panel` | Sağlık, yeniden tarama, panel |
 
-Bildirimler:
+Bildirimler (kullanıcı kararı 2026-10-23: "sinyal geldiği anda uyarı"; uygulandı):
 
-- **Haftalık özet** (Pazartesi kararından sonra, tek mesaj): rejim, yeni çekirdek girişleri, açılan dilimler, kısmi satışlar, trend çıkışları, yeniden puanlama çıkışları.
-- **Anında:** tez geçersizliği (günlük hack/kontrat kontrolünden) ve rejim azaltması.
+- **🟢 LONG SİNYALİ** — haftalık kararda bir coin ilk kez DİLİM 1/2 alınca, karar anında tek mesaj: karar fiyatı (perp kapanış), fitil referansı, likidasyon 1× ve L_max, marj stopu, 2×/4×, pay ve likidite üst sınırı, funding, OI/pd, kapılar, rejim satırı; "referans fiyat karar anının fiyatıdır, alım talimatı değildir" uyarısı. Aynı coin için haftada bir; süren sinyal yeniden duyurulmaz.
+- **🔴 SİNYAL DÜŞTÜ** — bir karar sinyali artık sağlanmayınca (sonraki kararda ya da ara taramada) ve günlük kapı kontrolünde hack/kontrat/faaliyet ❌ görülünce **aynı gün**; neden yazılır. Haftada bir.
+- Ara tarama (düğme) yeni sinyal üretmez: haftalık karar ilkesi korunur; yalnız düşen sinyal bildirilir.
+- `LONG_WATCH_ALERTS_ENABLED=0` mesajları deftere yazar, göndermez ("sent: false").
+- Planlanan, henüz yok: haftalık özet, aylık özet, `/rapor`.
 - Her mesajda: referans fiyatın karar anı fiyatı olduğu, gecikme varsa süresi, "KANIT YOK — ileri kayıt sürüyor" etiketi ve "Gölge kayıt: emir yok, karar senin." (kaldırılan `long_alerts` modülünün altbilgi geleneği; `trend_loop` aynı altbilgiyi kullanır).
 - Teslim güvencesi `trend_loop` ile aynı: mesaj olayıyla deftere yazılır, `DELIVERED` kaydı gelene kadar yeniden denenir.
 

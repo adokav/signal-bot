@@ -78,6 +78,11 @@ SLICE_1, SLICE_2, REDUCE, WAIT = "DİLİM 1", "DİLİM 2", "AZALT", "BEKLE"
 UP, DOWN = "YUKARI", "AŞAĞI"
 TRIAL: str | None = None           # the forward record is not pre-registered yet (§8.2); events say so
 EVENT_DECISION = "KARAR"
+EVENT_SIGNAL, EVENT_SIGNAL_LOST, EVENT_DELIVERED = "SINYAL", "SINYAL_DUSTU", "DELIVERED"
+DECISION, INTERIM = "karar", "ara"      # a weekly decision refresh, or a manual mid-week refresh (no new signal)
+BASKET_SHORT = {rg.CORE: "çek", rg.CORE_CONDITIONAL: "koş", rg.WATCH: "izl", rg.GROWTH_POOL: "hav",
+                rg.UNVERIFIED: "dğr?", rg.FAILED: "baş✗", rg.SPECULATIVE_POOL: "spek",
+                rg.LIQUIDITY_BORDERLINE: "lik~", rg.LIQUIDITY_FAILED: "lik✗"}
 FOOTER = "Gölge kayıt: emir yok, karar senin. KANIT YOK — ileri kayıt ön-kaydı bekliyor."
 
 
@@ -411,9 +416,9 @@ def evaluate(coin: rg.Coin, *, regime_slice: str | None, channel_state: str | No
         missing.append("kapı kontrolü bilinmiyor")
     elif gate_block:
         missing.append(gate_block)
-    if coin.basket != rg.CORE:
+    if coin.basket not in (rg.CORE, rg.CORE_CONDITIONAL):
         missing.append(f"sepet {coin.basket_label}")
-    if coin.condition:
+    if coin.condition:                                             # a conditional core coin waits on its flag
         missing.append("koşul bekliyor")
     if regime_slice not in (SLICE_1, SLICE_2):
         missing.append("rejim " + (regime_slice or UNKNOWN))
@@ -831,11 +836,17 @@ class LongWatch:
     # -- snapshot -------------------------------------------------------------
 
     def refresh(self, now: int, previous: Mapping[str, Any] | None = None,
-                gates: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, Any]:
+                gates: Mapping[str, Mapping[str, Any]] | None = None, kind: str = DECISION) -> dict[str, Any]:
         """Collect every series, evaluate every coin, record the week's decision once per coin.
 
         ``gates`` is the gate guard's latest result (altcoin_watch.gates_of); None or stale means every
-        coin's gate check is unknown and no slice is produced."""
+        coin's gate check is unknown and no slice is produced. ``kind`` DECISION is the week's decision: it
+        records KARAR events and may raise new signals (alerts). INTERIM is a manual mid-week refresh: levels
+        and conditions are recomputed for display, but no new signal is declared and nothing is recorded as a
+        decision; a signal that no longer holds is still reported as lost."""
+
+        if kind not in (DECISION, INTERIM):
+            raise ValueError(f"unknown refresh kind {kind!r}")
 
         week0 = week_start(day_start(now))
         ids = [c.gecko_id for c in self.register.coins]
@@ -860,8 +871,19 @@ class LongWatch:
                  for c in self.register.coins]
         if gates is None:
             errors.append("kapı kontrolü yok (altcoin_watch anlık görüntüsü yok)")
+        previous_decision = dict((previous or {}).get("decision_signals") or {})
+        current = {c["symbol"]: c["signal"] for c in cards if c["signal"]}
+        if kind == DECISION:
+            decision_signals = current
+            new = [c for c in cards if c["signal"] and c["symbol"] not in previous_decision]
+        else:
+            decision_signals = {s: v for s, v in previous_decision.items() if s in current}   # losses only
+            new = []
+        lost = [c for c in cards if c["symbol"] in previous_decision and not c["signal"]]
         snapshot = {
-            "generated_at": now, "week0": week0, "week": _iso(week0), "venue": VENUE,
+            "generated_at": now, "week0": week0, "week": _iso(week0), "venue": VENUE, "kind": kind,
+            "decision_signals": decision_signals,
+            "changes": {"new": [c["symbol"] for c in new], "lost": [c["symbol"] for c in lost]},
             "register": dict(self.register.summary(), age_days=register_age_days,
                              stale=register_age_days > REGISTER_MAX_AGE_DAYS),
             "regime": regime_result, "btcd_archive": archive,
@@ -872,8 +894,58 @@ class LongWatch:
             "counts": {"signal": sum(1 for c in cards if c["signal"]), "coins": len(cards),
                        "errors": sum(1 for c in cards if c["errors"])},
         }
-        self._record(snapshot)
+        if kind == DECISION:
+            self._record(snapshot)
+        for card in new:
+            self.ledger.append({"id": f"{snapshot['week']}:{card['symbol']}:{EVENT_SIGNAL}", "event": EVENT_SIGNAL,
+                                "week": snapshot["week"], "at": now, "symbol": card["symbol"], "signal": card["signal"],
+                                "perp_close": card.get("perp_close"), "register_sha256": snapshot["register"]["sha256"],
+                                "trial": TRIAL, "can_authorize_trade": False},
+                               text=alert_text(card, snapshot))
+        for card in lost:
+            self._lost(snapshot, card["symbol"], "; ".join(card["missing"][:2]) or "koşul sağlanmıyor", now)
         return snapshot
+
+    def _lost(self, snapshot: Mapping[str, Any], symbol: str, reason: str, now: int) -> bool:
+        """A signal that no longer holds: one event (and message) per coin per week."""
+
+        return self.ledger.append({"id": f"{snapshot['week']}:{symbol}:{EVENT_SIGNAL_LOST}", "event": EVENT_SIGNAL_LOST,
+                                   "week": snapshot["week"], "at": now, "symbol": symbol, "reason": reason,
+                                   "register_sha256": snapshot["register"]["sha256"], "trial": TRIAL,
+                                   "can_authorize_trade": False},
+                                  text=loss_text(symbol, reason, snapshot))
+
+    def gate_losses(self, snapshot: dict[str, Any] | None, gates: Mapping[str, Mapping[str, Any]] | None,
+                    now: int) -> list[str]:
+        """Between decisions: a hard gate ❌ (hack, contract, activity) on a coin with a standing signal drops
+        the signal the same day. The snapshot's decision_signals is updated so the loss is reported once."""
+
+        if not snapshot or not gates:
+            return []
+        dropped: list[str] = []
+        for symbol in list((snapshot.get("decision_signals") or {}).keys()):
+            verdict = gate_verdict(gates.get(symbol), now=now, previous=None)
+            if verdict["known"] and verdict["block"]:
+                snapshot["decision_signals"].pop(symbol, None)
+                for card in snapshot.get("cards") or []:
+                    if card.get("symbol") == symbol:
+                        card["signal"] = None
+                        card["missing"] = [verdict["block"]] + [m for m in card.get("missing") or [] if m != verdict["block"]]
+                        card["gate"] = verdict
+                self._lost(snapshot, symbol, verdict["block"], now)
+                dropped.append(symbol)
+        if dropped:
+            snapshot["counts"] = dict(snapshot.get("counts") or {}, signal=len(snapshot["decision_signals"]))
+        return dropped
+
+    def outbox(self) -> list[dict[str, str]]:
+        """Messages recorded in the ledger whose delivery is not recorded yet, oldest first."""
+
+        return self.ledger.pending()
+
+    def delivered(self, message_id: str, *, at: int, sent: bool = True) -> None:
+        self.ledger.append({"id": f"{EVENT_DELIVERED}:{message_id}", "event": EVENT_DELIVERED, "message_id": message_id,
+                            "at": at, "sent": sent})
 
     def _record(self, snapshot: Mapping[str, Any]) -> int:
         """One KARAR event per coin per week (the first refresh of the week decides); later refreshes add none."""
@@ -892,6 +964,72 @@ class LongWatch:
             if self.ledger.append(event):
                 written += 1
         return written
+
+
+# ---------------------------------------------------------------------------
+# Alerts (recorded in the ledger first; the bot delivers and records DELIVERED)
+# ---------------------------------------------------------------------------
+
+
+def alert_text(card: Mapping[str, Any], snapshot: Mapping[str, Any]) -> str:
+    """A new slice signal at the weekly decision. The reference price is the decision's perp close."""
+
+    from .text import _num
+
+    wick = card.get("wick") or {}
+    reg = snapshot.get("regime") or {}
+    fund = card.get("fund90") or {}
+    lines = [f"🟢 <b>LONG SİNYALİ · {esc(card.get('symbol'))} · {esc(card.get('signal'))}</b> · hafta {esc(snapshot.get('week'))}",
+             esc(f"Karar fiyatı (perp kapanış) {_num(card['perp_close']) if card.get('perp_close') else '?'} · "
+                 f"{card.get('basket_label')}" + (f" · rapor sırası {card['rank']}" if card.get("rank") else "")),
+             esc(f"Fitil ref. {_num(wick['reference_price']) if wick.get('reference_price') else '?'} ({_pct(wick.get('worst'))}) · "
+                 f"likidasyon 1× {_num(card['liquidation_1x']) if card.get('liquidation_1x') else '?'} · "
+                 f"L_max {_mult(card.get('l_max'), 2)}"
+                 + (f" · marj stopu {_num(card['protection_stop'])} (1× üstünde)" if card.get("protection_stop") else "")),
+             esc(f"2× {_num(card['scale_out'][0]) if card.get('scale_out') else '?'} · 4× "
+                 f"{_num(card['scale_out'][1]) if card.get('scale_out') else '?'} · pay "
+                 f"{_pct(card.get('share'), 2).lstrip('+') if card.get('share') is not None else '?'} · "
+                 f"likidite üst sınırı {_usd(card.get('position_cap_usd'))}"),
+             esc(f"Funding 90g {_pct(fund.get('annual'))} · OI/pd {_pct(card.get('oi_mcap'))} · perp/spot "
+                 f"{_mult(card.get('perp_spot'))} · kapılar {'✅' if (card.get('gate') or {}).get('known') and not (card.get('gate') or {}).get('fails') else '?'}"),
+             esc(_regime_line(snapshot)),
+             esc("Referans fiyat karar anının fiyatıdır; bu mesaj geç ulaşmış olabilir, alım talimatı değildir. "
+                 f"{FOOTER} Emir yetkisi yok.")]
+    return "\n".join(lines)
+
+
+def loss_text(symbol: str, reason: str, snapshot: Mapping[str, Any]) -> str:
+    return "\n".join([f"🔴 <b>SİNYAL DÜŞTÜ · {esc(symbol)}</b> · hafta {esc(snapshot.get('week'))}",
+                      esc(f"Neden: {reason}"),
+                      esc(f"Ayrıntı: /long {symbol}. {FOOTER} Emir yetkisi yok.")])
+
+
+def render_scores(snapshot: Mapping[str, Any] | None, register: rg.Register, *, now: int) -> str:
+    """The report's scores (Puan, P(≥2×), S) for both categories next to the bot's current state.
+
+    The scores are the report's and are shown as given; the bot does not rank. The state column is the
+    slice signal or the first missing condition of the latest refresh."""
+
+    cards = {c.get("symbol"): c for c in (snapshot or {}).get("cards") or [] if isinstance(c, Mapping)}
+    age = f" · değerlendirme {_age(now - int(snapshot.get('generated_at') or 0))} önce" if snapshot else " · değerlendirme yok"
+    kind = " (ara tarama, karar değil)" if (snapshot or {}).get("kind") == INTERIM else ""
+    lines = ["📊 <b>PUANLAR · v3.2 raporu · iki kategori</b>",
+             esc(f"Kayıt {register.version} ({register.report_date.isoformat()}){age}{kind}")]
+    for kind_key, title in ((rg.ALTCOIN, "Altcoinler"), (rg.MEME, "Meme coinler")):
+        rows = [f"{'Coin':<8}{'Sepet':<5}{'Puan':>5}{'P2×':>5}{'S':>5}  Durum"]
+        coins = sorted(register.by_kind(kind_key), key=lambda c: (c.rank is None, c.rank or 0, -c.total))
+        for coin in coins:
+            card = cards.get(coin.symbol) or {}
+            state = card.get("signal") or ((card.get("missing") or ["?"])[0].split(" ")[0] if card else "?")
+            s_text = f"{coin.s:.2f}" if coin.s is not None else "?"
+            rows.append(f"{coin.symbol[:7]:<8}{BASKET_SHORT.get(coin.basket, '?'):<5}{coin.total:>5.0f}"
+                        f"{coin.p_2x:>5.2f}{s_text:>5}  {state[:10]}")
+        lines += ["", f"<b>{title}</b>", "<pre>" + esc("\n".join(rows)) + "</pre>"]
+    lines += ["", esc("Puan, P(≥2×) ve S raporun kendi değerleridir (altcoin A–H, meme K1–K6); bot puanlamaz ve "
+                      "sıralamaz. Durum: DİLİM 1/2 ya da eksik ilk koşul. Ayrıntı: /long <sembol>."),
+              esc(f"{FOOTER} Emir yetkisi yok.")]
+    text = "\n".join(lines)
+    return text if len(text) <= 4096 else text[:4000] + "\n…"
 
 
 # ---------------------------------------------------------------------------
@@ -988,7 +1126,8 @@ def render(snapshot: Mapping[str, Any] | None, *, now: int, enabled: bool = True
     age = now - int(snapshot.get("generated_at") or 0)
     reg = snapshot.get("register") or {}
     lines = [head, esc(f"Kayıt {reg.get('version')} ({reg.get('report_date')}) · değerlendirme {_age(age)} önce · "
-                       f"hafta {snapshot.get('week')}")]
+                       f"hafta {snapshot.get('week')}"
+                       + (" · ara tarama (karar değil)" if snapshot.get("kind") == INTERIM else ""))]
     if age > max_age or error:
         lines.append(esc(f"⚠️ Haftalık yenileme yapılamadı{': ' + error if error else ''}; son değerlendirme gösteriliyor."))
     if reg.get("stale"):

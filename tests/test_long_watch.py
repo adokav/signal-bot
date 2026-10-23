@@ -369,14 +369,19 @@ def test_a_refresh_evaluates_every_coin_and_records_each_decision_once(tmp_path)
     assert pepe["buildup"] is True and pepe["signal"] is None and any("kaldıraç" in m for m in pepe["missing"])
     assert cards["DOGE"]["buildup"] is None and "OI/hacim bilinmiyor" in cards["DOGE"]["missing"]   # not in derivatives
     records = ledger.records()
-    assert len(records) == 22 and all(r["event"] == "KARAR" and r["can_authorize_trade"] is False for r in records)
-    assert records[0]["register_sha256"] == snap["register"]["sha256"]
-    # a second refresh in the same week writes nothing new
-    watch.refresh(NOW + 3600, previous=snap)
-    assert len(ledger.records()) == 22
-    # the next week decides again
-    watch.refresh(NOW + 7 * DAY, previous=snap)
-    assert len(ledger.records()) == 44
+    decisions = [r for r in records if r["event"] == "KARAR"]
+    assert len(decisions) == 22 and all(r["can_authorize_trade"] is False for r in records)
+    assert decisions[0]["register_sha256"] == snap["register"]["sha256"]
+    signals = [r for r in records if r["event"] == lw.EVENT_SIGNAL]
+    assert [r["symbol"] for r in signals] == ["UNI"] and signals[0]["text"].startswith("🟢 <b>LONG SİNYALİ · UNI · DİLİM 2</b>")
+    assert snap["kind"] == lw.DECISION and snap["decision_signals"] == {"UNI": lw.SLICE_2}
+    assert snap["changes"] == {"new": ["UNI"], "lost": []} and len(records) == 23
+    # a second refresh in the same week writes nothing new (the decision stands, the signal is not re-announced)
+    again = watch.refresh(NOW + 3600, previous=snap, gates=_gates(NOW + 3600))
+    assert len(ledger.records()) == 23 and again["changes"] == {"new": [], "lost": []}
+    # the next week decides again; UNI's standing signal is not a new one
+    nxt = watch.refresh(NOW + 7 * DAY, previous=snap, gates=_gates(NOW + 7 * DAY))
+    assert len([r for r in ledger.records() if r["event"] == "KARAR"]) == 44 and nxt["changes"]["new"] == []
 
 
 def test_provider_failures_leave_fields_unknown_and_never_a_signal(tmp_path):
@@ -548,3 +553,75 @@ def test_gecko_aggregates_only_the_fixed_markets_and_perpetuals():
     prices = [[(NOW - i * DAY) * 1000, 100.0 + (i == 0) * 50] for i in range(100, -1, -1)]
     assert G({"prices": prices}).return_days("x", 90) == pytest.approx(0.5)
     assert G({"prices": prices[:50]}).return_days("x", 90) is None
+
+
+def test_signals_are_announced_once_lost_signals_are_reported_and_interim_refreshes_decide_nothing(tmp_path):
+    watch, ledger = _watch(tmp_path)
+    first = watch.refresh(NOW, gates=_gates())                                       # UNI gets DİLİM 2
+    assert first["changes"]["new"] == ["UNI"]
+    outbox = watch.outbox()
+    assert len(outbox) == 1 and "LONG SİNYALİ · UNI" in outbox[0]["text"] and "Emir yetkisi yok" in outbox[0]["text"]
+    assert "Karar fiyatı" in outbox[0]["text"] and "alım talimatı değildir" in outbox[0]["text"]
+    watch.delivered(outbox[0]["id"], at=NOW + 60, sent=True)
+    assert watch.outbox() == [] and ledger.records()[-1] == {"id": f"DELIVERED:{outbox[0]['id']}", "event": "DELIVERED",
+                                                             "message_id": outbox[0]["id"], "at": NOW + 60, "sent": True}
+    # an interim (manual) refresh mid-week: a coin that would newly qualify is NOT declared, a lost one is
+    class Gecko(FakeGecko):
+        def derivatives(self):
+            out = super().derivatives()
+            out["PENDLE"] = {"oi_usd": 5e7, "perp_volume_usd": 1e8, "tickers": 5, "incomplete": False}   # PENDLE now qualifies
+            return out
+    interim_watch = lw.LongWatch(rg.load(), FakeMexc(fail={"UNI_USDT"}), Gecko(), ledger)   # UNI's candles fail: signal lost
+    interim = interim_watch.refresh(NOW + 2 * DAY, previous=first, gates=_gates(NOW + 2 * DAY), kind=lw.INTERIM)
+    assert interim["kind"] == lw.INTERIM and interim["decision_signals"] == {}
+    assert lw.find(interim, "PENDLE")["signal"] == lw.SLICE_2                        # shown, but not a decision
+    assert interim["changes"] == {"new": [], "lost": ["UNI"]}
+    assert [r["event"] for r in ledger.records() if r["event"] in (lw.EVENT_SIGNAL, lw.EVENT_SIGNAL_LOST)] == [lw.EVENT_SIGNAL, lw.EVENT_SIGNAL_LOST]
+    assert not any(r["event"] == "KARAR" and r["at"] == NOW + 2 * DAY for r in ledger.records())   # no KARAR mid-week
+    assert "ara tarama" in lw.render(interim, now=NOW + 2 * DAY)
+    lost = watch.outbox()
+    assert len(lost) == 1 and lost[0]["text"].startswith("🔴 <b>SİNYAL DÜŞTÜ · UNI</b>") and "fitil referansı" in lost[0]["text"]
+    # the next decision declares PENDLE as new (it was never a decision signal)
+    decision = interim_watch.refresh(NOW + 7 * DAY, previous=interim, gates=_gates(NOW + 7 * DAY))
+    assert "PENDLE" in decision["changes"]["new"] and decision["decision_signals"].get("PENDLE") == lw.SLICE_2
+    with pytest.raises(ValueError):
+        watch.refresh(NOW, gates=_gates(), kind="weird")
+
+
+def test_a_hard_gate_fail_drops_a_standing_signal_the_same_day(tmp_path):
+    watch, ledger = _watch(tmp_path)
+    snap = watch.refresh(NOW, gates=_gates())
+    for m in watch.outbox():
+        watch.delivered(m["id"], at=NOW)
+    assert snap["decision_signals"] == {"UNI": lw.SLICE_2}
+    # liquidity alone does not drop it between decisions; a hack does
+    assert watch.gate_losses(snap, _gates(NOW + DAY, UNI={"Likidite": "30 günlük medyan hacim $8.0M"}), NOW + DAY) == []
+    dropped = watch.gate_losses(snap, _gates(NOW + DAY, UNI={"Güvenlik": "son 180 günde hack: $3,000,000 kayıp"}), NOW + DAY)
+    assert dropped == ["UNI"] and snap["decision_signals"] == {} and snap["counts"]["signal"] == 0
+    uni = lw.find(snap, "UNI")
+    assert uni["signal"] is None and uni["missing"][0].startswith("kapı ❌: son 180 günde hack")
+    outbox = watch.outbox()
+    assert len(outbox) == 1 and "SİNYAL DÜŞTÜ · UNI" in outbox[0]["text"] and "hack" in outbox[0]["text"]
+    # reported once per week even if the ❌ persists
+    assert watch.gate_losses(snap, _gates(NOW + 2 * DAY, UNI={"Güvenlik": "son 180 günde hack: $3,000,000 kayıp"}), NOW + 2 * DAY) == []
+    assert len(watch.outbox()) == 1
+    assert watch.gate_losses(None, _gates(), NOW) == [] and watch.gate_losses(snap, None, NOW) == []
+
+
+def test_the_scores_view_shows_both_categories_with_the_reports_numbers(tmp_path):
+    watch, _ = _watch(tmp_path)
+    reg = rg.load()
+    empty = lw.render_scores(None, reg, now=NOW)
+    assert "PUANLAR" in empty and "Altcoinler" in empty and "Meme coinler" in empty and "değerlendirme yok" in empty
+    snap = watch.refresh(NOW, gates=_gates())
+    text = lw.render_scores(snap, reg, now=NOW + 120)
+    assert "UNI     çek     76 0.40 0.62  DİLİM 2" in text                             # the report's row + the bot's state
+    assert "BNB     koş     66 0.24 0.49  koşul" in text
+    assert "PEPE    çek     90 0.37 0.69  kaldıraç" in text                             # leverage build-up blocks PEPE
+    assert "SHIB    dğr?    43 0.32    ?" in text                                       # the report gives no S for SHIB
+    assert "bot puanlamaz" in text and "Emir yetkisi yok" in text and len(text) <= 4096
+    interim = watch.refresh(NOW + DAY, previous=snap, gates=_gates(NOW + DAY), kind=lw.INTERIM)
+    assert "ara tarama, karar değil" in lw.render_scores(interim, reg, now=NOW + DAY)
+    import re as _re
+    tables = _re.findall(r"<pre>(.*?)</pre>", text, flags=_re.S)
+    assert len(tables) == 2 and all(len(row) <= 40 for table in tables for row in table.splitlines())   # phone width
