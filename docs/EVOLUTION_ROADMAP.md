@@ -350,9 +350,21 @@ güncellenenler belirtildi.
       betimleyici; 24 aylık 2× betimleyici. Harness yazıldı
       (`trading/backtest/breakout_cohort.py`, workflow `breakout_cohort`);
       keşif koşusu kullanıcıyı bekliyor.
-    - Sıradaki adımlar: kohort harness'ı ve keşif koşusu, haftalık D1 analoğu
-      majör testi (ön-kayıtlı), rejim katmanı ve kayıt defteri, v3.2 kapı/puan
-      motoru, pozisyon planı ve ileri kayıt ön-kaydı.
+    - **Düzeltme (2026-10-23, kullanıcı):** liste raporun kendisidir; bot v3.2
+      kapı/puanını yeniden uygulamaz, seçmez, yükseltmez. Raporun coin ve meme
+      coinleri `research/register/v3_2_2026-10-23.json` kaydında
+      (`acce_unified/register.py` doğrular, bozuksa hiçbir şey yüklemez). Seçim
+      motoru planı iptal; `/altcoin` taraması daraltılacak.
+    - **`/long` v1 (aynı PR):** `acce_unified/long_watch.py` — MEXC vadeli
+      günlük mumlar (fitil referansı: WICK365, FLASH365, CYCLE_LOW), funding
+      (FUND90), OI ve sürdürme marjı; CoinGecko piyasa değeri, toplu OI
+      (sabit borsa listesi), BTC.D ve ALT90; haftalık 10 haftalık kanal; rejim
+      dilimi; tüm koşullar sağlanırsa DİLİM 1/2, yoksa eksik koşulun adı.
+      Haftada bir karar kaydı (`long_watch_ledger.jsonl`). Kanıt yok; ileri
+      kayıt ön-kaydı (§8.2) sonraki iş.
+    - Sıradaki adımlar: kohort keşif koşusu; haftalık D1 analoğu majör testi
+      (ön-kayıtlı); `/altcoin` daraltma; pozisyon planı (açma/kapama, kısmi
+      satış, birikmiş funding) ve ileri kayıt ön-kaydı.
 
 ## Kesin çizgiler
 
@@ -419,7 +431,8 @@ büyük kazananlar (özellikle 2020 sonu) sıfıra yakın tutuyor. 2024 sonrası
 her testte negatif (sonuç sonrası bölme, karar değil).
 
 **Sonraki iş (2026-10-23'ten itibaren):** `docs/POSITION_LONG.md`'nin
-uygulama sırası (madde 15). Taktik radar ve Likit-100 canlıdan kaldırıldı;
+uygulama sırası (madde 15): raporun listesi kayıtta, sırada vadeli veri
+katmanı ve `/long`. Taktik radar ve Likit-100 canlıdan kaldırıldı;
 kanıtları ve raporları duruyor. `docs/EDGE_RESEARCH.md` adayları (zorunlu
 satış sonrası toparlanma, BTC saat etkisi) bekliyor. Her yeni hipotez deneme
 kaydına önceden girer; deneme sayısı arttıkça çıta yükselir.

@@ -1,0 +1,1583 @@
+{
+ "schema": "v32-register/v1",
+ "report": {
+  "title": "Kripto ve Meme Coin Seçim Sistemi v3.2 — Nihai Rapor",
+  "version": "v3.2",
+  "report_date": "2026-10-23",
+  "data_as_of": "2026-10-22",
+  "regime_as_of": "2026-10-17",
+  "data_source": "DefiLlama (22 Ekim 2026); CoinGecko meme kategorisi; CoinMarketCap çapraz kontrol",
+  "source": {
+   "file": "Kripto_ve_Meme_Coin_Secim_Sistemi_v3.2_Nihai_Rapor.pdf",
+   "bytes": 1078464,
+   "sha256": "07f2b3e1581803fd03496ed0d731653ac10a74ba72db1226b29127e27b74d22d",
+   "pages": 22,
+   "in_repo": false,
+   "note": "Kullanıcının raporu; depoda değil. Bu dosya rapordan elle aktarıldı; her alanın sayfası 'pages' alanında."
+  },
+  "disclaimer": "Rapor kendisini 'metodoloji ve araştırma listesi, yatırım tavsiyesi değil' diye tanımlar; olasılıklar tarihsel veriyle kalibre edilmemiştir."
+ },
+ "rules": {
+  "horizon_years": 2.5,
+  "target_multiple": 2.0,
+  "ranking": "S = 0,6 × Puan/100 + 0,4 × P(≥2×)",
+  "weights": {
+   "altcoin": {
+    "A": 20,
+    "B": 20,
+    "C": 15,
+    "D": 15,
+    "E": 10,
+    "F": 10,
+    "G": 5,
+    "H": 5
+   },
+   "meme": {
+    "K1": 20,
+    "K2": 20,
+    "K3": 20,
+    "K4": 15,
+    "K5": 15,
+    "K6": 10
+   }
+  },
+  "regime_probabilities": {
+   "bear": 0.3,
+   "base": 0.45,
+   "bull": 0.25
+  },
+  "regime": {
+   "rule": {
+    "slice_1": "Altcoin Sezonu Endeksi 50 üstü VE BTC.D düşüyor",
+    "slice_2": "BTC.D %55 altına haftalık kapanış",
+    "reduce": "BTC.D 60 üstü VE yükseliyor",
+    "bull_scenario": "BTC.D %50 altı ve endeks 75 üstü"
+   },
+   "snapshot": {
+    "as_of": "2026-10-17",
+    "total_mcap_usd": 2840000000000.0,
+    "btc_dominance_pct": 57.7,
+    "altseason_index": 61,
+    "fear_greed": 40,
+    "btc_price_usd": 82000,
+    "meme_sector_mcap_usd": 29500000000.0,
+    "reading": "geçiş bölgesi: iki koşuldan biri sağlanıyor → ilk dilim; tam pozisyon değil"
+   },
+   "slice_share_note": "Dilim oranı (örn. %40/%60) kullanıcının risk bütçesidir, sistem parametresi değildir (rapor §9)."
+  },
+  "position": {
+   "max_share_of_daily_spot_volume": 0.1,
+   "exit_assumption": "beş günde günde %2 ile çıkış",
+   "unverified_critical_field_not_core": true,
+   "entry_in_slices": true,
+   "must_carry_drawdown": [
+    -0.5,
+    -0.8
+   ],
+   "leverage_driven_smaller": {
+    "perp_spot_gt": 4.0,
+    "oi_mcap_gt": 0.12
+   },
+   "risk_reduce": {
+    "oi_mcap_gt": 0.2,
+    "perp_spot_gt": 6.0,
+    "effect": "boğa hedefini beklemeden risk azaltma"
+   },
+   "weights_are_not_system_output": true,
+   "correlation_note": "Çekirdek beşli fiyat olarak yüksek korelasyonlu; çeşitlendirme katalist türünden (UNI DEX-yakım, PENDLE getiri döngüsü, AAVE DeFi-beta + ETF, BNB borsa-yakım, RENDER AI-beta); eşit ağırlık sistemin önerisi değil."
+  },
+  "rescore_calendar": {
+   "weekly": "Rejim göstergeleri (BTC.D, endeks, stablecoin arzı); spot/perp hacim ve OI",
+   "monthly": "Arz defteri (kilit açılımları, emisyon), likidite kapısı",
+   "quarterly": "Gelir, değer aktarım defteri, tam puanlama ve sıralama"
+  }
+ },
+ "triggers": [
+  {
+   "id": "BTCD_55_WEEKLY",
+   "condition": "BTC.D %55 altına haftalık kapanış",
+   "affects": [
+    "ALL"
+   ],
+   "effect": "İkinci pozisyon dilimi",
+   "mechanical": true,
+   "status": "open"
+  },
+  {
+   "id": "AAVE_BUYBACK_RESUMES",
+   "condition": "AAVE geri alımının zincirde yeniden başlaması",
+   "affects": [
+    "AAVE"
+   ],
+   "effect": "B grubu +6–8; 2. sıraya çıkabilir",
+   "mechanical": false,
+   "status": "open"
+  },
+  {
+   "id": "SKY_SPOT_10M",
+   "condition": "SKY spot hacmi 10 M üstü",
+   "affects": [
+    "SKY"
+   ],
+   "effect": "Çekirdek 2. sıra",
+   "mechanical": true,
+   "status": "open"
+  },
+  {
+   "id": "BNB_EARNINGS_VERIFIED",
+   "condition": "BNB kazanç verisi doğrulanır",
+   "affects": [
+    "BNB"
+   ],
+   "effect": "Koşul kalkar",
+   "mechanical": false,
+   "status": "open"
+  },
+  {
+   "id": "INJ_EMISSION_VERIFIED",
+   "condition": "INJ emisyon verisi doğrulanır",
+   "affects": [
+    "INJ"
+   ],
+   "effect": "Koşul kalkar; emisyon ≤ %1 çıkarsa 4. sıra",
+   "mechanical": false,
+   "status": "open"
+  },
+  {
+   "id": "AAVE_INJ_ETF_DECISION",
+   "condition": "AAVE / INJ ETF kararı",
+   "affects": [
+    "AAVE",
+    "INJ"
+   ],
+   "effect": "Onay: katalist gerçekleşir; red: INJ'de likidasyon kaskadı riski (OI %16)",
+   "mechanical": false,
+   "status": "open"
+  },
+  {
+   "id": "LINK_TREASURY",
+   "condition": "LINK hazine salımı durur veya Rezerv alımları salımı aşar",
+   "affects": [
+    "LINK"
+   ],
+   "effect": "Çekirdeğe girer (puan 42 → A grubu ile ~60)",
+   "mechanical": false,
+   "status": "open"
+  },
+  {
+   "id": "HYPE_UNLOCK_SCHEDULE",
+   "condition": "HYPE kilit takvimi yayımlanır",
+   "affects": [
+    "HYPE"
+   ],
+   "effect": "G2 tahmini kesinleşir",
+   "mechanical": false,
+   "status": "open"
+  },
+  {
+   "id": "PENGU_UNLOCK_END",
+   "condition": "PENGU unlock bitişi veya ETF",
+   "affects": [
+    "PENGU"
+   ],
+   "effect": "Meme listesine yeniden bakılır",
+   "mechanical": false,
+   "status": "open"
+  },
+  {
+   "id": "LEVERAGE_BUILDUP",
+   "condition": "Bir pozisyonda OI/pd > %20 ve perp/spot > 6",
+   "affects": [
+    "ALL"
+   ],
+   "effect": "Kaldıraç birikimi; boğa hedefini beklemeden risk azaltma",
+   "mechanical": true,
+   "status": "open",
+   "thresholds": {
+    "oi_mcap_gt": 0.2,
+    "perp_spot_gt": 6.0
+   }
+  }
+ ],
+ "altcoins": [
+  {
+   "symbol": "UNI",
+   "name": "Uniswap",
+   "gecko_id": "uniswap",
+   "kind": "altcoin",
+   "perp": "UNIUSDT",
+   "perp_multiplier": 1,
+   "basket": "core",
+   "basket_note": null,
+   "condition": null,
+   "rank": 1,
+   "score": {
+    "A": 19,
+    "B": 13,
+    "C": 14,
+    "D": 5,
+    "E": 10,
+    "F": 7,
+    "G": 4,
+    "H": 4
+   },
+   "total": 76,
+   "scenario_medians": {
+    "bear": 0.54,
+    "base": 1.67,
+    "bull": 3.92
+   },
+   "p_2x": 0.4,
+   "s": 0.617,
+   "risk": {
+    "sigma": 0.9,
+    "median_multiple": 1.47,
+    "p_touch_2x": 0.71,
+    "p_touch_half": 0.54,
+    "worst_5pct": 0.14,
+    "cvar_5": 0.09,
+    "position_cap_usd": 25000000.0,
+    "note": "T = 2,5 yıl; yansıma ilkesi, Monte Carlo ile çapraz kontrol; pozisyon üst sınırı = günlük spot hacmin %10'u (rapor §10.3)"
+   },
+   "snapshot": {
+    "price_usd": 7.52,
+    "market_cap_usd": 4690000000.0,
+    "circulating": 624600000.0,
+    "total_supply": 886000000.0,
+    "max_supply": 1000000000.0,
+    "ath_usd": 44.92,
+    "ath_date": "2021-05-02",
+    "atl_usd": 1.03,
+    "atl_date": "2020-09-16",
+    "ath_multiple": 6.0,
+    "spot_volume_usd": 251000000.0,
+    "oi_mcap": 0.115,
+    "p_r": 54,
+    "fees_yoy": 0.41,
+    "burn_q3_2026_usd": 29200000.0,
+    "burn_12m_usd": 53500000.0,
+    "burn_yield": 0.018
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "Ücret anahtarı yakımı zincirde (Q3'26 29,2 M, 12 ay 53,5 M; verim %1,8), ücretler Y/Y +%41, kilit yok, türev yapısı dengeli; pahalı (P/R 54×).",
+   "pages": [
+    1,
+    13,
+    14,
+    15
+   ],
+   "mexc": {
+    "symbol": "UNI_USDT",
+    "contract_size": 0.1,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "PENDLE",
+   "name": "Pendle",
+   "gecko_id": "pendle",
+   "kind": "altcoin",
+   "perp": "PENDLEUSDT",
+   "perp_multiplier": 1,
+   "basket": "core",
+   "basket_note": null,
+   "condition": null,
+   "rank": 2,
+   "score": {
+    "A": 20,
+    "B": 16,
+    "C": 3,
+    "D": 7,
+    "E": 8,
+    "F": 6,
+    "G": 3,
+    "H": 4
+   },
+   "total": 68,
+   "scenario_medians": {
+    "bear": 0.45,
+    "base": 1.79,
+    "bull": 4.48
+   },
+   "p_2x": 0.42,
+   "s": 0.577,
+   "risk": {
+    "sigma": 1.1,
+    "median_multiple": 1.49,
+    "p_touch_2x": 0.75,
+    "p_touch_half": 0.63,
+    "worst_5pct": 0.09,
+    "cvar_5": 0.05,
+    "position_cap_usd": 1500000.0,
+    "note": "T = 2,5 yıl; yansıma ilkesi, Monte Carlo ile çapraz kontrol; pozisyon üst sınırı = günlük spot hacmin %10'u (rapor §10.3)"
+   },
+   "snapshot": {
+    "price_usd": 2.14,
+    "market_cap_usd": 372000000.0,
+    "circulating": 173900000.0,
+    "total_supply": 281500000.0,
+    "ath_usd": 7.5,
+    "ath_date": "2024-04-11",
+    "atl_usd": 0.034,
+    "atl_date": "2022-11-14",
+    "ath_multiple": 3.5,
+    "oi_mcap": 0.147,
+    "perp_spot": 4.8,
+    "staked_share": 0.58,
+    "emission": 0.002,
+    "distribution_yield": 0.025,
+    "revenue_yoy": -0.72
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "sPENDLE dağıtım verimi %2,5, emisyon %0,2, ince float (arzın %58'i stake'te); kazanç Y/Y −%72, OI %14,7 kalabalık.",
+   "pages": [
+    1,
+    13,
+    14,
+    15
+   ],
+   "mexc": {
+    "symbol": "PENDLE_USDT",
+    "contract_size": 1,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "AAVE",
+   "name": "Aave",
+   "gecko_id": "aave",
+   "kind": "altcoin",
+   "perp": "AAVEUSDT",
+   "perp_multiplier": 1,
+   "basket": "core",
+   "basket_note": null,
+   "condition": null,
+   "rank": 3,
+   "score": {
+    "A": 20,
+    "B": 7,
+    "C": 3,
+    "D": 7,
+    "E": 10,
+    "F": 6,
+    "G": 4,
+    "H": 4
+   },
+   "total": 62,
+   "scenario_medians": {
+    "bear": 0.59,
+    "base": 1.76,
+    "bull": 3.92
+   },
+   "p_2x": 0.42,
+   "s": 0.537,
+   "risk": {
+    "sigma": 0.9,
+    "median_multiple": 1.55,
+    "p_touch_2x": 0.72,
+    "p_touch_half": 0.53,
+    "worst_5pct": 0.15,
+    "cvar_5": 0.09,
+    "position_cap_usd": 11000000.0,
+    "note": "T = 2,5 yıl; yansıma ilkesi, Monte Carlo ile çapraz kontrol; pozisyon üst sınırı = günlük spot hacmin %10'u (rapor §10.3)"
+   },
+   "snapshot": {
+    "price_usd": 150.19,
+    "market_cap_usd": 2320000000.0,
+    "circulating": 15440000.0,
+    "total_supply": 16000000.0,
+    "ath_usd": 661.69,
+    "ath_date": "2021-05-18",
+    "atl_usd": 26.02,
+    "atl_date": "2020-11-05",
+    "ath_multiple": 4.4,
+    "spot_volume_usd": 111000000.0,
+    "oi_mcap": 0.116,
+    "revenue_yoy": -0.57,
+    "buyback_paused_since": "2026-04-19"
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "AAVE_BUYBACK_RESUMES",
+    "AAVE_INJ_ETF_DECISION",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "En derin spot likidite (111 M/gün), OI %11,6 dengeli, kategori lideri, iki ETF başvurusu; geri alım 19 Nisan 2026'dan beri duraklı, kazanç Y/Y −%57.",
+   "pages": [
+    1,
+    13,
+    14,
+    15
+   ],
+   "mexc": {
+    "symbol": "AAVE_USDT",
+    "contract_size": 0.01,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "BNB",
+   "name": "BNB",
+   "gecko_id": "binancecoin",
+   "kind": "altcoin",
+   "perp": "BNBUSDT",
+   "perp_multiplier": 1,
+   "basket": "core_conditional",
+   "basket_note": "koşullu",
+   "condition": "Kazanç verisi çekilmedi (C, D alt bant); doğrulanmadan çekirdek sayılmaz",
+   "rank": 4,
+   "score": {
+    "A": 20,
+    "B": 20,
+    "C": 3,
+    "D": 5,
+    "E": 6,
+    "F": 6,
+    "G": 2,
+    "H": 4
+   },
+   "total": 66,
+   "scenario_medians": {
+    "bear": 0.75,
+    "base": 1.3,
+    "bull": 2.0
+   },
+   "p_2x": 0.24,
+   "s": 0.494,
+   "risk": {
+    "sigma": 0.6,
+    "median_multiple": 1.23,
+    "p_touch_2x": 0.54,
+    "p_touch_half": 0.39,
+    "worst_5pct": 0.26,
+    "cvar_5": 0.18,
+    "position_cap_usd": 40000000.0,
+    "note": "T = 2,5 yıl; yansıma ilkesi, Monte Carlo ile çapraz kontrol; pozisyon üst sınırı = günlük spot hacmin %10'u (rapor §10.3)"
+   },
+   "snapshot": {
+    "price_usd": 748.58,
+    "market_cap_usd": 98500000000.0,
+    "circulating": 131500000.0,
+    "initial_supply": 200000000.0,
+    "ath_usd": 1370,
+    "ath_date": "2025-10-13",
+    "atl_usd": 0.04,
+    "atl_date": "2017-10-18",
+    "ath_multiple": 1.8,
+    "spot_volume_mcap": 0.004,
+    "oi_mcap": 0.011,
+    "burn_yield": 0.047
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "BNB_EARNINGS_VERIFIED",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "Sıfır dilüsyon + yıllık ~%4,7 yakım, ATH'ye 1,8× bağıl güç; kazanç verisi doğrulanmadı (koşullu), 98 Mr'ın ikiye katlanma olasılığı düşük (0,24).",
+   "pages": [
+    1,
+    13,
+    14,
+    15
+   ],
+   "mexc": {
+    "symbol": "BNB_USDT",
+    "contract_size": 0.01,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "RENDER",
+   "name": "Render",
+   "gecko_id": "render-token",
+   "kind": "altcoin",
+   "perp": "RENDERUSDT",
+   "perp_multiplier": 1,
+   "basket": "core",
+   "basket_note": null,
+   "condition": null,
+   "rank": 5,
+   "score": {
+    "A": 18,
+    "B": 5,
+    "C": 7,
+    "D": 1,
+    "E": 8,
+    "F": 6,
+    "G": 2,
+    "H": 3
+   },
+   "total": 52,
+   "scenario_medians": {
+    "bear": 0.44,
+    "base": 1.47,
+    "bull": 4.4
+   },
+   "p_2x": 0.39,
+   "s": 0.466,
+   "risk": {
+    "sigma": 1.1,
+    "median_multiple": 1.34,
+    "p_touch_2x": 0.74,
+    "p_touch_half": 0.64,
+    "worst_5pct": 0.08,
+    "cvar_5": 0.04,
+    "position_cap_usd": 1700000.0,
+    "note": "T = 2,5 yıl; yansıma ilkesi, Monte Carlo ile çapraz kontrol; pozisyon üst sınırı = günlük spot hacmin %10'u (rapor §10.3)"
+   },
+   "snapshot": {
+    "price_usd": 1.92,
+    "market_cap_usd": 997000000.0,
+    "circulating": 518800000.0,
+    "max_supply": 644000000.0,
+    "ath_usd": 13.53,
+    "ath_date": "2024-03-17",
+    "atl_usd": 0.037,
+    "atl_date": "2020-06-16",
+    "ath_multiple": 7.0,
+    "oi_mcap": 0.048,
+    "emission": 0.011,
+    "burn_yield": 0.002,
+    "p_r": 475
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "Emisyon %1,1, AI/DePIN betası, BME yakımı DefiLlama'da doğrulanabilir; yakım verimi %0,2, P/R 475×.",
+   "pages": [
+    1,
+    13,
+    14,
+    15
+   ],
+   "mexc": {
+    "symbol": "RENDER_USDT",
+    "contract_size": 1,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "INJ",
+   "name": "Injective",
+   "gecko_id": "injective-protocol",
+   "kind": "altcoin",
+   "perp": "INJUSDT",
+   "perp_multiplier": 1,
+   "basket": "core_conditional",
+   "basket_note": "koşullu; yedinci sıra",
+   "condition": "Net emisyon tahmin (~%4); doğrulanmadan çekirdek sayılmaz; ≤ %1 çıkarsa 4. sıra",
+   "rank": 7,
+   "score": {
+    "A": 11,
+    "B": 7,
+    "C": 3,
+    "D": 1,
+    "E": 8,
+    "F": 6,
+    "G": 4,
+    "H": 3
+   },
+   "total": 43,
+   "scenario_medians": {
+    "bear": 0.42,
+    "base": 1.48,
+    "bull": 4.63
+   },
+   "p_2x": 0.39,
+   "s": 0.417,
+   "risk": {
+    "sigma": 1.1,
+    "median_multiple": 1.35,
+    "p_touch_2x": 0.74,
+    "p_touch_half": 0.64,
+    "worst_5pct": 0.08,
+    "cvar_5": 0.04,
+    "position_cap_usd": 7700000.0,
+    "note": "T = 2,5 yıl; yansıma ilkesi, Monte Carlo ile çapraz kontrol; pozisyon üst sınırı = günlük spot hacmin %10'u (rapor §10.3)"
+   },
+   "snapshot": {
+    "oi_mcap": 0.16,
+    "p_r": 293,
+    "emission_estimate": 0.04
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "INJ_EMISSION_VERIFIED",
+    "AAVE_INJ_ETF_DECISION",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "A 11 (emisyon doğrulanamadı), D 1 (P/R 293×); ETF katalistleri temeli taşıyamıyor; ETF reddinde likidasyon kaskadı riski (OI %16).",
+   "pages": [
+    1,
+    14,
+    15,
+    19
+   ],
+   "mexc": {
+    "symbol": "INJ_USDT",
+    "contract_size": 1,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "SKY",
+   "name": "Sky",
+   "gecko_id": "sky",
+   "kind": "altcoin",
+   "perp": "SKYUSDT",
+   "perp_multiplier": 1,
+   "basket": "watch",
+   "basket_note": "İzleme: G1 ✗, spot hacim 7,2 M (10 M eşiği); aşarsa çekirdek 2. sıra",
+   "condition": null,
+   "rank": null,
+   "score": {
+    "A": 20,
+    "B": 15,
+    "C": 5,
+    "D": 13,
+    "E": 7,
+    "F": 5,
+    "G": 3,
+    "H": 4
+   },
+   "total": 71,
+   "scenario_medians": {
+    "bear": 0.7,
+    "base": 1.5,
+    "bull": 3.5
+   },
+   "p_2x": 0.38,
+   "s": 0.582,
+   "risk": {
+    "sigma": 0.9,
+    "median_multiple": 1.47,
+    "p_touch_2x": 0.71,
+    "p_touch_half": 0.54,
+    "worst_5pct": 0.14,
+    "cvar_5": 0.09,
+    "position_cap_usd": 700000.0,
+    "note": "T = 2,5 yıl; yansıma ilkesi, Monte Carlo ile çapraz kontrol; pozisyon üst sınırı = günlük spot hacmin %10'u (rapor §10.3)"
+   },
+   "snapshot": {
+    "spot_volume_usd": 7200000.0,
+    "p_r": 9.6,
+    "buyback_q_usd": 5600000.0,
+    "rewards_q_usd": 3100000.0
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "SKY_SPOT_10M",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "D 13 (P/R 9,6×, evrenin en ucuzu), B 15 (geri alım 5,6 M + ödül 3,1 M/çeyrek); spot hacim 7,2 M ile G1'i geçemiyor.",
+   "pages": [
+    1,
+    13,
+    14,
+    15
+   ],
+   "mexc": {
+    "symbol": "SKY_USDT",
+    "contract_size": 10,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "HYPE",
+   "name": "Hyperliquid",
+   "gecko_id": "hyperliquid",
+   "kind": "altcoin",
+   "perp": "HYPEUSDT",
+   "perp_multiplier": 1,
+   "basket": "growth_pool",
+   "basket_note": "Büyüme/seyrelme havuzu: G2 ✗, ekip kilidi ~%12/yıl (tahmin)",
+   "condition": null,
+   "rank": null,
+   "score": {
+    "A": 0,
+    "B": 13,
+    "C": 5,
+    "D": 10,
+    "E": 9,
+    "F": 6,
+    "G": 3,
+    "H": 4
+   },
+   "total": 50,
+   "scenario_medians": {
+    "bear": 0.4,
+    "base": 1.13,
+    "bull": 2.42
+   },
+   "p_2x": 0.28,
+   "s": 0.412,
+   "risk": null,
+   "snapshot": {
+    "buyback_usd_per_year": 692000000.0
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "HYPE_UNLOCK_SCHEDULE",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "A 0: ekip kilidi 24 aylık eşiği aşıyor; B güçlü (geri alım 692 M/yıl, hazineye → 0,5 katsayı).",
+   "pages": [
+    1,
+    14,
+    19
+   ],
+   "mexc": {
+    "symbol": "HYPE_USDT",
+    "contract_size": 0.1,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "LINK",
+   "name": "Chainlink",
+   "gecko_id": "chainlink",
+   "kind": "altcoin",
+   "perp": "LINKUSDT",
+   "perp_multiplier": 1,
+   "basket": "growth_pool",
+   "basket_note": "Büyüme/seyrelme havuzu: G2 ✗, hazine salımı net ~%5/yıl",
+   "condition": null,
+   "rank": null,
+   "score": {
+    "A": 0,
+    "B": 6,
+    "C": 9,
+    "D": 2,
+    "E": 9,
+    "F": 8,
+    "G": 4,
+    "H": 4
+   },
+   "total": 42,
+   "scenario_medians": {
+    "bear": 0.63,
+    "base": 1.35,
+    "bull": 2.87
+   },
+   "p_2x": 0.33,
+   "s": 0.382,
+   "risk": null,
+   "snapshot": {
+    "p_r": 160,
+    "treasury_emission": 0.057
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "LINK_TREASURY",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "A 0: hazine salımı 24 aylık eşiği aşıyor; D zayıf (P/R 160×). Salım durursa ya da Rezerv alımları salımı aşarsa çekirdeğe girer (~60).",
+   "pages": [
+    1,
+    14,
+    19
+   ],
+   "mexc": {
+    "symbol": "LINK_USDT",
+    "contract_size": 0.1,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "AVAX",
+   "name": "Avalanche",
+   "gecko_id": "avalanche-2",
+   "kind": "altcoin",
+   "perp": "AVAXUSDT",
+   "perp_multiplier": 1,
+   "basket": "growth_pool",
+   "basket_note": "Büyüme/seyrelme havuzu: G2 sınırda, stake emisyonu %5,5",
+   "condition": null,
+   "rank": null,
+   "score": {
+    "A": 7,
+    "B": 4,
+    "C": 3,
+    "D": 0,
+    "E": 9,
+    "F": 8,
+    "G": 4,
+    "H": 4
+   },
+   "total": 39,
+   "scenario_medians": {
+    "bear": 0.5,
+    "base": 1.35,
+    "bull": 3.15
+   },
+   "p_2x": 0.34,
+   "s": 0.366,
+   "risk": null,
+   "snapshot": {
+    "stake_emission": 0.055
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "Stake emisyonu %5,5 eşiği aşıyor; değer yakalama ücret yakımıyla sınırlı; ETF'li L1.",
+   "pages": [
+    1,
+    14
+   ],
+   "mexc": {
+    "symbol": "AVAX_USDT",
+    "contract_size": 0.1,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "QNT",
+   "name": "Quant",
+   "gecko_id": "quant-network",
+   "kind": "altcoin",
+   "perp": "QNTUSDT",
+   "perp_multiplier": 1,
+   "basket": "unverified",
+   "basket_note": "Doğrulanamadı: G3 gelir yok (kamuya açık değil)",
+   "condition": null,
+   "rank": null,
+   "score": {
+    "A": 20,
+    "B": 0,
+    "C": 3,
+    "D": 3,
+    "E": 10,
+    "F": 7,
+    "G": 2,
+    "H": 2
+   },
+   "total": 47,
+   "scenario_medians": {
+    "bear": 0.6,
+    "base": 1.4,
+    "bull": 2.4
+   },
+   "p_2x": 0.31,
+   "s": 0.403,
+   "risk": null,
+   "snapshot": {},
+   "triggers": [
+    "BTCD_55_WEEKLY"
+   ],
+   "rationale": "Gelir/akış kamuya açık değil; çekirdeğe giremez.",
+   "pages": [
+    14,
+    19
+   ],
+   "mexc": {
+    "symbol": "QNT_USDT",
+    "contract_size": 0.01,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "OKB",
+   "name": "OKB",
+   "gecko_id": "okb",
+   "kind": "altcoin",
+   "perp": "OKBUSDT",
+   "perp_multiplier": 1,
+   "basket": "unverified",
+   "basket_note": "Doğrulanamadı: G3 yakım verisi (kamuya açık değil)",
+   "condition": null,
+   "rank": null,
+   "score": {
+    "A": 20,
+    "B": 4,
+    "C": 3,
+    "D": 3,
+    "E": 7,
+    "F": 5,
+    "G": 2,
+    "H": 3
+   },
+   "total": 47,
+   "scenario_medians": {
+    "bear": 0.7,
+    "base": 1.3,
+    "bull": 2.2
+   },
+   "p_2x": 0.27,
+   "s": 0.39,
+   "risk": null,
+   "snapshot": {},
+   "triggers": [
+    "BTCD_55_WEEKLY"
+   ],
+   "rationale": "Yakım verisi kamuya açık değil; çekirdeğe giremez.",
+   "pages": [
+    14,
+    19
+   ],
+   "mexc": {
+    "symbol": "OKB_USDT",
+    "contract_size": 0.1,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "XMR",
+   "name": "Monero",
+   "gecko_id": "monero",
+   "kind": "altcoin",
+   "perp": "XMRUSDT",
+   "perp_multiplier": 1,
+   "basket": "failed",
+   "basket_note": "Başarısız: G3, tokene akış yok (yapısal)",
+   "condition": null,
+   "rank": null,
+   "score": {
+    "A": 13,
+    "B": 0,
+    "C": 3,
+    "D": 5,
+    "E": 9,
+    "F": 6,
+    "G": 2,
+    "H": 4
+   },
+   "total": 41,
+   "scenario_medians": {
+    "bear": 0.73,
+    "base": 1.21,
+    "bull": 1.74
+   },
+   "p_2x": 0.22,
+   "s": 0.333,
+   "risk": null,
+   "snapshot": {},
+   "triggers": [],
+   "rationale": "Gelir mekanizması yok; G3 başarısız.",
+   "pages": [
+    14
+   ],
+   "mexc": {
+    "symbol": "XMR_USDT",
+    "contract_size": 0.01,
+    "verified": "2026-10-23"
+   }
+  }
+ ],
+ "memes": [
+  {
+   "symbol": "PEPE",
+   "name": "Pepe",
+   "gecko_id": "pepe",
+   "kind": "meme",
+   "perp": "1000PEPEUSDT",
+   "perp_multiplier": 1000,
+   "basket": "core",
+   "basket_note": null,
+   "condition": null,
+   "rank": 1,
+   "score": {
+    "K1": 19,
+    "K2": 20,
+    "K3": 18,
+    "K4": 15,
+    "K5": 10,
+    "K6": 8
+   },
+   "total": 90,
+   "p_2x": 0.37,
+   "e_m": 2.09,
+   "s": 0.69,
+   "risk": null,
+   "snapshot": {
+    "price_usd": 4e-06,
+    "market_cap_usd": 1680000000.0,
+    "supply": 420690000000000.0,
+    "circulating_share": 1.0,
+    "locked": false,
+    "ath_usd": 2.8e-05,
+    "ath_date": "2024-12-09",
+    "atl_usd": 5.5e-08,
+    "atl_date": "2023-04-17",
+    "ath_multiple": 7.0,
+    "spot_volume_usd": 105500000.0,
+    "spot_volume_mcap": 0.063,
+    "oi_mcap": 0.094,
+    "perp_spot": 2.7,
+    "age_years": 3.5
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "Spot hacim 105 M/gün (%6,3), dağılım en temiz, OI %9 sağlıklı, 3,5 yıl Lindy; mekanizma yok, tamamen dikkat.",
+   "pages": [
+    1,
+    16,
+    17
+   ],
+   "mexc": {
+    "symbol": "PEPE_USDT",
+    "contract_size": 10000000,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "BONK",
+   "name": "Bonk",
+   "gecko_id": "bonk",
+   "kind": "meme",
+   "perp": "1000BONKUSDT",
+   "perp_multiplier": 1000,
+   "basket": "core",
+   "basket_note": null,
+   "condition": null,
+   "rank": 2,
+   "score": {
+    "K1": 17,
+    "K2": 18,
+    "K3": 10,
+    "K4": 15,
+    "K5": 14,
+    "K6": 9
+   },
+   "total": 82,
+   "p_2x": 0.36,
+   "e_m": 2.03,
+   "s": 0.64,
+   "risk": null,
+   "snapshot": {
+    "price_usd": 3e-06,
+    "market_cap_usd": 267000000.0,
+    "supply": 88000000000000.0,
+    "circulating_share": 1.0,
+    "ath_usd": 5.8e-05,
+    "ath_date": "2024-11-19",
+    "atl_usd": 8.6e-08,
+    "atl_date": "2022-12-29",
+    "ath_multiple": 19.3,
+    "ath_multiple_mcap": 16.4,
+    "spot_volume_usd": 11700000.0,
+    "spot_volume_mcap": 0.044,
+    "oi_mcap": 0.015,
+    "perp_spot": 0.5,
+    "smoothed_yield": 0.062,
+    "revenue_sep_usd": 4800000.0
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "Tek nakit akışlı meme: LetsBonk ücretleri → yakım/geri alım, düzleştirilmiş verim %6,2; OI %1,5 ile kaldıraç yükü sıfır; dikkat zayıf, gelir tek aya yığılı (Eylül 4,8 M).",
+   "pages": [
+    1,
+    16,
+    17
+   ],
+   "mexc": {
+    "symbol": "1000BONK_USDT",
+    "contract_size": 10000,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "DOGE",
+   "name": "Dogecoin",
+   "gecko_id": "dogecoin",
+   "kind": "meme",
+   "perp": "DOGEUSDT",
+   "perp_multiplier": 1,
+   "basket": "core",
+   "basket_note": null,
+   "condition": null,
+   "rank": 3,
+   "score": {
+    "K1": 13,
+    "K2": 16,
+    "K3": 12,
+    "K4": 14,
+    "K5": 15,
+    "K6": 10
+   },
+   "total": 81,
+   "p_2x": 0.33,
+   "e_m": 1.58,
+   "s": 0.62,
+   "risk": null,
+   "snapshot": {
+    "price_usd": 0.08,
+    "market_cap_usd": 12580000000.0,
+    "supply": 156300000000.0,
+    "miner_inflation": 0.034,
+    "ath_usd": 0.73,
+    "ath_date": "2021-05-07",
+    "atl_usd": 8.7e-05,
+    "atl_date": "2015-05-05",
+    "ath_multiple": 9.1,
+    "ath_mcap_usd": 95000000000.0,
+    "spot_volume_usd": 318700000.0,
+    "spot_volume_mcap": 0.025,
+    "oi_mcap": 0.076,
+    "perp_spot": 3.2
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "ETF (REX-Osprey, Grayscale) ve aracı kurum erişimi, derinlik rakipsiz, ölüm olasılığı en düşük; madenci satışı, 95 Mr ATH piyasa değeri sektörün 3 katı.",
+   "pages": [
+    1,
+    16,
+    17
+   ],
+   "mexc": {
+    "symbol": "DOGE_USDT",
+    "contract_size": 100,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "WIF",
+   "name": "dogwifhat",
+   "gecko_id": "dogwifcoin",
+   "kind": "meme",
+   "perp": "WIFUSDT",
+   "perp_multiplier": 1,
+   "basket": "core",
+   "basket_note": null,
+   "condition": null,
+   "rank": 4,
+   "score": {
+    "K1": 19,
+    "K2": 20,
+    "K3": 14,
+    "K4": 9,
+    "K5": 8,
+    "K6": 7
+   },
+   "total": 76,
+   "p_2x": 0.33,
+   "e_m": 1.88,
+   "s": 0.59,
+   "risk": null,
+   "snapshot": {
+    "price_usd": 0.2,
+    "market_cap_usd": 205000000.0,
+    "supply": 998900000.0,
+    "circulating_share": 1.0,
+    "fixed_supply": true,
+    "ath_usd": 4.83,
+    "ath_date": "2024-03-31",
+    "atl_usd": 0.0016,
+    "atl_date": "2023-12-12",
+    "ath_multiple": 24,
+    "spot_volume_usd": 13100000.0,
+    "spot_volume_mcap": 0.064,
+    "oi_mcap": 0.266,
+    "perp_spot": 4.8,
+    "age_months": 35
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "Temiz dağılım, spot 13 M (%6,4), 35 ay yaş; OI %27 ve perp/spot 4,8 ile kırılgan, ATH referansı uzak.",
+   "pages": [
+    1,
+    16,
+    17
+   ],
+   "mexc": {
+    "symbol": "WIF_USDT",
+    "contract_size": 10,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "MOODENG",
+   "name": "Moo Deng",
+   "gecko_id": "moo-deng",
+   "kind": "meme",
+   "perp": "MOODENGUSDT",
+   "perp_multiplier": 1,
+   "basket": "core",
+   "basket_note": "yaş sınırda (25 ay)",
+   "condition": null,
+   "rank": 5,
+   "score": {
+    "K1": 20,
+    "K2": 18,
+    "K3": 18,
+    "K4": 10,
+    "K5": 4,
+    "K6": 6
+   },
+   "total": 77,
+   "p_2x": 0.27,
+   "e_m": 1.56,
+   "s": 0.57,
+   "risk": null,
+   "snapshot": {
+    "price_usd": 0.04,
+    "market_cap_usd": 40000000.0,
+    "supply": 989900000.0,
+    "max_supply": 1000000000.0,
+    "ath_usd": 0.68,
+    "ath_date": "2024-11-15",
+    "atl_usd": 0.015,
+    "atl_date": "2024-09-20",
+    "ath_multiple": 17,
+    "spot_volume_usd": 15100000.0,
+    "spot_volume_mcap": 0.377,
+    "oi_mcap": 0.225,
+    "perp_spot": 3.5,
+    "age_months": 25,
+    "p_fade_or_zero": 0.3
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "Dikkat metriği en yüksek (spot %38/gün); 40 M piyasa değeri, OI %22, 25 aylık yaş sınırda, zayıflama + sıfırlanma olasılığı 0,30.",
+   "pages": [
+    1,
+    16,
+    17
+   ],
+   "mexc": {
+    "symbol": "MOODENG_USDT",
+    "contract_size": 10,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "MUBARAK",
+   "name": "Mubarak",
+   "gecko_id": "mubarak",
+   "kind": "meme",
+   "perp": "MUBARAKUSDT",
+   "perp_multiplier": 1,
+   "basket": "speculative_pool",
+   "basket_note": "Spekülatif havuz: M1 (19 ay, bir döngü yaşamadı); hareket neredeyse tamamen kaldıraç (OI/pd %63)",
+   "condition": null,
+   "rank": 6,
+   "score": {
+    "K1": 20,
+    "K2": 16,
+    "K3": 16,
+    "K4": 8,
+    "K5": 6,
+    "K6": 6
+   },
+   "total": 72,
+   "p_2x": 0.27,
+   "e_m": 1.39,
+   "s": 0.54,
+   "risk": null,
+   "snapshot": {
+    "spot_volume_usd": 10000000.0,
+    "spot_volume_mcap": 0.185,
+    "oi_mcap": 0.632,
+    "perp_spot": 2.6,
+    "age_months": 19
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY",
+    "LEVERAGE_BUILDUP"
+   ],
+   "rationale": "Çekirdek sepete girmez; spekülatif havuzda ayrı listelenir.",
+   "pages": [
+    1,
+    17,
+    18
+   ],
+   "mexc": {
+    "symbol": "MUBARAK_USDT",
+    "contract_size": 100,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "FLOKI",
+   "name": "FLOKI",
+   "gecko_id": "floki",
+   "kind": "meme",
+   "perp": "1000FLOKIUSDT",
+   "perp_multiplier": 1000,
+   "basket": "liquidity_borderline",
+   "basket_note": "M3 sınırda: spot 9,4 M (eşik 10 M)",
+   "condition": null,
+   "rank": 7,
+   "score": {
+    "K1": 6,
+    "K2": 18,
+    "K3": 10,
+    "K4": 15,
+    "K5": 9,
+    "K6": 7
+   },
+   "total": 65,
+   "p_2x": 0.33,
+   "e_m": 1.73,
+   "s": null,
+   "risk": null,
+   "snapshot": {
+    "spot_volume_usd": 9400000.0,
+    "spot_volume_mcap": 0.041,
+    "oi_mcap": 0.027,
+    "perp_spot": 1.9
+   },
+   "triggers": [
+    "BTCD_55_WEEKLY"
+   ],
+   "rationale": "Likidite kapısında sınırda; izleme.",
+   "pages": [
+    1,
+    17
+   ],
+   "mexc": {
+    "symbol": "FLOKI_USDT",
+    "contract_size": 100000,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "FARTCOIN",
+   "name": "Fartcoin",
+   "gecko_id": "fartcoin",
+   "kind": "meme",
+   "perp": "FARTCOINUSDT",
+   "perp_multiplier": 1,
+   "basket": "liquidity_failed",
+   "basket_note": "M3 ✗: spot 5,8 M",
+   "condition": null,
+   "rank": 8,
+   "score": {
+    "K1": 6,
+    "K2": 18,
+    "K3": 16,
+    "K4": 3,
+    "K5": 6,
+    "K6": 6
+   },
+   "total": 55,
+   "p_2x": 0.3,
+   "e_m": 1.69,
+   "s": null,
+   "risk": null,
+   "snapshot": {
+    "spot_volume_usd": 5800000.0,
+    "spot_volume_mcap": 0.038,
+    "oi_mcap": 0.641,
+    "perp_spot": 12.3
+   },
+   "triggers": [],
+   "rationale": "Likidite kapısını geçemiyor.",
+   "pages": [
+    1,
+    17
+   ],
+   "mexc": {
+    "symbol": "FARTCOIN_USDT",
+    "contract_size": 10,
+    "verified": "2026-10-23"
+   }
+  },
+  {
+   "symbol": "SHIB",
+   "name": "Shiba Inu",
+   "gecko_id": "shiba-inu",
+   "kind": "meme",
+   "perp": "1000SHIBUSDT",
+   "perp_multiplier": 1000,
+   "basket": "unverified",
+   "basket_note": "M3 doğrulanamadı: toplam hacim 63,8 M (%2,5), spot/perp ayrımı yok",
+   "condition": null,
+   "rank": 9,
+   "score": {
+    "K1": 4,
+    "K2": 16,
+    "K3": 6,
+    "K4": 3,
+    "K5": 9,
+    "K6": 5
+   },
+   "total": 43,
+   "p_2x": 0.32,
+   "e_m": 1.48,
+   "s": null,
+   "risk": null,
+   "snapshot": {
+    "total_volume_usd": 63800000.0,
+    "volume_mcap": 0.025
+   },
+   "triggers": [],
+   "rationale": "Spot/perp ayrımı olmadan likidite kapısı değerlendirilemedi.",
+   "pages": [
+    1,
+    17,
+    19
+   ],
+   "mexc": {
+    "symbol": "SHIB_USDT",
+    "contract_size": 1000,
+    "verified": "2026-10-23"
+   }
+  }
+ ],
+ "not_scored": [
+  {
+   "symbol": "HBAR",
+   "verdict": "izleme adayı",
+   "reason": "Konsey hazinesinden takvimsiz salım (G2 belirsiz); ücret yakımı yok, gelir hazineye (G3 zayıf); spot ETF var",
+   "pages": [
+    16
+   ]
+  },
+  {
+   "symbol": "LDO",
+   "verdict": "eleme adayı",
+   "reason": "Protokol geliri büyük ama LDO'ya akış sıfır: ücret anahtarı hiç açılmadı (G3 ✗)",
+   "pages": [
+    16
+   ]
+  },
+  {
+   "symbol": "ONDO",
+   "verdict": "eleme adayı",
+   "reason": "Aylık ekip/yatırımcı kilit açılımları float'ın %5'ini aşıyor (G2 ✗); token yönetişim dışında işlevsiz",
+   "pages": [
+    16
+   ]
+  },
+  {
+   "symbol": "ORDI",
+   "verdict": "meme evreninde değerlendirildi",
+   "reason": "Likiditeyi geçti; 25× ATH mesafesi, BRC-20 anlatısı dağıldı; dikkat zayıf",
+   "pages": [
+    16
+   ]
+  },
+  {
+   "symbol": "FET",
+   "verdict": "önceki sürüm kararı korunan",
+   "reason": "Model 2 izleme (B) grubu; bu raporda yeniden puanlanmadı",
+   "pages": [
+    4,
+    12
+   ]
+  },
+  {
+   "symbol": "RUNE",
+   "verdict": "önceki sürüm kararı korunan",
+   "reason": "Model 2 izleme (B) grubu; bu raporda yeniden puanlanmadı",
+   "pages": [
+    4,
+    12
+   ]
+  },
+  {
+   "symbol": "AR",
+   "verdict": "önceki sürüm kararı korunan",
+   "reason": "Model 2 izleme (B) grubu; bu raporda yeniden puanlanmadı",
+   "pages": [
+    4,
+    12
+   ]
+  }
+ ],
+ "meme_excluded": [
+  {
+   "symbol": "PENGU",
+   "market_cap_usd": 491000000.0,
+   "gate": "M2",
+   "reason": "Ekip + şirket kilitleri haftalık lineer, yıllık ~8,65 Mr token (float'ın ~%14'ü); OI/pd %21, perp/spot 4,2. Unlock bitince yeniden bakılır",
+   "pages": [
+    17
+   ]
+  },
+  {
+   "symbol": "TRUMP",
+   "market_cap_usd": 499000000.0,
+   "gate": "M2",
+   "reason": "Dolaşım %28, arzın %80'i içeriden ve kilitli; politik tek-kişi riski",
+   "pages": [
+    18
+   ]
+  },
+  {
+   "symbol": "PUMP",
+   "market_cap_usd": 2200000000.0,
+   "gate": "M2/M1",
+   "reason": "Dolaşım %56; 2025 lansmanı. Meme değil launchpad gelir tokeni; ana modelde değerlendirilebilir",
+   "pages": [
+    18
+   ]
+  },
+  {
+   "symbol": "MEMECORE",
+   "market_cap_usd": 1900000000.0,
+   "gate": "M2/M1",
+   "reason": "Dolaşım %42; 2025 lansmanı",
+   "pages": [
+    18
+   ]
+  },
+  {
+   "symbol": "SPX6900",
+   "market_cap_usd": 340000000.0,
+   "gate": "M3",
+   "reason": "Günlük hacim 4,5 M (%1,3); kült topluluk, likidite yetersiz",
+   "pages": [
+    18
+   ]
+  },
+  {
+   "symbols": [
+    "POPCAT",
+    "BOME",
+    "BRETT",
+    "PNUT",
+    "MEW",
+    "MOG",
+    "ZEREBRO",
+    "PEOPLE",
+    "ORDI"
+   ],
+   "gate": "dikkat kaybı",
+   "reason": "ATH referansı 23–57×; 24–36 aylık teze uymuyor",
+   "pages": [
+    18
+   ]
+  },
+  {
+   "class": "2025–26 lansmanları",
+   "examples": [
+    "USELESS",
+    "COCO",
+    "Artificial Inu",
+    "MARSCOIN",
+    "KIMCHI",
+    "UHI",
+    "ASTRO"
+   ],
+   "gate": "M1",
+   "reason": "Bir döngü yaşamamış; çoğu M3'te de düşüyor",
+   "pages": [
+    18
+   ]
+  }
+ ],
+ "universe_note": "Altcoin evreni 18 token (Model 1 + Model 2 + kontrol/genişletme); meme evreni CoinGecko meme kategorisinin ilk 100'ü (22 Ekim 2026). Tam piyasa taraması yapılmadı; hayatta kalma yanlılığı var (rapor §3).",
+ "venues": {
+  "binance": "USDT-M perpetual (data.binance.vision geçmişi; sembol 'perp', çarpan 'perp_multiplier')",
+  "mexc": "USDT perpetual (contract.mexc.com; sembol ve kontrat büyüklüğü 'mexc')"
+ }
+}

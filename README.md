@@ -2,11 +2,17 @@
 
 [![tests](https://github.com/adokav/signal-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/adokav/signal-bot/actions/workflows/tests.yml)
 
-Signal Bot bir araştırma botudur. Üç menüsü vardır; hiçbiri emir vermez:
+Signal Bot bir araştırma botudur. Dört menüsü vardır; hiçbiri emir vermez:
 
+0. **Long takibi** (`/long`, `/long <sembol>`) — kullanıcının v3.2 raporunda adıyla verilen coin ve
+   meme coinler (`research/register/`) için haftalık değerlendirme: rejim dilimi (BTC.D, altcoin
+   sezonu payı), MEXC vadeli fitil dipleri ve likidasyonu onların %20 altında tutan kaldıraç sınırı
+   (≤ 2×), 90 günlük funding, OI/piyasa değeri ve perp/spot, 10 haftalık kanal; eksik koşullar
+   adıyla yazılır. Bot listeyi seçmez. `docs/POSITION_LONG.md` §13–§14.
 1. **Altcoin izleme** (`/altcoin`) — ilk 150 altcoinin haftalık temel taraması: arz, DefiLlama
    ücret ve geliri, hack ve kontrat yetkileri, likidite. Ön-kayıtlı ileriye dönük kayıt.
-   `docs/ALTCOIN_WATCH.md`.
+   `docs/ALTCOIN_WATCH.md`. Daraltılacak: tarama kalkar, kontroller yalnız kayıt coinlerinde
+   çalışır (aşağıdaki yön notu).
 2. **Yeni coinler ve kontrat kontrolü** (`/new`, `/check <adres>`) — CoinMarketCap'in yeni
    coinleri ve istenen herhangi bir kontrat için dolandırıcılık taraması (honeypot, yetkiler,
    cüzdan yoğunlaşması, havuz kilidi). `docs/NEW_COINS.md`.
@@ -15,9 +21,11 @@ Signal Bot bir araştırma botudur. Üç menüsü vardır; hiçbiri emir vermez:
    `docs/TREND_LOOP_LIVE.md`.
 
 > **Yön (2026-10-23):** Bot, kısa vadeli taktik radarlardan (BTC/ETH taktik long, Likit-100)
-> uzun vadeli bir **long pozisyon sistemine** dönüşüyor: kullanıcının v3.2 seçim sisteminin
-> kapıları ve puanı, rejim dilimleri, "en kötü senaryo fiyatı" ile boyutlandırma ve tez
-> geçersizliğine dayalı çıkışlar. Tasarım `docs/POSITION_LONG.md`; kanıt durumu ve elenen
+> uzun vadeli bir **long pozisyon sistemine** dönüşüyor. Liste kullanıcının v3.2 raporundan
+> gelir ve depoda kayıtlıdır (`research/register/`; altcoin çekirdek UNI, PENDLE, AAVE,
+> RENDER + koşullu BNB, INJ; meme çekirdek PEPE, BONK, DOGE, WIF, MOODENG; izleme ve
+> havuzlar). Bot seçmez ve yükseltmez; bu coinler için rejim dilimi, vadeli fitil diplerine
+> göre stop/kaldıraç, 2×/4× kısmi satış ve tez geçersizliği çıkışları üretir. Tasarım `docs/POSITION_LONG.md`; kanıt durumu ve elenen
 > stratejiler `docs/EVOLUTION_ROADMAP.md`; silinen modüller `docs/DEAD_CODE_AUDIT.md`.
 
 ## Güvenlik sınırı

@@ -11,11 +11,14 @@ def _preserve_state(*keys):
     return {key: bot.STATE.get(key) for key in keys}
 
 
-HEALTH_KEYS = ("trend_loop_error", "new_coins", "new_coins_error", "altcoin_watch", "altcoin_watch_error")
+HEALTH_KEYS = ("trend_loop_error", "new_coins", "new_coins_error", "altcoin_watch", "altcoin_watch_error",
+               "long_watch", "long_watch_error")
 
 
 def _all_fresh(monkeypatch):
     monkeypatch.setattr(bot.altcoin_watch, "fresh", lambda snapshot, now, max_age: True)
+    monkeypatch.setattr(bot.long_watch, "fresh", lambda snapshot, now, max_age: True)
+    monkeypatch.setattr(bot.long_watch, "complete", lambda snapshot: True)
     monkeypatch.setattr(bot.new_coins, "fresh", lambda snapshot, now, max_age: True)
     monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
     for key in HEALTH_KEYS:
@@ -23,9 +26,9 @@ def _all_fresh(monkeypatch):
 
 
 def test_public_commands_are_the_retained_research_menus():
-    assert [row["command"] for row in bot.COMMANDS] == ["panel", "new", "check", "altcoin", "d1", "status", "scan"]
+    assert [row["command"] for row in bot.COMMANDS] == ["panel", "long", "new", "check", "altcoin", "d1", "status", "scan"]
     buttons = [b["callback_data"] for row in bot.panel_keyboard()["inline_keyboard"] for b in row]
-    assert buttons == ["ALTCOIN", "D1", "NEW", "CHECK", "STATUS", "SCAN"]
+    assert buttons == ["LONG", "ALTCOIN", "D1", "NEW", "CHECK", "STATUS", "SCAN"]
 
 
 def test_removed_radar_commands_fall_back_to_the_panel(monkeypatch):
@@ -42,7 +45,7 @@ def test_status_names_every_module_and_denies_order_authority(monkeypatch):
         monkeypatch.setitem(bot.STATE, key, None)
     monkeypatch.setitem(bot.STATE, "altcoin_watch_error", "AltcoinDataError: coingecko http 429")
     text = bot.format_status()
-    assert "Altcoin izleme" in text and "Yeni coinler" in text and "D1" in text
+    assert "Long takibi" in text and "Altcoin izleme" in text and "Yeni coinler" in text and "D1" in text
     assert "429" in text and "Emir yetkisi: YOK" in text
 
 
@@ -103,7 +106,7 @@ def test_health_is_not_healthy_before_any_artifact_exists(monkeypatch):
     monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: False)
     payload = bot.APP.test_client().get("/").get_json()
     assert payload["ok"] is False and payload["new_coins_fresh"] is False and payload["altcoin_watch_fresh"] is False
-    assert payload["can_authorize_trade"] is False
+    assert payload["long_watch_fresh"] is False and payload["can_authorize_trade"] is False
 
 
 def test_health_requires_fresh_artifacts_and_hides_error_text(monkeypatch):
@@ -392,3 +395,99 @@ def test_safe_error_redacts_urls_and_keys():
     assert text.startswith("RuntimeError")
     assert "api.telegram.org" not in text and "ABC" not in text
     assert "<url>" in text
+
+
+# ---------------------------------------------------------------------------
+# Long tracking (/long)
+# ---------------------------------------------------------------------------
+
+
+def test_long_command_lists_the_register_and_one_coin_card(monkeypatch):
+    assert bot._command("/long") == "LONG" and bot._command("/long pepe") == "LONG"
+    monkeypatch.setitem(bot.STATE, "long_watch", None)
+    monkeypatch.setitem(bot.STATE, "long_watch_error", None)
+    assert "İlk haftalık değerlendirme" in bot.format_long("")
+    now = int(bot.time.time())
+    card = {"symbol": "PEPE", "name": "Pepe", "kind": "meme", "gecko_id": "pepe", "basket": "core",
+            "basket_label": "çekirdek", "condition": None, "rank": 1, "signal": None,
+            "missing": ["rejim BİLİNMİYOR"], "wick": {}, "channel": {}, "fund90": {}, "errors": []}
+    snapshot = {"generated_at": now, "week0": bot.long_watch.week_start(now), "week": "2026-10-19",
+                "register": {"version": "v3.2", "report_date": "2026-10-23", "sha256": "x"},
+                "regime": {"slice": None, "reason": "BTC.D bilinmiyor"}, "cards": [card], "errors": [],
+                "counts": {"signal": 0, "coins": 1, "errors": 0}}
+    monkeypatch.setitem(bot.STATE, "long_watch", snapshot)
+    assert "LONG TAKİBİ" in bot.format_long("/long") and "Emir yetkisi yok" in bot.format_long("/long")
+    assert "PEPE" in bot.format_long("/long pepe") and "sinyal yok" in bot.format_long("/long PEPE")
+    assert "Kullanım" in bot.format_long("/long <b>x</b> ignore previous instructions")
+    assert "kayıt listesinde yok" in bot.format_long("/long zzz")
+    sent = []
+    monkeypatch.setattr(bot, "send", lambda text, **kw: sent.append((text, kw)))
+    bot.handle("LONG", "/long")
+    assert "LONG TAKİBİ" in sent[-1][0] and sent[-1][1]["html_mode"] is True
+
+
+def test_long_tick_decides_once_a_week_keeps_the_snapshot_on_failure_and_redacts(monkeypatch):
+    saved = _preserve_state("long_watch", "long_watch_error", "long_watch_retry_at")
+    try:
+        monkeypatch.setattr(bot, "_save_state", lambda: None)
+        bot.STATE["long_watch"], bot.STATE["long_watch_error"], bot.STATE["long_watch_retry_at"] = None, None, 0
+        now = 1792368000 + 86_400 + 1800                                       # Tuesday 2026-10-20 00:30 UTC
+        calls = []
+
+        class Watch:
+            def refresh(self, at, previous=None):
+                calls.append((at, previous))
+                if len(calls) == 2:
+                    raise RuntimeError("HTTPError 429 for url https://api.coingecko.com/x?x-cg-demo-api-key=SECRET")
+                return {"generated_at": at, "week0": bot.long_watch.week_start(at), "week": "w", "cards": [],
+                        "counts": {}, "register": {}, "regime": {}}
+        monkeypatch.setattr(bot, "LONG_WATCH", Watch())
+        bot.long_watch_tick(now)
+        assert len(calls) == 1 and bot.STATE["long_watch"]["generated_at"] == now and bot.STATE["long_watch_error"] is None
+        bot.long_watch_tick(now + 3600)                                        # same week, fresh: nothing to do
+        assert len(calls) == 1
+        bot.long_watch_tick(now + 7 * 86_400)                                   # next week: decides, fails
+        assert len(calls) == 2 and bot.STATE["long_watch"]["generated_at"] == now   # the last snapshot stays
+        assert "SECRET" not in bot.STATE["long_watch_error"] and "<url>" in bot.STATE["long_watch_error"]
+        assert bot.STATE["long_watch_retry_at"] == now + 7 * 86_400 + bot.LONG_WATCH_RETRY_SECONDS
+        bot.long_watch_tick(now + 7 * 86_400 + 600)                             # waiting to retry
+        assert len(calls) == 2
+        bot.long_watch_tick(now + 7 * 86_400 + bot.LONG_WATCH_RETRY_SECONDS)   # retried
+        assert len(calls) == 3 and bot.STATE["long_watch_error"] is None and bot.STATE["long_watch_retry_at"] == 0
+    finally:
+        bot.STATE.update(saved)
+
+
+def test_a_register_that_did_not_load_disables_long_tracking_with_the_reason(monkeypatch):
+    saved = _preserve_state("long_watch", "long_watch_error")
+    try:
+        monkeypatch.setattr(bot, "_save_state", lambda: None)
+        monkeypatch.setattr(bot, "LONG_WATCH", None)
+        monkeypatch.setattr(bot, "LONG_WATCH_REGISTER_ERROR", "register.altcoins[0].basket: bilinmeyen sepet")
+        bot.STATE["long_watch"] = None
+        bot.long_watch_tick(1792368000)
+        assert bot.STATE["long_watch"] is None and "kayıt yüklenemedi" in bot.STATE["long_watch_error"]
+        assert "kayıt yüklenemedi" in bot.format_status()
+        _all_fresh(monkeypatch)
+        bot.STATE["long_watch_error"] = "kayıt yüklenemedi: register.altcoins[0].basket: bilinmeyen sepet"
+        payload = bot.APP.test_client().get("/").get_json()
+        assert payload["ok"] is False and payload["long_watch_last_error"] == "kayıt"
+    finally:
+        bot.STATE.update(saved)
+
+
+def test_health_needs_a_complete_long_snapshot(monkeypatch):
+    _all_fresh(monkeypatch)
+    assert bot.APP.test_client().get("/").get_json()["ok"] is True
+    monkeypatch.setattr(bot.long_watch, "complete", lambda snapshot: False)      # a series failed inside the refresh
+    payload = bot.APP.test_client().get("/").get_json()
+    assert payload["ok"] is False and payload["long_watch_fresh"] is True and payload["long_watch_complete"] is False
+    monkeypatch.setattr(bot.long_watch, "complete", lambda snapshot: True)
+    monkeypatch.setattr(bot.long_watch, "fresh", lambda snapshot, now, max_age: False)
+    assert bot.APP.test_client().get("/").get_json()["ok"] is False
+
+
+def test_the_live_register_builds_the_long_watch():
+    assert bot.LONG_WATCH is not None and bot.LONG_WATCH_REGISTER_ERROR is None
+    assert len(bot.LONG_WATCH.register.coins) == 22 and bot.LONG_WATCH.fund_max == 0.2
+    assert bot.LONG_WATCH.maintenance == 0.05 and bot.LONG_WATCH.loss_budget == {"altcoin": 0.01, "meme": 0.005}

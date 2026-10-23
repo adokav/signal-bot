@@ -1,9 +1,10 @@
 """Signal Bot v5 Core: research menus without order authority.
 
-Three modules run: the altcoin watch (/altcoin), the CoinMarketCap new-coin
-security screen with /check, and the D1 trend loop shadow record (/d1). The
-long position system that replaces the removed short-term radars is designed
-in docs/POSITION_LONG.md and arrives in later PRs.
+Four modules run: the long tracking of the v3.2 report's coins (/long), the
+altcoin watch (/altcoin), the CoinMarketCap new-coin security screen with
+/check, and the D1 trend loop shadow record (/d1). The long position system is
+designed in docs/POSITION_LONG.md; the list it tracks is the user's report,
+read from research/register (the bot never selects a coin).
 """
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ from typing import Any
 import requests
 from flask import Flask, jsonify
 
-from acce_unified import altcoin_watch, new_coins
+from acce_unified import altcoin_watch, long_watch, new_coins
+from acce_unified import register as v32_register
 from acce_unified.text import esc
 from acce_unified.trend_loop import Ledger as TrendLedger, MexcSpot, TrendLoop
 
@@ -60,6 +62,21 @@ ALTCOIN_WATCH_MAX_AGE_SECONDS = 2 * ALTCOIN_WATCH_REFRESH_SECONDS + 86_400
 ALTCOIN_WATCH_TICK_SECONDS = 30 * 60
 COINGECKO_DEMO_API_KEY = os.getenv("COINGECKO_DEMO_API_KEY", "").strip()
 COINGECKO_PRO_API_KEY = os.getenv("COINGECKO_PRO_API_KEY", "").strip()
+# Long tracking of the v3.2 report's coins (docs/POSITION_LONG.md §13–§14). User decision (2026-10-23): the
+# list is the report's, kept in research/register; the bot never selects or promotes a coin. One decision a
+# week after the Sunday close on MEXC perpetual data: wick reference, leverage cap, funding, OI, channel,
+# regime slice. Research only, no orders. The budget parameters are the user's, not the system's.
+LONG_WATCH_ENABLED = os.getenv("LONG_WATCH_ENABLED", "1") == "1"
+LONG_WATCH_REGISTER = Path(os.getenv("LONG_WATCH_REGISTER", str(v32_register.DEFAULT_PATH)))
+LONG_WATCH_MAX_AGE_SECONDS = 8 * 86_400          # one weekly decision plus a day of slack
+LONG_WATCH_TICK_SECONDS = 30 * 60
+LONG_WATCH_RETRY_SECONDS = 2 * 3600
+LONG_WATCH_MAINTENANCE_MARGIN = min(0.5, max(0.0, float(os.getenv("POSITION_MAINTENANCE_MARGIN", "0.05"))))
+LONG_WATCH_FUND_MAX = max(0.0, float(os.getenv("POSITION_FUNDING_MAX", "0.20")))
+LONG_WATCH_LOSS_BUDGET = {
+    v32_register.ALTCOIN: min(0.1, max(0.0, float(os.getenv("POSITION_LOSS_BUDGET_ALTCOIN", "0.01")))),
+    v32_register.MEME: min(0.1, max(0.0, float(os.getenv("POSITION_LOSS_BUDGET_MEME", "0.005")))),
+}
 
 # Historical base rate shown under the new-coin menu (docs/LISTING_REPLAY_REPORT.md, run #1, closed study).
 NEW_COINS_BASE_RATE = (
@@ -85,6 +102,25 @@ ALTCOIN_WATCH = altcoin_watch.AltcoinWatch(
     new_coins.SecurityProviders(timeout=REQUEST_TIMEOUT_SECONDS),
     TrendLedger(Path(os.getenv("ALTCOIN_WATCH_LEDGER_FILE", str(STATE_FILE.parent / "altcoin_watch_ledger.jsonl")))),
 )
+
+
+def _build_long_watch() -> tuple[long_watch.LongWatch | None, str | None]:
+    """The register must load whole; a broken register disables the module with the reason (fail closed)."""
+
+    try:
+        registry = v32_register.load(LONG_WATCH_REGISTER)
+    except v32_register.RegisterError as exc:
+        return None, str(exc)[:160]
+    watch = long_watch.LongWatch(
+        registry, long_watch.MexcContract(timeout=REQUEST_TIMEOUT_SECONDS),
+        long_watch.Gecko(demo_key=COINGECKO_DEMO_API_KEY, pro_key=COINGECKO_PRO_API_KEY),
+        TrendLedger(Path(os.getenv("LONG_WATCH_LEDGER_FILE", str(STATE_FILE.parent / "long_watch_ledger.jsonl")))),
+        maintenance=LONG_WATCH_MAINTENANCE_MARGIN, fund_max=LONG_WATCH_FUND_MAX, loss_budget=LONG_WATCH_LOSS_BUDGET,
+    )
+    return watch, None
+
+
+LONG_WATCH, LONG_WATCH_REGISTER_ERROR = _build_long_watch()
 # /check runs in the Telegram thread: its own HTTP session; the scanner's lookalike reference is only read.
 CHECKER = new_coins.AddressChecker(new_coins.SecurityProviders(timeout=REQUEST_TIMEOUT_SECONDS),
                                    reference=NEW_COINS.current_reference)
@@ -102,10 +138,14 @@ STATE: dict[str, Any] = {
     "altcoin_watch_failures": 0,
     "altcoin_watch_retry_at": 0,
     "altcoin_watch_failed_keyed": None,
+    "long_watch": None,
+    "long_watch_error": None,
+    "long_watch_retry_at": 0,
 }
 
 COMMANDS = [
     {"command": "panel", "description": "Sade kontrol paneli"},
+    {"command": "long", "description": "Long takibi: v3.2 listesi, rejim dilimi, fitil referansı, kaldıraç sınırı"},
     {"command": "new", "description": "CoinMarketCap yeni coinler: dolandırıcılık taraması"},
     {"command": "check", "description": "Kontrat adresiyle anında dolandırıcılık taraması: /check <adres>"},
     {"command": "altcoin", "description": "Altcoin izleme: arz, gelir, değerleme (uzun vade, araştırma)"},
@@ -222,6 +262,7 @@ def send(text: str, *, keyboard: dict[str, Any] | None = None, html_mode: bool =
 
 def panel_keyboard() -> dict[str, Any]:
     return {"inline_keyboard": [
+        [{"text": "📒 Long Takibi", "callback_data": "LONG"}],
         [{"text": "🔭 Altcoin İzleme", "callback_data": "ALTCOIN"}],
         [{"text": "📈 D1 Döngü", "callback_data": "D1"}],
         [{"text": "🆕 Yeni Coinler (CMC)", "callback_data": "NEW"},
@@ -247,6 +288,8 @@ def format_status() -> str:
     return "\n".join(line for line in [
         "📊 SIGNAL BOT v5 CORE",
         "Mod: SHADOW / RADAR ONLY",
+        long_watch.status_line(STATE.get("long_watch"), now=now, enabled=LONG_WATCH_ENABLED,
+                               max_age=LONG_WATCH_MAX_AGE_SECONDS, error=STATE.get("long_watch_error")),
         altcoin_watch.status_line(STATE.get("altcoin_watch"), now=now, enabled=ALTCOIN_WATCH_ENABLED,
                                   error=STATE.get("altcoin_watch_error"), keyed=ALTCOIN_WATCH.gecko.keyed),
         new_coins.status_line(STATE.get("new_coins"), now=now, enabled=NEW_COINS_ENABLED,
@@ -416,6 +459,66 @@ def format_altcoin(text: str = "") -> str:
     return altcoin_watch.render_card(found[0], now=now, generated_at=int((snapshot or {}).get("generated_at") or 0))
 
 
+def long_watch_tick(now: int | None = None) -> None:
+    """One decision per week (the first tick after the Sunday close); a failed refresh keeps the last snapshot
+    and is retried later. A register that did not load leaves the module in error: nothing is shown as known."""
+
+    now = int(time.time()) if now is None else now
+    if LONG_WATCH is None:
+        with LOCK:
+            STATE["long_watch_error"] = f"kayıt yüklenemedi: {LONG_WATCH_REGISTER_ERROR}"
+            _save_state()
+        return
+    with LOCK:
+        snapshot = STATE.get("long_watch")
+        retry_at = int(STATE.get("long_watch_retry_at") or 0)
+    due = (not snapshot or int(snapshot.get("week0") or 0) < long_watch.week_start(now)
+           or not long_watch.fresh(snapshot, now=now, max_age=LONG_WATCH_MAX_AGE_SECONDS))
+    if not due or now < retry_at:
+        return
+    error = None
+    try:
+        snapshot = LONG_WATCH.refresh(now, previous=snapshot)
+    except Exception as exc:                          # the last snapshot stays and is shown with its age
+        error = _safe_error(exc)
+        snapshot = None
+        log.warning("Long takibi: %s", error)
+    with LOCK:
+        if snapshot is not None:
+            STATE["long_watch"] = snapshot
+        STATE["long_watch_error"] = error
+        STATE["long_watch_retry_at"] = now + LONG_WATCH_RETRY_SECONDS if error else 0
+        _save_state()
+
+
+def long_watch_loop() -> None:
+    while True:
+        try:
+            long_watch_tick()
+        except Exception:
+            log.warning("Long takibi beklenmedik hata", exc_info=True)
+        time.sleep(LONG_WATCH_TICK_SECONDS)
+
+
+def format_long(text: str = "") -> str:
+    """/long: the list; /long <symbol>: one coin's card (only that word is read)."""
+
+    with LOCK:
+        snapshot, error = STATE.get("long_watch"), STATE.get("long_watch_error")
+    now = int(time.time())
+    parts = str(text or "").split()
+    query = parts[1] if len(parts) == 2 and parts[0].startswith("/") else None
+    if len(parts) > 2 or (query is not None and not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", query)):
+        return esc("Kullanım: /long ya da /long <sembol>")
+    if query is None:
+        return long_watch.render(snapshot, now=now, error=error, enabled=LONG_WATCH_ENABLED,
+                                 max_age=LONG_WATCH_MAX_AGE_SECONDS)
+    card = long_watch.find(snapshot, query)
+    if card is None:
+        return esc(f"{query[:20]} kayıt listesinde yok ya da henüz değerlendirme yapılmadı. Liste: /long")
+    return long_watch.render_card(card, now=now, snapshot=snapshot)
+
+
 def new_coins_loop() -> None:
     while True:
         try:
@@ -439,6 +542,7 @@ def _command(text: str) -> str:
     return {
         "/start": "PANEL", "/panel": "PANEL", "/new": "NEW", "/listings": "NEW",
         "/status": "STATUS", "/scan": "SCAN", "/d1": "D1", "/check": "CHECK", "/altcoin": "ALTCOIN",
+        "/long": "LONG",
     }.get(token, token.lstrip("/").upper())
 
 
@@ -464,7 +568,9 @@ def check_address(text: str) -> None:
 
 
 def handle(action: str, text: str = "") -> None:
-    if action == "NEW":
+    if action == "LONG":
+        send(format_long(text), keyboard=panel_keyboard(), html_mode=True)
+    elif action == "NEW":
         send(format_new(), keyboard=panel_keyboard(), html_mode=True)
     elif action == "CHECK":
         check_address(text)
@@ -495,10 +601,11 @@ def handle(action: str, text: str = "") -> None:
     else:
         send(
             "🎯 SIGNAL BOT v5 CORE\n\nAraştırma menüleri (emir yetkisi yok):\n"
+            "• Long takibi: v3.2 raporunun coinleri, rejim dilimi, fitil referansı, kaldıraç sınırı\n"
             "• Altcoin izleme: arz, gelir, değerleme (uzun vade)\n"
             "• D1 trend döngüsü (gölge kayıt)\n"
             "• CoinMarketCap yeni coinler ve /check: dolandırıcılık taraması\n\n"
-            "Uzun vadeli long pozisyon sistemi hazırlanıyor: docs/POSITION_LONG.md",
+            "Tasarım: docs/POSITION_LONG.md",
             keyboard=panel_keyboard(),
         )
 
@@ -559,12 +666,17 @@ def health() -> Any:
                    if NEW_COINS_ENABLED else None)
     altcoin_fresh = (altcoin_watch.fresh(STATE.get("altcoin_watch"), now=now, max_age=ALTCOIN_WATCH_MAX_AGE_SECONDS)
                      if ALTCOIN_WATCH_ENABLED else None)
+    long_fresh = (long_watch.fresh(STATE.get("long_watch"), now=now, max_age=LONG_WATCH_MAX_AGE_SECONDS)
+                  if LONG_WATCH_ENABLED else None)
+    # A snapshot with a failed series is an incomplete artifact: fresh is not enough for healthy.
+    long_complete = long_watch.complete(STATE.get("long_watch")) if LONG_WATCH_ENABLED else None
     return jsonify({
         # Healthy means fresh artifacts exist, not merely "no error recorded".
         "ok": (
             (not TREND_LOOP_ENABLED or (trend_fresh and STATE.get("trend_loop_error") is None))
             and (not NEW_COINS_ENABLED or (coins_fresh and STATE.get("new_coins_error") is None))
             and (not ALTCOIN_WATCH_ENABLED or (altcoin_fresh and STATE.get("altcoin_watch_error") is None))
+            and (not LONG_WATCH_ENABLED or (long_fresh and long_complete and STATE.get("long_watch_error") is None))
         ),
         "service": "signal-bot-v5-core",
         "trend_loop_fresh": trend_fresh,
@@ -573,6 +685,9 @@ def health() -> Any:
         "new_coins_last_error": _error_code(STATE.get("new_coins_error")),
         "altcoin_watch_fresh": altcoin_fresh,
         "altcoin_watch_last_error": _error_code(STATE.get("altcoin_watch_error")),
+        "long_watch_fresh": long_fresh,
+        "long_watch_complete": long_complete,
+        "long_watch_last_error": _error_code(STATE.get("long_watch_error")),
         "can_authorize_trade": False,
     })
 
@@ -586,6 +701,8 @@ def main() -> None:
         threading.Thread(target=new_coins_loop, name="cmc-new-coins", daemon=True).start()
     if ALTCOIN_WATCH_ENABLED:
         threading.Thread(target=altcoin_watch_loop, name="altcoin-watch", daemon=True).start()
+    if LONG_WATCH_ENABLED:
+        threading.Thread(target=long_watch_loop, name="long-watch", daemon=True).start()
     if STARTUP_MESSAGE:
         try:
             send("✅ Signal Bot v5 Core başladı.", keyboard=panel_keyboard())
