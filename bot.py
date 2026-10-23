@@ -69,6 +69,10 @@ COINGECKO_PRO_API_KEY = os.getenv("COINGECKO_PRO_API_KEY", "").strip()
 # week after the Sunday close on MEXC perpetual data: wick reference, leverage cap, funding, OI, channel,
 # regime slice. Research only, no orders. The budget parameters are the user's, not the system's.
 LONG_WATCH_ENABLED = os.getenv("LONG_WATCH_ENABLED", "1") == "1"
+# User decision (2026-10-23): a new slice signal is pushed the moment the weekly decision produces it; a lost
+# signal (gate ❌ the same day, or a condition failing at the next decision) is pushed too. "0" records the
+# messages in the ledger without pushing. No orders either way.
+LONG_WATCH_ALERTS = os.getenv("LONG_WATCH_ALERTS_ENABLED", "1") == "1"
 LONG_WATCH_REGISTER = Path(os.getenv("LONG_WATCH_REGISTER", str(v32_register.DEFAULT_PATH)))
 LONG_WATCH_MAX_AGE_SECONDS = 8 * 86_400          # one weekly decision plus a day of slack
 LONG_WATCH_TICK_SECONDS = 30 * 60
@@ -117,6 +121,8 @@ def _build_long_watch() -> tuple[long_watch.LongWatch | None, str | None]:
 
 
 LONG_WATCH, LONG_WATCH_REGISTER_ERROR = _build_long_watch()
+LONG_WATCH_FORCE = threading.Event()               # set by the panel's scan button: an interim refresh now
+LONG_ALERTS_LOCK = threading.Lock()                # one thread delivers at a time: the long and gate-guard loops both call
 # The gate guard reads the same register; without it the module stays in error (nothing is shown as known).
 ALTCOIN_WATCH = altcoin_watch.AltcoinWatch(
     altcoin_watch.CoinGecko(demo_key=COINGECKO_DEMO_API_KEY, pro_key=COINGECKO_PRO_API_KEY),
@@ -150,12 +156,13 @@ STATE: dict[str, Any] = {
 COMMANDS = [
     {"command": "panel", "description": "Sade kontrol paneli"},
     {"command": "long", "description": "Long takibi: v3.2 listesi, rejim dilimi, fitil referansı, kaldıraç sınırı"},
+    {"command": "puan", "description": "İki kategorinin rapor puanları (Puan, P(≥2×), S) ve bot durumu"},
     {"command": "new", "description": "CoinMarketCap yeni coinler: dolandırıcılık taraması"},
     {"command": "check", "description": "Kontrat adresiyle anında dolandırıcılık taraması: /check <adres>"},
     {"command": "altcoin", "description": "Kapı bekçisi: v3.2 listesinde arz, faaliyet, güvenlik, likidite kapıları"},
     {"command": "d1", "description": "D1 döngü: gölge pozisyonlar, çıkış seviyesi ve acil stop"},
     {"command": "status", "description": "Tarama sağlığı ve veri durumu"},
-    {"command": "scan", "description": "Yeni coin taramasını şimdi yap"},
+    {"command": "scan", "description": "Şimdi tara: yeni coinler + long ara taraması, ardından puan tabloları"},
 ]
 
 
@@ -411,6 +418,11 @@ def altcoin_watch_tick(now: int | None = None) -> None:
                 STATE["altcoin_watch"] = snapshot
                 STATE["altcoin_watch_failures"], STATE["altcoin_watch_retry_at"] = 0, 0
                 STATE["altcoin_watch_failed_keyed"] = None
+                dropped = (LONG_WATCH.gate_losses(STATE.get("long_watch"), altcoin_watch.gates_of(snapshot), now)
+                           if LONG_WATCH is not None else [])
+            if dropped:                               # a hard ❌ on a signalled coin: the signal drops today
+                log.warning("Kapı ❌ ile düşen sinyaller: %s", ", ".join(dropped))
+                _deliver_long_alerts(now)
         except Exception as exc:                     # the last snapshot stays and is shown as stale
             errors.append(_safe_error(exc))
             # A keyless refresh can wait out rate limits for many minutes: count the delay from when it failed.
@@ -464,28 +476,49 @@ def format_altcoin(text: str = "") -> str:
     return altcoin_watch.render_card(found[0], now=now, generated_at=int((snapshot or {}).get("generated_at") or 0))
 
 
-def long_watch_tick(now: int | None = None) -> None:
-    """One decision per week (the first tick after the Sunday close); a failed refresh keeps the last snapshot
-    and is retried later. A register that did not load leaves the module in error: nothing is shown as known."""
+def _deliver_long_alerts(now: int) -> None:
+    """Push the ledger's pending long messages in order; a failed send stays pending for the next tick."""
+
+    if LONG_WATCH is None:
+        return
+    with LONG_ALERTS_LOCK:                            # outbox -> send -> DELIVERED is one pass per thread
+        for message in LONG_WATCH.outbox():
+            pushed = LONG_WATCH_ALERTS and bool(TOKEN and CHAT_ID)
+            if pushed:
+                try:
+                    send(message["text"], keyboard=panel_keyboard(), html_mode=True)
+                except Exception as exc:
+                    log.warning("Long uyarısı gönderilemedi, tekrar denenecek: %s", _safe_error(exc))
+                    return
+            LONG_WATCH.delivered(message["id"], at=now, sent=pushed)
+
+
+def long_watch_tick(now: int | None = None, *, force: bool = False) -> bool:
+    """One decision per week (the first tick after the Sunday close); a forced tick runs an interim refresh
+    (levels and conditions for display, no new signal). A failed refresh keeps the last snapshot and is retried
+    later. A register that did not load leaves the module in error: nothing is shown as known.
+    Returns True when a refresh ran and succeeded."""
 
     now = int(time.time()) if now is None else now
     if LONG_WATCH is None:
         with LOCK:
             STATE["long_watch_error"] = f"kayıt yüklenemedi: {LONG_WATCH_REGISTER_ERROR}"
             _save_state()
-        return
+        return False
     with LOCK:
         snapshot = STATE.get("long_watch")
         retry_at = int(STATE.get("long_watch_retry_at") or 0)
-    due = (not snapshot or int(snapshot.get("week0") or 0) < long_watch.week_start(now)
-           or not long_watch.fresh(snapshot, now=now, max_age=LONG_WATCH_MAX_AGE_SECONDS))
-    if not due or now < retry_at:
-        return
+    new_week = not snapshot or int(snapshot.get("week0") or 0) < long_watch.week_start(now)
+    due = new_week or not long_watch.fresh(snapshot, now=now, max_age=LONG_WATCH_MAX_AGE_SECONDS)
+    if not (due or force) or (now < retry_at and not force):
+        _deliver_long_alerts(now)                     # messages left pending by a restart or a failed send
+        return False
+    kind = long_watch.DECISION if new_week or not snapshot else long_watch.INTERIM
     error = None
     with LOCK:
         gates = altcoin_watch.gates_of(STATE.get("altcoin_watch"))
     try:
-        snapshot = LONG_WATCH.refresh(now, previous=snapshot, gates=gates)
+        snapshot = LONG_WATCH.refresh(now, previous=snapshot, gates=gates, kind=kind)
     except Exception as exc:                          # the last snapshot stays and is shown with its age
         error = _safe_error(exc)
         snapshot = None
@@ -496,15 +529,32 @@ def long_watch_tick(now: int | None = None) -> None:
         STATE["long_watch_error"] = error
         STATE["long_watch_retry_at"] = now + LONG_WATCH_RETRY_SECONDS if error else 0
         _save_state()
+    _deliver_long_alerts(now)
+    return snapshot is not None
 
 
 def long_watch_loop() -> None:
     while True:
+        force = LONG_WATCH_FORCE.is_set()
+        LONG_WATCH_FORCE.clear()
         try:
-            long_watch_tick()
+            ran = long_watch_tick(force=force)
+            if force:                                 # the panel's scan button: the two score tables follow
+                send(format_scores() if ran else "Long ara taraması yapılamadı; son değerlendirme duruyor. " + format_status(),
+                     keyboard=panel_keyboard(), html_mode=ran)
         except Exception:
             log.warning("Long takibi beklenmedik hata", exc_info=True)
-        time.sleep(LONG_WATCH_TICK_SECONDS)
+        LONG_WATCH_FORCE.wait(LONG_WATCH_TICK_SECONDS)
+
+
+def format_scores() -> str:
+    """/puan: the report's scores for both categories next to the bot's current state."""
+
+    if LONG_WATCH is None:
+        return esc(f"Kayıt yüklenemedi: {LONG_WATCH_REGISTER_ERROR}")
+    with LOCK:
+        snapshot = STATE.get("long_watch")
+    return long_watch.render_scores(snapshot, LONG_WATCH.register, now=int(time.time()))
 
 
 def format_long(text: str = "") -> str:
@@ -549,7 +599,7 @@ def _command(text: str) -> str:
     return {
         "/start": "PANEL", "/panel": "PANEL", "/new": "NEW", "/listings": "NEW",
         "/status": "STATUS", "/scan": "SCAN", "/d1": "D1", "/check": "CHECK", "/altcoin": "ALTCOIN",
-        "/long": "LONG",
+        "/long": "LONG", "/puan": "PUAN",
     }.get(token, token.lstrip("/").upper())
 
 
@@ -577,6 +627,8 @@ def check_address(text: str) -> None:
 def handle(action: str, text: str = "") -> None:
     if action == "LONG":
         send(format_long(text), keyboard=panel_keyboard(), html_mode=True)
+    elif action == "PUAN":
+        send(format_scores(), keyboard=panel_keyboard(), html_mode=True)
     elif action == "NEW":
         send(format_new(), keyboard=panel_keyboard(), html_mode=True)
     elif action == "CHECK":
@@ -600,10 +652,13 @@ def handle(action: str, text: str = "") -> None:
     elif action == "STATUS":
         send(format_status(), keyboard=panel_keyboard())
     elif action == "SCAN":
-        # The altcoin watch refreshes weekly on its own thread (a refresh takes minutes); only the
-        # new-coin scan is quick enough to run from the command thread.
-        send("🔄 Yeni coin taraması başlatıldı.", keyboard=panel_keyboard())
+        # The new-coin scan is quick enough for the command thread. The long interim refresh takes minutes
+        # (MEXC and CoinGecko series for 22 coins) and runs on its own thread; the score tables for both
+        # categories follow when it finishes. The gate guard keeps its daily schedule.
+        send("🔄 Tarama başlatıldı: yeni coinler şimdi; long ara taraması (karar değil) birkaç dakika sürer, "
+             "bitince iki kategorinin puan tabloları gelir.", keyboard=panel_keyboard())
         new_coins_tick()
+        LONG_WATCH_FORCE.set()
         send(format_status(), keyboard=panel_keyboard())
     else:
         send(

@@ -75,9 +75,15 @@ raporun σ, medyan çarpan, dokunma olasılıkları; tetikleyici bayrakları (AA
 - `/long` liste: rejim satırı (dilim, BTC.D, yön, ALT90, VIX), çekirdek coinler (durum, fitil, L_max, funding),
   izleme ve havuzlar, eksik veri.
 - `/long <sembol>` kart: koşullar, seviyeler, funding, prim, OI, kanal, kapılar, pay, tetikleyiciler.
+- `/puan`: iki kategorinin rapor puanları (Puan, P(≥2×), S) ve botun durumu. "🔄 Şimdi Tara" düğmesi yeni coin
+  taramasını ve long **ara taramasını** (karar değil) çalıştırır, bitince `/puan` tablolarını gönderir.
+- **Uyarılar (anında, Telegram):** 🟢 LONG SİNYALİ — haftalık kararda bir coin ilk kez DİLİM alınca, seviyeleriyle;
+  🔴 SİNYAL DÜŞTÜ — sinyal sağlanmayınca ya da günlük kapı kontrolünde hack/kontrat/faaliyet ❌ görülünce aynı gün.
+  Önce deftere yazılır, teslimat `DELIVERED` kaydıyla izlenir; `LONG_WATCH_ALERTS_ENABLED=0` yalnız kaydeder.
 - `/altcoin`, `/altcoin <sembol>`: kapı durumları ve nedenleri.
 - Defterler (`/data/*.jsonl`, yalnız ekleme): haftalık `KARAR` olayı (her coin; kayıt sha256, kapı kararı,
-  seviyeler), günlük `GATE` değişiklikleri. İleri kayıt ön-kaydı henüz yok (`trial: null`).
+  seviyeler), `SINYAL` / `SINYAL_DUSTU` olayları ve mesaj metinleri, `DELIVERED` teslimat kayıtları, günlük `GATE`
+  değişiklikleri. İleri kayıt ön-kaydı henüz yok (`trial: null`).
 - `/status` ve `/` sağlık ucu: tazelik ve eksiksizlik; eksik seri varsa sağlıksız.
 
 ## 5. Botun karar vermediği şeyler

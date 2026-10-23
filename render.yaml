@@ -54,6 +54,8 @@ services:
       # Research only, no orders. The POSITION_* values are the user's risk budget, not system parameters.
       - key: LONG_WATCH_ENABLED
         value: "1"
+      - key: LONG_WATCH_ALERTS_ENABLED
+        value: "1"
       - key: LONG_WATCH_LEDGER_FILE
         value: /data/long_watch_ledger.jsonl
       - key: POSITION_MAINTENANCE_MARGIN

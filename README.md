@@ -8,7 +8,8 @@ Signal Bot bir araştırma botudur. Dört menüsü vardır; hiçbiri emir vermez
    meme coinler (`research/register/`) için haftalık değerlendirme: rejim dilimi (BTC.D, altcoin
    sezonu payı), MEXC vadeli fitil dipleri ve likidasyonu onların %20 altında tutan kaldıraç sınırı
    (≤ 2×), 90 günlük funding, OI/piyasa değeri ve perp/spot, 10 haftalık kanal; eksik koşullar
-   adıyla yazılır. Bot listeyi seçmez. `docs/POSITION_LONG.md` §13–§14.
+   adıyla yazılır. Bot listeyi seçmez. Bir coin ilk kez DİLİM alınca 🟢, sinyal düşünce 🔴 uyarısı
+   Telegram'a gider; `/puan` iki kategorinin rapor puanlarını gösterir. `docs/POSITION_LONG.md` §13–§14.
 1. **Kapı bekçisi** (`/altcoin`, `/altcoin <sembol>`) — aynı listenin günlük kapı kontrolü: arz,
    DefiLlama ücreti, hack ve kontrat yetkileri, 30 günlük spot hacim. Kapılar yalnız düşürür: ❌,
    `/long`'daki sinyali keser. `docs/ALTCOIN_WATCH.md`.
@@ -39,12 +40,13 @@ ve anahtar içermez; dış metin (web, Telegram, sağlayıcı alanları) komut o
 
 ```text
 /panel     Sade kontrol paneli
-/altcoin   Altcoin izleme listesi; /altcoin <sembol> tek coin kartı
+/altcoin   Kapı bekçisi: kayıt coinlerinin kapı durumları; /altcoin <sembol> tek coin kartı
+/puan      İki kategorinin rapor puanları (Puan, P(≥2×), S) ve bot durumu
 /d1        D1 döngü: gölge pozisyonlar, çıkış seviyesi ve acil stop
 /new       CoinMarketCap yeni coinler: dolandırıcılık taraması
 /check     Kontrat adresiyle anında tarama: /check [zincir] <adres>
 /status    Tarama sağlığı ve veri durumu
-/scan      Yeni coin taramasını şimdi yap
+/scan      Şimdi tara: yeni coinler + long ara taraması; bitince puan tabloları
 ```
 
 Kaldırılan `/tactical`, `/longs`, `/radar` komutları paneli açar.
