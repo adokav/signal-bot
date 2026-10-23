@@ -18,6 +18,7 @@ HEALTH_KEYS = ("trend_loop_error", "new_coins", "new_coins_error", "altcoin_watc
 def _all_fresh(monkeypatch):
     monkeypatch.setattr(bot.altcoin_watch, "fresh", lambda snapshot, now, max_age: True)
     monkeypatch.setattr(bot.long_watch, "fresh", lambda snapshot, now, max_age: True)
+    monkeypatch.setattr(bot.long_watch, "complete", lambda snapshot: True)
     monkeypatch.setattr(bot.new_coins, "fresh", lambda snapshot, now, max_age: True)
     monkeypatch.setattr(bot.TREND_LOOP, "fresh", lambda now, stop_seconds: True)
     for key in HEALTH_KEYS:
@@ -473,6 +474,17 @@ def test_a_register_that_did_not_load_disables_long_tracking_with_the_reason(mon
         assert payload["ok"] is False and payload["long_watch_last_error"] == "kayıt"
     finally:
         bot.STATE.update(saved)
+
+
+def test_health_needs_a_complete_long_snapshot(monkeypatch):
+    _all_fresh(monkeypatch)
+    assert bot.APP.test_client().get("/").get_json()["ok"] is True
+    monkeypatch.setattr(bot.long_watch, "complete", lambda snapshot: False)      # a series failed inside the refresh
+    payload = bot.APP.test_client().get("/").get_json()
+    assert payload["ok"] is False and payload["long_watch_fresh"] is True and payload["long_watch_complete"] is False
+    monkeypatch.setattr(bot.long_watch, "complete", lambda snapshot: True)
+    monkeypatch.setattr(bot.long_watch, "fresh", lambda snapshot, now, max_age: False)
+    assert bot.APP.test_client().get("/").get_json()["ok"] is False
 
 
 def test_the_live_register_builds_the_long_watch():

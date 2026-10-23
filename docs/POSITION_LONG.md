@@ -591,8 +591,12 @@ dokunma, en kötü %5, likidite üst sınırı); "elle bakılacaklar". Altbilgi:
 | Perp mum < 20 hafta | kanal BİLİNMİYOR → sinyal yok |
 | Funding < 60 ödeme | `FUND90` BİLİNMİYOR → sinyal yok |
 | OI / piyasa değeri eksik | tetik değerlendirilemez → sinyal yok (bilinmeyen güvenli değil) |
+| Toplu OI'de bir borsanın satırı bozuk | o coinin toplamı BİLİNMİYOR (eksik toplam küçük gösterir) → sinyal yok |
+| Borsanın sürdürme marjı alınamadı | L_max ve likidasyon BİLİNMİYOR (kural max(borsa oranı, %5) ister) → sinyal yok; fitil değerleri görünür |
+| Kayıt 180 günden eski | ⚠️ "kayıt bayat", hiçbir coine yeni dilim; yeni rapor sürümü PR ile |
 | BTC.D arşivi < 4 hafta | rejim yönü BİLİNMİYOR → dilim yok |
 | CoinGecko hatası | ilgili satırlar BİLİNMİYOR; önceki karar yaşıyla gösterilir |
+| Herhangi bir seri başarısız | anlık görüntü "eksik" sayılır: `/` sağlık kontrolü tazelikle birlikte eksiksizliği ister |
 
 ### 14.6 Durum ve ayarlar
 

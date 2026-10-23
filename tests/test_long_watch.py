@@ -316,6 +316,54 @@ def test_the_regime_direction_comes_from_the_weekly_archive(tmp_path):
     assert again["regime"]["slice"] == lw.SLICE_1
 
 
+def test_an_incomplete_derivative_sum_or_an_unknown_margin_blocks_the_signal(tmp_path):
+    class Gecko(FakeGecko):
+        def derivatives(self):
+            out = super().derivatives()
+            out["UNI"] = dict(out["UNI"], incomplete=True)                 # one venue row was unusable
+            out["RENDER"] = {"oi_usd": 5e7, "perp_volume_usd": 1e8, "tickers": 5, "incomplete": False}
+            return out
+
+    class Mexc(FakeMexc):
+        def detail(self, symbol):
+            if symbol == "PENDLE_USDT":
+                raise lw.LongDataError("mexc http 502")
+            if symbol == "AAVE_USDT":
+                return {"contract_size": 0.01, "maintenance_margin": None}
+            return super().detail(symbol)
+
+    watch, _ = _watch(tmp_path, mexc=Mexc(), gecko=Gecko())
+    snap = watch.refresh(NOW)
+    uni = lw.find(snap, "UNI")
+    assert uni["buildup"] is None and uni["oi_mcap"] is None and uni["signal"] is None
+    assert "OI/hacim bilinmiyor" in uni["missing"] and any(e.startswith("türev") for e in uni["errors"])
+    for symbol in ("PENDLE", "AAVE"):
+        card = lw.find(snap, symbol)
+        assert card["l_max"] is None and card["maintenance_margin"] is None and card["liquidation_1x"] is None
+        assert card["wick"]["worst"] is not None                           # the wick itself is known
+        assert card["signal"] is None and "sürdürme marjı bilinmiyor" in card["missing"]
+        assert "fitil referansı bilinmiyor" not in card["missing"] and "kaldıraç sınırı bilinmiyor" not in card["missing"]
+    assert "borsa oranı alınamadı" in lw.render_card(lw.find(snap, "AAVE"), now=NOW)
+    assert lw.find(snap, "RENDER")["signal"] == lw.SLICE_2                  # untouched coins still signal
+    assert not lw.complete(snap)
+
+
+def test_a_stale_register_warns_and_gives_no_new_slice(tmp_path):
+    raw = json.loads(rg.DEFAULT_PATH.read_text(encoding="utf-8"))
+    raw["report"]["report_date"], raw["report"]["data_as_of"] = "2026-03-01", "2026-02-28"   # 234 days before NOW
+    stale = rg.parse(raw, path=rg.DEFAULT_PATH, sha256="stale")
+    watch = lw.LongWatch(stale, FakeMexc(), FakeGecko(), Ledger(tmp_path / "stale.jsonl"))
+    snap = watch.refresh(NOW)
+    assert snap["register"]["stale"] is True and snap["register"]["age_days"] == 234
+    assert all(c["signal"] is None and any(m.startswith("kayıt bayat") for m in c["missing"]) for c in snap["cards"])
+    assert any(e.startswith("kayıt bayat") for e in snap["errors"]) and not lw.complete(snap)
+    assert "Kayıt bayat" in lw.render(snap, now=NOW)
+    fresh_snap = lw.LongWatch(rg.load(), FakeMexc(), FakeGecko(), Ledger(tmp_path / "fresh.jsonl")).refresh(NOW)
+    assert fresh_snap["register"]["stale"] is False and lw.complete(fresh_snap)
+    assert lw.complete(None) is False and lw.complete({"cards": []}) is False
+    assert lw.complete({"cards": [{"errors": ["x"]}], "errors": []}) is False
+
+
 def test_a_markets_failure_fails_the_refresh_instead_of_a_hollow_snapshot(tmp_path):
     class Broken(FakeGecko):
         def markets_for(self, ids):
@@ -395,7 +443,9 @@ def test_gecko_aggregates_only_the_fixed_markets_and_perpetuals():
             {"market": "Bybit (Futures)", "contract_type": "perpetual", "index_id": "PEPE", "open_interest": "nan", "volume_24h": 5},
             {"market": "OKX (Futures)", "contract_type": "perpetual", "index_id": "pepe", "open_interest": 20, "volume_24h": 2}]
     agg = G(rows).derivatives()
-    assert agg == {"PEPE": {"oi_usd": 120.0, "perp_volume_usd": 12.0, "tickers": 2}}
+    assert agg == {"PEPE": {"oi_usd": 120.0, "perp_volume_usd": 12.0, "tickers": 2, "incomplete": True}}   # the nan row
+    clean = G([r for r in rows if r["open_interest"] != "nan"]).derivatives()
+    assert clean["PEPE"]["incomplete"] is False and clean["PEPE"]["oi_usd"] == 120.0
     glob = G({"data": {"market_cap_percentage": {"btc": 57.7}, "total_market_cap": {"usd": 2.8e12}, "updated_at": NOW}}).global_()
     assert glob["btc_dominance"] == 57.7
     with pytest.raises(lw.AltcoinDataError):

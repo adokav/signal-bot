@@ -67,6 +67,7 @@ SIGMA_TARGET = 0.9
 # CoinGecko derivatives markets summed for the aggregate open interest (a fixed list, named on the card)
 DERIVATIVE_MARKETS = ("Binance (Futures)", "Bybit (Futures)", "OKX (Futures)", "Bitget Futures", "Gate (Futures)",
                       "Hyperliquid (Futures)", "MEXC (Futures)", "KuCoin Futures", "HTX Futures")
+REGISTER_MAX_AGE_DAYS = 180        # an older report is stale: shown with a warning, no new slice (§3.5)
 UNKNOWN = "BİLİNMİYOR"
 SLICE_1, SLICE_2, REDUCE, WAIT = "DİLİM 1", "DİLİM 2", "AZALT", "BEKLE"
 UP, DOWN = "YUKARI", "AŞAĞI"
@@ -324,10 +325,12 @@ def position_share(kind: str, sigma: float | None, *, loss_budget: Mapping[str, 
 
 def evaluate(coin: rg.Coin, *, regime_slice: str | None, channel_state: str | None, worst: float | None,
              l_max: float | None, fund_annual: float | None, buildup: bool | None,
-             fund_max: float = FUND_MAX) -> dict[str, Any]:
+             fund_max: float = FUND_MAX, margin_known: bool = True, register_age_days: int = 0) -> dict[str, Any]:
     """Every condition of §14.3 at once; the missing ones are named. ``signal`` is None unless all hold."""
 
     missing: list[str] = []
+    if register_age_days > REGISTER_MAX_AGE_DAYS:
+        missing.append(f"kayıt bayat ({register_age_days} gün > {REGISTER_MAX_AGE_DAYS})")
     if coin.basket != rg.CORE:
         missing.append(f"sepet {coin.basket_label}")
     if coin.condition:
@@ -336,9 +339,13 @@ def evaluate(coin: rg.Coin, *, regime_slice: str | None, channel_state: str | No
         missing.append("rejim " + (regime_slice or UNKNOWN))
     if channel_state != UP:
         missing.append("kanal " + (channel_state or UNKNOWN))
-    if worst is None or l_max is None:
+    if worst is None:
         missing.append("fitil referansı bilinmiyor")
-    elif l_max < 1:
+    if not margin_known:
+        missing.append("sürdürme marjı bilinmiyor")                 # the rule needs the exchange's own rate
+    if worst is not None and margin_known and l_max is None:
+        missing.append("kaldıraç sınırı bilinmiyor")
+    elif l_max is not None and l_max < 1:
         missing.append("1× bile fitil kuralını sağlamıyor")
     if fund_annual is None:
         missing.append("funding bilinmiyor")
@@ -463,16 +470,18 @@ class Gecko(CoinGecko):
         data = self._get("/derivatives")
         if not isinstance(data, list):
             raise AltcoinDataError("coingecko derivatives payload is not a list")
-        out: dict[str, dict[str, float]] = {}
+        out: dict[str, dict[str, Any]] = {}
         for row in data:
             if not isinstance(row, Mapping) or row.get("contract_type") != "perpetual":
                 continue
             if row.get("market") not in DERIVATIVE_MARKETS or not isinstance(row.get("index_id"), str):
                 continue
+            entry = out.setdefault(row["index_id"].upper(), {"oi_usd": 0.0, "perp_volume_usd": 0.0, "tickers": 0,
+                                                             "incomplete": False})
             oi, volume = _finite(row.get("open_interest")), _finite(row.get("volume_24h"))
             if oi is None or volume is None or oi < 0 or volume < 0:
-                continue                                           # one unusable ticker is left out, not zeroed
-            entry = out.setdefault(row["index_id"].upper(), {"oi_usd": 0.0, "perp_volume_usd": 0.0, "tickers": 0})
+                entry["incomplete"] = True                         # an unusable venue row: the sum is not the sum
+                continue
             entry["oi_usd"] += oi
             entry["perp_volume_usd"] += volume
             entry["tickers"] += 1
@@ -599,7 +608,7 @@ class LongWatch:
     # -- one coin -----------------------------------------------------------
 
     def _coin(self, coin: rg.Coin, *, now: int, market: Mapping[str, Any] | None, deriv: Mapping[str, Any] | None,
-              deriv_ok: bool, regime_slice: str | None) -> dict[str, Any]:
+              deriv_ok: bool, regime_slice: str | None, register_age_days: int = 0) -> dict[str, Any]:
         card: dict[str, Any] = {"symbol": coin.symbol, "name": coin.name, "kind": coin.kind, "gecko_id": coin.gecko_id,
                                 "basket": coin.basket, "basket_label": coin.basket_label, "condition": coin.condition,
                                 "rank": coin.rank, "venue": VENUE, "venue_symbol": coin.mexc_symbol,
@@ -625,11 +634,15 @@ class LongWatch:
         except Exception as exc:
             card["errors"].append("mum: " + _safe(exc))
         maintenance = self.maintenance
+        margin_known = False                                        # the rule needs the exchange's rate: max(rate, floor)
         contract_size = coin.mexc_contract_size
         try:
             detail = self.mexc.detail(coin.mexc_symbol)
             if detail.get("maintenance_margin") is not None:
                 maintenance = max(maintenance, float(detail["maintenance_margin"]))
+                margin_known = True
+            else:
+                card["errors"].append("kontrat: sürdürme marjı yok")
             if detail.get("contract_size") is not None:
                 contract_size = float(detail["contract_size"])
         except Exception as exc:
@@ -649,21 +662,26 @@ class LongWatch:
         except Exception as exc:
             card["errors"].append("funding: " + _safe(exc))
         agg = deriv.get(coin.symbol) if deriv_ok and deriv else None
+        if agg is not None and agg.get("incomplete"):
+            card["errors"].append("türev: bir borsanın OI/hacim satırı bozuk; toplam bilinmiyor")
+            agg = None                                              # a partial sum would understate the leverage
         thresholds = self.register.rules["position"]["risk_reduce"]
         build = leverage_buildup(oi_usd=agg["oi_usd"] if agg else None, market_cap=market_cap,
                                  perp_volume=agg["perp_volume_usd"] if agg else None, spot_volume=spot_volume,
                                  thresholds=thresholds)
-        l_max = max_leverage(wick["worst"], maintenance=maintenance)
+        l_max = max_leverage(wick["worst"], maintenance=maintenance) if margin_known else None
         ref = wick["reference_price"]
         decision = evaluate(coin, regime_slice=regime_slice, channel_state=chan["state"], worst=wick["worst"],
-                            l_max=l_max, fund_annual=fund["annual"], buildup=build["triggered"], fund_max=self.fund_max)
+                            l_max=l_max, fund_annual=fund["annual"], buildup=build["triggered"], fund_max=self.fund_max,
+                            margin_known=margin_known, register_age_days=register_age_days)
         sigma = coin.risk.get("sigma") if coin.risk else None
         card.update({
             "price": _sig(price), "perp_close": _sig(perp_price), "price_multiplier": mult,
             "market_cap": _round(market_cap, 0), "spot_volume": _round(spot_volume, 0),
             "wick": {k: (_sig(v) if k == "reference_price" else _round(v)) for k, v in wick.items()},
-            "maintenance_margin": _round(maintenance), "l_max": _round(l_max, 3),
-            "liquidation_1x": _sig(liquidation_price(perp_price, 1.0, maintenance=maintenance)) if perp_price else None,
+            "maintenance_margin": _round(maintenance) if margin_known else None, "l_max": _round(l_max, 3),
+            "liquidation_1x": (_sig(liquidation_price(perp_price, 1.0, maintenance=maintenance))
+                               if perp_price and margin_known else None),
             "liquidation_lmax": (_sig(liquidation_price(perp_price, l_max, maintenance=maintenance))
                                  if perp_price and l_max and l_max >= 1 else None),
             "protection_stop": _sig(protection_stop(ref)) if ref and l_max and l_max > 1 else None,
@@ -692,6 +710,10 @@ class LongWatch:
         ids = [c.gecko_id for c in self.register.coins]
         markets = self.gecko.markets_for(ids)                      # a failure here fails the refresh: no hollow snapshot
         errors: list[str] = []
+        register_age_days = max(0, (day_start(now) - int(datetime.combine(
+            self.register.data_as_of, datetime.min.time(), tzinfo=timezone.utc).timestamp())) // DAY)
+        if register_age_days > REGISTER_MAX_AGE_DAYS:
+            errors.append(f"kayıt bayat: rapor verisi {register_age_days} gün önce; yeni dilim yok")
         regime_result, archive, regime_errors = self._regime(now, previous, week0)
         errors += regime_errors
         deriv, deriv_ok = {}, False
@@ -700,10 +722,13 @@ class LongWatch:
         except Exception as exc:
             errors.append("türev: " + _safe(exc))
         cards = [self._coin(c, now=now, market=markets.get(c.gecko_id), deriv=deriv, deriv_ok=deriv_ok,
-                            regime_slice=regime_result["slice"]) for c in self.register.coins]
+                            regime_slice=regime_result["slice"], register_age_days=register_age_days)
+                 for c in self.register.coins]
         snapshot = {
             "generated_at": now, "week0": week0, "week": _iso(week0), "venue": VENUE,
-            "register": self.register.summary(), "regime": regime_result, "btcd_archive": archive,
+            "register": dict(self.register.summary(), age_days=register_age_days,
+                             stale=register_age_days > REGISTER_MAX_AGE_DAYS),
+            "regime": regime_result, "btcd_archive": archive,
             "alt90": {"share": _round(regime_result.get("alt90"), 2), "known": regime_result.get("alt90_known"),
                       "universe": regime_result.get("alt90_universe")},
             "alt90_week0": week0 if regime_result.get("alt90") is not None or (previous or {}).get("alt90_week0") == week0 else None,
@@ -739,6 +764,17 @@ class LongWatch:
 
 def fresh(snapshot: Mapping[str, Any] | None, *, now: int, max_age: int) -> bool:
     return bool(snapshot) and now - int(snapshot.get("generated_at") or 0) <= max_age   # type: ignore[union-attr]
+
+
+def complete(snapshot: Mapping[str, Any] | None) -> bool:
+    """A snapshot is complete when no series failed: no snapshot-level error and no card error. Health needs it."""
+
+    if not snapshot:
+        return False
+    if snapshot.get("errors"):
+        return False
+    cards = snapshot.get("cards") or []
+    return bool(cards) and not any(c.get("errors") for c in cards if isinstance(c, Mapping))
 
 
 def find(snapshot: Mapping[str, Any] | None, query: str) -> Mapping[str, Any] | None:
@@ -802,6 +838,9 @@ def render(snapshot: Mapping[str, Any] | None, *, now: int, enabled: bool = True
                        f"hafta {snapshot.get('week')}")]
     if age > max_age or error:
         lines.append(esc(f"⚠️ Haftalık yenileme yapılamadı{': ' + error if error else ''}; son değerlendirme gösteriliyor."))
+    if reg.get("stale"):
+        lines.append(esc(f"⚠️ Kayıt bayat: rapor verisi {reg.get('age_days')} gün önce (> {REGISTER_MAX_AGE_DAYS}). "
+                         "Yeni dilim yok; yeni rapor sürümü PR ile girilmeli."))
     lines.append(esc(_regime_line(snapshot)))
     cards = [c for c in snapshot.get("cards") or [] if isinstance(c, Mapping)]
     for kind, title in ((rg.ALTCOIN, "Altcoin çekirdek"), (rg.MEME, "Meme çekirdek")):
@@ -849,7 +888,8 @@ def render_card(card: Mapping[str, Any], *, now: int, snapshot: Mapping[str, Any
         f"{'FLASH365':<14}{_pct(wick.get('flash365'))}",
         f"{'CYCLE_LOW':<14}{_pct(wick.get('cycle_low'))}",
         f"{'Fitil ref.':<14}{_num(wick['reference_price']) if wick.get('reference_price') else '?'}  (en kötüsü {_pct(wick.get('worst'))})",
-        f"{'Sürdürme marj':<14}{_pct(card.get('maintenance_margin'), 1).lstrip('+')}",
+        f"{'Sürdürme marj':<14}{_pct(card.get('maintenance_margin'), 1).lstrip('+')}"
+        + ("" if card.get('maintenance_margin') is not None else "  (borsa oranı alınamadı)"),
         f"{'L_max':<14}{_mult(card.get('l_max'), 2)}  (kod sınırı {MAX_LEVERAGE:.0f}×)",
         f"{'Likidasyon 1×':<14}{_num(card['liquidation_1x']) if card.get('liquidation_1x') else '?'}",
     ]

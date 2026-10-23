@@ -668,13 +668,15 @@ def health() -> Any:
                      if ALTCOIN_WATCH_ENABLED else None)
     long_fresh = (long_watch.fresh(STATE.get("long_watch"), now=now, max_age=LONG_WATCH_MAX_AGE_SECONDS)
                   if LONG_WATCH_ENABLED else None)
+    # A snapshot with a failed series is an incomplete artifact: fresh is not enough for healthy.
+    long_complete = long_watch.complete(STATE.get("long_watch")) if LONG_WATCH_ENABLED else None
     return jsonify({
         # Healthy means fresh artifacts exist, not merely "no error recorded".
         "ok": (
             (not TREND_LOOP_ENABLED or (trend_fresh and STATE.get("trend_loop_error") is None))
             and (not NEW_COINS_ENABLED or (coins_fresh and STATE.get("new_coins_error") is None))
             and (not ALTCOIN_WATCH_ENABLED or (altcoin_fresh and STATE.get("altcoin_watch_error") is None))
-            and (not LONG_WATCH_ENABLED or (long_fresh and STATE.get("long_watch_error") is None))
+            and (not LONG_WATCH_ENABLED or (long_fresh and long_complete and STATE.get("long_watch_error") is None))
         ),
         "service": "signal-bot-v5-core",
         "trend_loop_fresh": trend_fresh,
@@ -684,6 +686,7 @@ def health() -> Any:
         "altcoin_watch_fresh": altcoin_fresh,
         "altcoin_watch_last_error": _error_code(STATE.get("altcoin_watch_error")),
         "long_watch_fresh": long_fresh,
+        "long_watch_complete": long_complete,
         "long_watch_last_error": _error_code(STATE.get("long_watch_error")),
         "can_authorize_trade": False,
     })
