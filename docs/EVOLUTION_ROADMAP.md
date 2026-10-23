@@ -336,9 +336,18 @@ güncellenenler belirtildi.
       Raporlar, kanıt dosyaları ve deneme kaydı duruyor. Aşağıdaki spec uyum
       matrisi 2026-10-01 tarihli bir denetimdir; "canlı radar" satırları o
       günkü durumu anlatır, bugün o radarlar yok.
-    - Sıradaki adımlar: haftalık D1 analoğu majör testi (ön-kayıtlı), rejim
-      katmanı ve kayıt defteri, v3.2 kapı/puan motoru, pozisyon planı ve ileri
-      kayıt ön-kaydı.
+    - **Kullanıcı kararları (2026-10-23):** pozisyonlar vadeli (USDT-M perp);
+      en kötü senaryo = likidasyon fitil dipleri → kaldıraç 1× (en fazla 2×),
+      likidasyon fiyatı fitil referansının %20 altında, funding kart ve hedef
+      düzeltmesinde (`docs/POSITION_LONG.md` §13). `/new` ve `/d1` kalır.
+    - **Atılım kohortu protokolü** — `docs/BREAKOUT_COHORT.md` (sonuçtan
+      önce): Binance perp evreninde 2020–2026, her (coin, ay başı) için 24
+      ayda 2× etiketi; coin, piyasa ve makro göstergeleri sabit kovalarla;
+      keşif 2020-04 → 2022-08, doğrulama 2022-09 → 2024-08 mühürlü; en fazla 5
+      aday, aile alfası bölünür. Harness henüz yazılmadı.
+    - Sıradaki adımlar: kohort harness'ı ve keşif koşusu, haftalık D1 analoğu
+      majör testi (ön-kayıtlı), rejim katmanı ve kayıt defteri, v3.2 kapı/puan
+      motoru, pozisyon planı ve ileri kayıt ön-kaydı.
 
 ## Kesin çizgiler
 

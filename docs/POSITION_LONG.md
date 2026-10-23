@@ -181,6 +181,9 @@ Bot sermayeyi bilmez; yüzdeleri ve dolar cinsinden likidite üst sınırını y
 | **Oynaklık düzeltmesi:** azami pay × min(1, 0,9 / σ) | σ > 0,9 olan coinde pay küçülür | D1_20_10_VOL ailesi (RİSK_AZALTIR); 0,9 hedef σ'sı v3.2 çekirdeğinin tipik σ'sı |
 | **Likidite üst sınırı:** pozisyon ≤ 30 günlük medyan günlük spot hacmin %10'u | Dolar olarak yazılır | v3.2 §12 |
 | **Sepet üst sınırı:** en fazla N pozisyon / sepet | 5 altcoin, 5 meme | v3.2 çıktısı "ilk 5" |
+| **Kaldıraç:** izole marj, varsayılan 1×, kod sınırı 2× | 1× | §13.1: 2× ve üstü gürültüyle likide olur |
+| **Likidasyon fiyatı ≤ fitil referansı × 0,8** (fitil referansı = son 365 günün en derin fitili, tek günlük en derin fitil ve 730 günlük döngü dibinden en düşüğü) | Her kararda yeniden hesaplanır; referans bilinmiyorsa pozisyon yok | §13.2 |
+| **Funding:** `FUND90` > yıllık %20 iken yeni dilim yok; birikmiş funding kartta ve hedef düzeltmesinde | — | §13.4 |
 | **Korelasyon notu:** v3.2'nin kendi uyarısı: çekirdek coinler fiyat olarak yüksek korelasyonlu, kaldıraç güdümlüler (perp/spot > 4, OI/pd > %12) daha küçük tutulmalı | Kart uyarısı; E grubundan okunur | v3.2 §10.3 |
 
 ### 4.3 Yaşam döngüsü (tek yönlü)
@@ -190,7 +193,7 @@ ADAY → PLAN → AÇIK(dilim 1) → AÇIK(dilim 2) → KISMİ(2×) → KISMİ(4
 ```
 
 - Geriye dönüş yok. Kapanan pozisyon yeniden açılmaz; şartlar yeniden sağlanırsa **yeni kayıt** açılır (AGENTS.md §8: bayat/geçersiz setup sessizce yeniden aktive olmaz).
-- Kapanış nedenleri: TEZ_GEÇERSİZ, TREND_ÇIKIŞI, YENİDEN_PUANLAMA, SÜRE, REJİM_AZALT (yarım), KISMİ_SATIŞ (parça).
+- Kapanış nedenleri: TEZ_GEÇERSİZ, TREND_ÇIKIŞI, YENİDEN_PUANLAMA, SÜRE, REJİM_AZALT (yarım), KISMİ_SATIŞ (parça), LİKİDASYON_KORUMA (yalnız 1× üstü kaldıraçta, §13.3).
 - Her olay `/data/position_long_ledger.jsonl` defterine yalnız ekleme ile, fsync ile yazılır (`trend_loop.Ledger` yeniden kullanılır); her olay `trial` ve `can_authorize_trade: false` taşır. Önce defter, sonra durum.
 
 ## 5. Çıkış kuralları
@@ -306,6 +309,7 @@ Bildirimler:
 
 - **Aile:** `position_long_forward`, şema `position-long/v1`. Hiçbir kayıt oluşmadan, ilk karar haftasından önce `research/trials/registry.jsonl`'e girer.
 - **Birim:** aylık kohort (o ay açılan pozisyonlar) ve aylık seçim kohortu (o ayın çekirdek adayı listesi; `docs/ALTCOIN_WATCH.md` kuralıyla).
+- **Ölçüm:** giriş ve çıkış referansı perp fiyatıdır (MEXC vadeli günlük mumlar); sonuçlar gerçekleşen funding'den nettir (nominal × settle edilen oranlar); komisyon ve kayma ayrıca sabit bir maliyetle (%0,1 tek yön) düşülür.
 - **Birincil iddia (12 ay):** kurallarla yönetilen pozisyonların portföy düşüşü, aynı coinlerin aynı referanslarla eşit ağırlıklı al-tut'unun %60'ının altında kalır (D1 ölçütü). Karar: RİSK_AZALTIR / NO_EFFECT / DAHA_KÖTÜ / INCOMPLETE_DATA; %95 blok bootstrap (kohort üzerinde, blok 3, 2000 çekiliş, tohum 0).
 - **İkincil:** çekirdek ilk N'nin BTC'ye ve evrenin eşit ağırlıklı sepetine göre 182/365/730 günlük getirisi; v3.2 ağırlıklı sıra ile eşit ağırlıklı sıranın karşılaştırması; rejim BEKLE'de açılamayan planların (sayaç) sonraki getirisi (rejim katmanının bedeli); BTC trend bilgisine göre ayrım.
 - **Zaman:** 12 aylık birincil sonuç en erken ilk karar haftasından 15 ay sonra; 24/36 aylık ikinciller sonra. Düşük güç: bir piyasa döngüsü.
@@ -375,9 +379,123 @@ kurallarla korunur (değişen kod = yeni deneme).
 
 ## 12. Kullanıcıdan beklenen kararlar
 
-1. **Temizlik kapsamı (§10):** tabloya onay. Özellikle: D1 kalsın mı (öneri: kalsın); `/new` kalksın, `/check` kalsın mı (öneri: evet); makro boru hattı kalksın mı (öneri: evet).
+**Verilen kararlar (2026-10-23):** temizlik uygulandı (PR #163); `/new` ve `/d1` kalır; pozisyonlar vadeli; en kötü senaryo = likidasyon fitil dipleri (§13); atılım kohortu protokolü yazıldı (`docs/BREAKOUT_COHORT.md`).
+
+**Açık kararlar:**
+
+1. ~~Temizlik kapsamı~~ — verildi.
 2. **Çıkış modeli (§5):** beş kural; fiyata bağlı tek kuralın 10 haftalık kanal olması ve ayrı felaket stop'u olmaması. §8.1 INCOMPLETE_DATA çıkarsa kanal "test edilemedi" etiketiyle kalsın mı, çıksın mı.
 3. **Bütçe parametreleri (§4, §5.3):** kayıp bütçesi %1 / %0,5; dilim 40/60; kısmi satış 1/3@2× + 1/3@4× (meme 1/2 + 1/4); sepet başına 5 pozisyon. Bunlar sistem parametresi değil, senin risk bütçendir.
 4. **Olasılık katmanı:** P(≥2×) ve S sıralamada yok (§2). Onay.
 5. **Kayıt defteri (§3.5):** kilit takvimi, mekanizma ve katalist verisi elle, kaynaklı ve PR ile girilir; girilmeyen coin çekirdeğe giremez. Alternatif: ücretli unlock verisi (Tokenomist/CryptoRank) — ayrı karar.
 6. **Rejim kuralı yorumu (§3.1):** v3.2 "Endeks 50 üstü **ve** BTC.D düşüyorsa ilk dilim" der; "bugün iki koşuldan biri sağlanıyor → ilk dilim" cümlesini "dilim 1 koşulu sağlandı, dilim 2 sağlanmadı" diye okudum. Doğru mu?
+
+## 13. Vadeli pozisyon ekleri (kullanıcı kararı 2026-10-23)
+
+Kullanıcının cevapları: pozisyonlar **vadeli (USDT-M perp)**; "en kötü senaryo"
+= likidasyon kaskadındaki **fitil dipleri**; `/new` ve `/d1` kalır; atılım
+kohortu yazılır (`docs/BREAKOUT_COHORT.md`). Vadeli pozisyon, §1'deki yol
+matematiğine iki şey ekler: likidasyon ve funding. İkisi de tezden bağımsız,
+fiyattan ve zamandan gelen maliyetlerdir.
+
+### 13.1 Kaldıraç: gürültü likidasyonu
+
+İzole marjda likidasyon mesafesi ≈ 1/kaldıraç − sürdürme marjı (burada %5).
+Beklenen getirisi sıfır bir yolda, **yalnız kapanışlarla** (fitiller hariç)
+likidasyon seviyesine dokunma olasılığı:
+
+| σ | 1× (−%95) | 1,5× (−%62) | 2× (−%45) | 3× (−%28) | 5× (−%15) |
+|---|---|---|---|---|---|
+| 0,6 · 2,5 yıl | 0,01 | 0,48 | 0,68 | 0,83 | 0,92 |
+| 0,9 · 2,5 yıl | 0,13 | 0,73 | 0,85 | 0,92 | 0,97 |
+| 1,2 · 2,5 yıl | 0,38 | 0,86 | 0,92 | 0,96 | 0,98 |
+| 1,8 · 2,5 yıl | 0,78 | 0,96 | 0,98 | 0,99 | 1,00 |
+| 0,9 · 1 yıl | 0,00 | 0,44 | 0,66 | 0,82 | 0,92 |
+| 0,9 · 1 çeyrek | 0,00 | 0,05 | 0,24 | 0,54 | 0,77 |
+
+Fitiller bu tabloyu kötüleştirir: likidasyon kaskadında perp fiyatı spotun
+çok altına iner ve likidasyon motoru fitili görür, kapanışı değil. Sonuç:
+24–36 aylık bir tezde **2× ve üstü kaldıraç, tez doğru olsa bile çoğu
+pozisyonu likide eder.** Kurallar:
+
+- **Varsayılan kaldıraç 1×, izole marj** (teminat = nominal). Üst sınır
+  `POSITION_MAX_LEVERAGE = 2` (kod düzeyinde sabit; daha yükseği
+  reddedilir). 1×'in üstü yalnız kullanıcının açık ayarıyla ve kartta
+  yukarıdaki olasılık satırıyla.
+- Çapraz marj yok: bir coinin fitili sepetin tamamını likide edemez.
+
+### 13.2 Fitil kuralı: likidasyon fiyatı, en kötü fitilin altında
+
+"En kötü senaryoda fiyat ne olur" sorusunun vadeli cevabı, son fitil
+dipleridir. Her coin için ay başında (ve her haftalık kararda):
+
+- `WICK365` = son 365 günün en düşük gün içi dibi / bugünkü fiyat − 1
+  (perp mumlarından; MEXC vadeli, tek borsa);
+- `FLASH365` = son 365 günde tek günde en derin fitil: min(düşük / önceki
+  kapanış) − 1;
+- `CYCLE_LOW` = son 730 günün en düşük günlük kapanışı / bugünkü fiyat − 1.
+- **Fitil referansı** = giriş × (1 + min(`WICK365`, `FLASH365`, `CYCLE_LOW`)).
+  Üçü de tanımsızsa (geçmiş kısa) referans BİLİNMİYOR → pozisyon yok.
+
+**Kural:** likidasyon fiyatı, fitil referansının en az **%20 altında**
+olmalı. Bu, kaldıraca bir üst sınır verir:
+
+```text
+L_max = (1 − sürdürme marjı) / (1 − 0,8 × (1 + min(WICK365, FLASH365, CYCLE_LOW)))
+```
+
+ve `POSITION_MAX_LEVERAGE` ile kesilir. Örnek: en derin fitil −%55 ise
+0,8 × 0,45 = 0,36 → likidasyon −%64'ten derin olmalı → L_max ≈ 1,48; 1×
+varsayılanıyla likidasyon −%95'te, kuralın çok altında. Fitil referansı,
+`docs/BREAKOUT_COHORT.md` §6.4'teki `SIGMA90` → `WICK_MIN_90` /
+`FLASH_MAX_24` tablosuyla sınanır: tarihsel dağılımda bir yıllık en derin
+fitilin ötesine giden pay raporlanır ve %20 tamponu bu paya göre yeniden
+değerlendirilir (sonuçtan önce: %20 sabit).
+
+### 13.3 Stop emirleri ve fitiller
+
+- §5'teki çıkışlar **kapanışla** karar verilir ve bir sonraki karar
+  referansıyla uygulanır. Teknik seviyelere **bekleyen stop emri konmaz**:
+  fitil, bekleyen stopu kaskadın dibinde doldurur ve pozisyon tez bozulmadan
+  en kötü fiyattan kapanır.
+- Bekleyen tek emir, varsa, **marj koruma stopu**dur: fitil referansının
+  altında, likidasyon fiyatının üstünde. 1× pozisyonda gerekmez; 1×'in
+  üstünde zorunludur. Bu stop tezin bir parçası değildir; likidasyon
+  ücretinden (ve sıfıra kadar gitme riskinden) kaçınmak içindir.
+- Fitiller ayrıca **sinyal**dir: zorunlu satış sonrası toparlanma,
+  `docs/EDGE_RESEARCH.md` 2. aday hipotez; atılım kohortunda `WICK90` ve
+  `FLASH90` göstergeleri bunu ölçer.
+
+### 13.4 Funding: tezin karşısındaki maliyet
+
+Perp long, her 8 saatte funding öder (pozitifse). Alt coinlerde boğada
+yıllık %8–15, çılgınlık dönemlerinde çok daha fazla; 2025–26'da negatif
+(`docs/CARRY_REPLAY_REPORT.md`). 24–36 ayda bu, 2× hedefinin önemli bir
+kısmıdır.
+
+- **Kart:** son 90 günün yıllıklandırılmış ortalama funding'i (`FUND90`,
+  MEXC vadeli funding geçmişi) ve pozisyon açıkken **birikmiş ödenen
+  funding** (nominal × gerçekleşen oranlar).
+- **Yeni dilim yok:** `FUND90` > yıllık %20 iken o coine dilim açılmaz
+  (kalabalık long; v3.2 E/K4 ile aynı yönde). Açık pozisyon kalır; funding
+  kartta birikir.
+- **Hedef düzeltmesi:** 2× / 4× kısmi satış seviyeleri, birikmiş funding ile
+  düzeltilmiş giriş üzerinden hesaplanır (`giriş × (1 + birikmiş funding
+  / nominal)`), yani funding ödeyen pozisyon hedefe gerçekten 2× ile varır.
+- **İleri kayıt:** sonuçlar gerçekleşen funding'den net; giriş/çıkış
+  referansı perp fiyatıdır (MEXC vadeli günlük mumlar), spot değil.
+
+### 13.5 Veri (MEXC vadeli, doğrulanacak)
+
+PR C'de doğrulanır: `contract.mexc.com` kline (gün içi düşük için),
+funding geçmişi, OI. Hepsi tek borsa; kartta "MEXC vekili" etiketi.
+Binance geçmişi yalnız araştırmada (atılım kohortu).
+
+### 13.6 Bu eklerin §4–§5'e etkisi
+
+- §4.2 tabloya üç satır eklenir: kaldıraç (1×, en fazla 2×), likidasyon
+  fiyatı ve fitil referansı, `FUND90`.
+- §5'e ayrı bir çıkış **eklenmez**: funding ve likidasyon, çıkış değil
+  boyut ve maliyet kuralıdır. Marj koruma stopu dolarsa kayıt LİKİDASYON_KORUMA
+  nedeniyle kapanır (yeni neden; §4.3 listesine eklenir).
+- §8.2 ileri kayıt ön-kaydı funding'i ve perp fiyatını ölçüm tanımına alır.
