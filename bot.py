@@ -122,6 +122,7 @@ def _build_long_watch() -> tuple[long_watch.LongWatch | None, str | None]:
 
 LONG_WATCH, LONG_WATCH_REGISTER_ERROR = _build_long_watch()
 LONG_WATCH_FORCE = threading.Event()               # set by the panel's scan button: an interim refresh now
+LONG_ALERTS_LOCK = threading.Lock()                # one thread delivers at a time: the long and gate-guard loops both call
 # The gate guard reads the same register; without it the module stays in error (nothing is shown as known).
 ALTCOIN_WATCH = altcoin_watch.AltcoinWatch(
     altcoin_watch.CoinGecko(demo_key=COINGECKO_DEMO_API_KEY, pro_key=COINGECKO_PRO_API_KEY),
@@ -480,15 +481,16 @@ def _deliver_long_alerts(now: int) -> None:
 
     if LONG_WATCH is None:
         return
-    for message in LONG_WATCH.outbox():
-        pushed = LONG_WATCH_ALERTS and bool(TOKEN and CHAT_ID)
-        if pushed:
-            try:
-                send(message["text"], keyboard=panel_keyboard(), html_mode=True)
-            except Exception as exc:
-                log.warning("Long uyarısı gönderilemedi, tekrar denenecek: %s", _safe_error(exc))
-                return
-        LONG_WATCH.delivered(message["id"], at=now, sent=pushed)
+    with LONG_ALERTS_LOCK:                            # outbox -> send -> DELIVERED is one pass per thread
+        for message in LONG_WATCH.outbox():
+            pushed = LONG_WATCH_ALERTS and bool(TOKEN and CHAT_ID)
+            if pushed:
+                try:
+                    send(message["text"], keyboard=panel_keyboard(), html_mode=True)
+                except Exception as exc:
+                    log.warning("Long uyarısı gönderilemedi, tekrar denenecek: %s", _safe_error(exc))
+                    return
+            LONG_WATCH.delivered(message["id"], at=now, sent=pushed)
 
 
 def long_watch_tick(now: int | None = None, *, force: bool = False) -> bool:

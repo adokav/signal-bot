@@ -625,3 +625,35 @@ def test_the_scores_view_shows_both_categories_with_the_reports_numbers(tmp_path
     import re as _re
     tables = _re.findall(r"<pre>(.*?)</pre>", text, flags=_re.S)
     assert len(tables) == 2 and all(len(row) <= 40 for table in tables for row in table.splitlines())   # phone width
+
+
+def test_a_snapshot_from_before_decision_signals_is_migrated_not_re_announced(tmp_path):
+    watch, ledger = _watch(tmp_path)
+    old = watch.refresh(NOW, gates=_gates())
+    old = dict(old)
+    del old["decision_signals"]                                                      # the previous version's shape
+    assert lw.standing_signals(old) == {"UNI": lw.SLICE_2} and lw.standing_signals(None) == {}
+    # the first decision under the new version: UNI is a standing signal, not a new one
+    nxt = watch.refresh(NOW + 7 * DAY, previous=old, gates=_gates(NOW + 7 * DAY))
+    assert nxt["changes"]["new"] == [] and nxt["decision_signals"] == {"UNI": lw.SLICE_2}
+    # and a hard gate ❌ during the week drops it from such a snapshot
+    old2 = dict(watch.refresh(NOW + 14 * DAY, previous=nxt, gates=_gates(NOW + 14 * DAY)))
+    del old2["decision_signals"]
+    dropped = watch.gate_losses(old2, _gates(NOW + 15 * DAY, UNI={"Güvenlik": "son 180 günde hack: $2,000,000 kayıp"}), NOW + 15 * DAY)
+    assert dropped == ["UNI"] and old2["decision_signals"] == {}
+
+
+def test_a_failing_ledger_keeps_the_standing_signal(tmp_path):
+    watch, ledger = _watch(tmp_path)
+    snap = watch.refresh(NOW, gates=_gates())
+
+    class Broken:
+        def append(self, event, *, text=None):
+            raise OSError("disk full")
+
+        def pending(self):
+            return []
+    watch.ledger = Broken()
+    with pytest.raises(OSError):
+        watch.gate_losses(snap, _gates(NOW + DAY, UNI={"Güvenlik": "hack"}), NOW + DAY)
+    assert snap["decision_signals"] == {"UNI": lw.SLICE_2} and lw.find(snap, "UNI")["signal"] == lw.SLICE_2   # nothing lost silently

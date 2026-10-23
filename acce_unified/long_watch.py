@@ -26,6 +26,7 @@ from __future__ import annotations
 import math
 import re
 import statistics
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -671,6 +672,18 @@ def _sig(value: Any, digits: int = 8) -> Any:
     return round(float(value), digits - 1 - int(math.floor(math.log10(abs(value)))))
 
 
+def standing_signals(snapshot: Mapping[str, Any] | None) -> dict[str, str]:
+    """The decision signals a snapshot stands on: ``decision_signals`` when present, else derived from the cards
+    that carry a signal (a snapshot written by a version before the field existed)."""
+
+    if not snapshot:
+        return {}
+    if isinstance(snapshot.get("decision_signals"), Mapping):
+        return {str(k): str(v) for k, v in snapshot["decision_signals"].items()}
+    return {str(c["symbol"]): str(c["signal"]) for c in snapshot.get("cards") or []
+            if isinstance(c, Mapping) and c.get("signal") and c.get("symbol")}
+
+
 class LongWatch:
     """Builds the weekly snapshot for the register's coins and records the decisions in the ledger."""
 
@@ -679,6 +692,7 @@ class LongWatch:
                  loss_budget: Mapping[str, float] | None = None, vix: Callable[[], Mapping[str, Any]] | None = fetch_vix) -> None:
         self.register, self.mexc, self.gecko, self.ledger = register, mexc, gecko, ledger
         self.vix = vix
+        self._lock = threading.RLock()                  # the ledger is shared with the gate guard's thread
         self.maintenance = max(0.0, float(maintenance))
         self.fund_max = float(fund_max)
         self.loss_budget = dict(loss_budget or LOSS_BUDGET)
@@ -871,7 +885,7 @@ class LongWatch:
                  for c in self.register.coins]
         if gates is None:
             errors.append("kapı kontrolü yok (altcoin_watch anlık görüntüsü yok)")
-        previous_decision = dict((previous or {}).get("decision_signals") or {})
+        previous_decision = standing_signals(previous)
         current = {c["symbol"]: c["signal"] for c in cards if c["signal"]}
         if kind == DECISION:
             decision_signals = current
@@ -894,16 +908,17 @@ class LongWatch:
             "counts": {"signal": sum(1 for c in cards if c["signal"]), "coins": len(cards),
                        "errors": sum(1 for c in cards if c["errors"])},
         }
-        if kind == DECISION:
-            self._record(snapshot)
-        for card in new:
-            self.ledger.append({"id": f"{snapshot['week']}:{card['symbol']}:{EVENT_SIGNAL}", "event": EVENT_SIGNAL,
-                                "week": snapshot["week"], "at": now, "symbol": card["symbol"], "signal": card["signal"],
-                                "perp_close": card.get("perp_close"), "register_sha256": snapshot["register"]["sha256"],
-                                "trial": TRIAL, "can_authorize_trade": False},
-                               text=alert_text(card, snapshot))
-        for card in lost:
-            self._lost(snapshot, card["symbol"], "; ".join(card["missing"][:2]) or "koşul sağlanmıyor", now)
+        with self._lock:
+            if kind == DECISION:
+                self._record(snapshot)
+            for card in new:
+                self.ledger.append({"id": f"{snapshot['week']}:{card['symbol']}:{EVENT_SIGNAL}", "event": EVENT_SIGNAL,
+                                    "week": snapshot["week"], "at": now, "symbol": card["symbol"], "signal": card["signal"],
+                                    "perp_close": card.get("perp_close"), "register_sha256": snapshot["register"]["sha256"],
+                                    "trial": TRIAL, "can_authorize_trade": False},
+                                   text=alert_text(card, snapshot))
+            for card in lost:
+                self._lost(snapshot, card["symbol"], "; ".join(card["missing"][:2]) or "koşul sağlanmıyor", now)
         return snapshot
 
     def _lost(self, snapshot: Mapping[str, Any], symbol: str, reason: str, now: int) -> bool:
@@ -922,18 +937,21 @@ class LongWatch:
 
         if not snapshot or not gates:
             return []
+        snapshot["decision_signals"] = standing_signals(snapshot)   # a snapshot from before the field: derive it
         dropped: list[str] = []
-        for symbol in list((snapshot.get("decision_signals") or {}).keys()):
+        for symbol in list(snapshot["decision_signals"].keys()):
             verdict = gate_verdict(gates.get(symbol), now=now, previous=None)
-            if verdict["known"] and verdict["block"]:
-                snapshot["decision_signals"].pop(symbol, None)
-                for card in snapshot.get("cards") or []:
-                    if card.get("symbol") == symbol:
-                        card["signal"] = None
-                        card["missing"] = [verdict["block"]] + [m for m in card.get("missing") or [] if m != verdict["block"]]
-                        card["gate"] = verdict
-                self._lost(snapshot, symbol, verdict["block"], now)
-                dropped.append(symbol)
+            if not (verdict["known"] and verdict["block"]):
+                continue
+            with self._lock:
+                self._lost(snapshot, symbol, verdict["block"], now)   # the event first: a failed append keeps the signal
+            snapshot["decision_signals"].pop(symbol, None)
+            for card in snapshot.get("cards") or []:
+                if card.get("symbol") == symbol:
+                    card["signal"] = None
+                    card["missing"] = [verdict["block"]] + [m for m in card.get("missing") or [] if m != verdict["block"]]
+                    card["gate"] = verdict
+            dropped.append(symbol)
         if dropped:
             snapshot["counts"] = dict(snapshot.get("counts") or {}, signal=len(snapshot["decision_signals"]))
         return dropped
@@ -941,11 +959,13 @@ class LongWatch:
     def outbox(self) -> list[dict[str, str]]:
         """Messages recorded in the ledger whose delivery is not recorded yet, oldest first."""
 
-        return self.ledger.pending()
+        with self._lock:
+            return self.ledger.pending()
 
     def delivered(self, message_id: str, *, at: int, sent: bool = True) -> None:
-        self.ledger.append({"id": f"{EVENT_DELIVERED}:{message_id}", "event": EVENT_DELIVERED, "message_id": message_id,
-                            "at": at, "sent": sent})
+        with self._lock:
+            self.ledger.append({"id": f"{EVENT_DELIVERED}:{message_id}", "event": EVENT_DELIVERED,
+                                "message_id": message_id, "at": at, "sent": sent})
 
     def _record(self, snapshot: Mapping[str, Any]) -> int:
         """One KARAR event per coin per week (the first refresh of the week decides); later refreshes add none."""

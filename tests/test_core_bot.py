@@ -644,3 +644,38 @@ def test_a_gate_fail_on_a_signalled_coin_is_pushed_from_the_daily_gate_check(mon
         assert losses == [({"UNI": "DİLİM 2"}, {"Güvenlik": "hack"})] and deliveries == [1792368000]
     finally:
         bot.STATE.update(saved)
+
+
+def test_alert_delivery_is_serialized_across_threads(monkeypatch):
+    import threading as _threading
+    import time as _time
+
+    class Watch:
+        def __init__(self):
+            self.pending = [{"id": "a", "text": "x"}, {"id": "b", "text": "y"}]
+            self.lock = _threading.Lock()
+
+        def outbox(self):
+            with self.lock:
+                return list(self.pending)
+
+        def delivered(self, message_id, *, at, sent=True):
+            with self.lock:
+                self.pending = [m for m in self.pending if m["id"] != message_id]
+    watch = Watch()
+    sent = []
+
+    def slow_send(text, **kw):
+        _time.sleep(0.05)
+        sent.append(text)
+    monkeypatch.setattr(bot, "LONG_WATCH", watch)
+    monkeypatch.setattr(bot, "TOKEN", "t")
+    monkeypatch.setattr(bot, "CHAT_ID", "c")
+    monkeypatch.setattr(bot, "LONG_WATCH_ALERTS", True)
+    monkeypatch.setattr(bot, "send", slow_send)
+    threads = [_threading.Thread(target=bot._deliver_long_alerts, args=(1792368000,)) for _ in range(2)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert sorted(sent) == ["x", "y"] and watch.pending == []                       # each message pushed once
