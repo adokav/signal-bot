@@ -35,14 +35,14 @@ services:
       - key: CMC_API_KEY
         sync: false
 
-      # Altcoin watch (docs/ALTCOIN_WATCH.md): weekly long-horizon fundamental screen of the 150
-      # largest altcoins (supply, fees, hacks, contract powers, liquidity), pre-registered forward
-      # record. Research only, no orders. COINGECKO_DEMO_API_KEY: free demo key from
-      # coingecko.com/en/api, set in the Render dashboard (never in this file, logs or chat).
+      # Gate guard (docs/ALTCOIN_WATCH.md v2): the register's coins through the supply, fees, hacks,
+      # contract-powers and liquidity gates once a day; a ❌ reaches /long as thesis invalidation.
+      # Research only, no orders. COINGECKO_DEMO_API_KEY: free demo key from coingecko.com/en/api,
+      # set in the Render dashboard (never in this file, logs or chat).
       - key: ALTCOIN_WATCH_ENABLED
         value: "1"
       - key: ALTCOIN_WATCH_REFRESH_SECONDS
-        value: "604800"
+        value: "86400"
       - key: ALTCOIN_WATCH_LEDGER_FILE
         value: /data/altcoin_watch_ledger.jsonl
       - key: COINGECKO_DEMO_API_KEY

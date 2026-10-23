@@ -313,8 +313,11 @@ güncellenenler belirtildi.
       taklit (CMC ilk 500 ile aynı ad/sembol) ve eksik site/sosyal hesap
       uyarıları. Yalnız ⚠️: karar ve ön-kayıtlı test değişmedi.
 
-14. ⏳ **Altcoin izleme: uzun vadeli temel tarama** — `docs/ALTCOIN_WATCH.md`
+14. ↪ **Altcoin izleme: uzun vadeli temel tarama** — `docs/ALTCOIN_WATCH.md`
     (kullanıcı kararı 2026-10-16; iki karar aracının seçim modelinin sentezi).
+    **2026-10-23: v2 kapı bekçisine daraltıldı** (madde 15): tarama, sıralama ve
+    ileri kayıt kalktı; trial `b6e0fec86714efc2` SUPERSEDED. Aşağıdaki satırlar
+    v1'i anlatır.
     - İlk 150 altcoin haftada bir kapılardan geçiyor: dolaşım dışı arz, DefiLlama
       ücretleri, hack ve kontrat yetkileri, 30 günlük medyan hacim. Eksik ya da
       doğrulanamayan veri "İNCELEME GEREKLİ" kalır.
@@ -362,9 +365,14 @@ güncellenenler belirtildi.
       dilimi; tüm koşullar sağlanırsa DİLİM 1/2, yoksa eksik koşulun adı.
       Haftada bir karar kaydı (`long_watch_ledger.jsonl`). Kanıt yok; ileri
       kayıt ön-kaydı (§8.2) sonraki iş.
+    - **`/altcoin` v2 — kapı bekçisi (2026-10-23):** 150 coinlik tarama,
+      ölçüler, sıralama ve kohort kaydı kaldırıldı; dört kapı kayıt coinlerinde
+      günlük çalışır ve `/long`'a tez geçersizliği girdisi verir (hack/kontrat/
+      faaliyet ❌ hemen, likidite ❌ iki ardışık kararda, kontrol yoksa
+      bilinmiyor). Trial `b6e0fec86714efc2` SUPERSEDED, sonuç okunmadı.
     - Sıradaki adımlar: kohort keşif koşusu; haftalık D1 analoğu majör testi
-      (ön-kayıtlı); `/altcoin` daraltma; pozisyon planı (açma/kapama, kısmi
-      satış, birikmiş funding) ve ileri kayıt ön-kaydı.
+      (ön-kayıtlı); pozisyon planı (açma/kapama, kısmi satış, birikmiş
+      funding) ve ileri kayıt ön-kaydı.
 
 ## Kesin çizgiler
 

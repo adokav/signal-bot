@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
 from acce_unified import altcoin_watch as aw
+from acce_unified import register as rg
 from acce_unified.trend_loop import Ledger
 
-NOW = int(datetime(2026, 10, 16, 12, tzinfo=timezone.utc).timestamp())
+NOW = int(datetime(2026, 10, 23, 12, tzinfo=timezone.utc).timestamp())
 DAY = 86_400
 
 
@@ -27,16 +27,12 @@ def market(gecko_id: str, symbol: str, *, rank: int = 10, price: float = 2.0, ca
             "total_volume": 3e7, "high_24h": high or price * 1.05, "low_24h": low or price * 0.95}
 
 
-def chart(*, supply: float = 1e9, growth: float = 0.0, volume: float = 2e7, price: float = 2.0,
-          days: int = 365, jump_at: int | None = None) -> dict:
+def chart(*, volume: float = 2e7, price: float = 2.0, days: int = 365) -> dict:
     prices, caps, vols = [], [], []
     for k in range(days + 1):
         ts = (NOW - (days - k) * DAY) * 1000
-        s = supply * (1 + growth * k / days)
-        if jump_at is not None and k >= jump_at:
-            s *= 1.5
         prices.append([ts, price])
-        caps.append([ts, price * s])
+        caps.append([ts, price * 1e9])
         vols.append([ts, volume])
     return {"prices": prices, "market_caps": caps, "total_volumes": vols}
 
@@ -47,28 +43,49 @@ def fee(name: str, *, did: str, d30: float = 3e6, y1: float | None = 3.6e7, mont
             "total30d": d30, "total1y": y1, "monthlyAverage1y": monthly}
 
 
-LITE = {"protocols": [{"defillamaId": "11", "geckoId": None, "parentProtocol": "parent#lend"},
-                      {"defillamaId": "12", "geckoId": None, "parentProtocol": "parent#lend"},
-                      {"defillamaId": "21", "geckoId": "dexco"},
-                      {"defillamaId": "31", "geckoId": "hacked"}],
-        "parentProtocols": [{"id": "parent#lend", "gecko_id": "lendco"}]}
-CHAINS = [{"name": "Chainone", "gecko_id": "chainone", "gasTokenGeckoId": "chainone"},
+# A DefiLlama index around the register's coins: UNI its own protocol, AAVE through a parent, BNB a chain.
+LITE = {"protocols": [{"defillamaId": "u1", "geckoId": "uniswap"},
+                      {"defillamaId": "a1", "geckoId": None, "parentProtocol": "parent#aave"},
+                      {"defillamaId": "a2", "geckoId": None, "parentProtocol": "parent#aave"},
+                      {"defillamaId": "h1", "geckoId": "hacked"}],
+        "parentProtocols": [{"id": "parent#aave", "gecko_id": "aave"}]}
+CHAINS = [{"name": "BSC", "gecko_id": "binancecoin", "gasTokenGeckoId": "binancecoin"},
           {"name": "Rollup", "gecko_id": "rollup-token", "gasTokenGeckoId": "ethereum"}]
+PLATFORMS = {"uniswap": {"ethereum": "0x" + "11" * 20}, "aave": {"ethereum": "0x" + "22" * 20}, "binancecoin": {},
+             "pepe": {"ethereum": "0x" + "33" * 20}, "bonk": {"solana": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"}}
+SYMBOLS = ("UNI", "AAVE", "BNB", "PEPE", "BONK")
+
+
+def _register(symbols=SYMBOLS) -> rg.Register:
+    raw = json.loads(rg.DEFAULT_PATH.read_text(encoding="utf-8"))
+    keep = set(symbols)
+    raw["altcoins"] = [c for c in raw["altcoins"] if c["symbol"] in keep]
+    raw["memes"] = [c for c in raw["memes"] if c["symbol"] in keep]
+    raw["triggers"] = [t for t in raw["triggers"] if set(t["affects"]) <= keep | {"ALL", "PENGU"}]
+    ids = {t["id"] for t in raw["triggers"]}
+    for c in raw["altcoins"] + raw["memes"]:
+        c["triggers"] = [t for t in c["triggers"] if t in ids]
+    return rg.parse(raw, path=rg.DEFAULT_PATH, sha256="test")
+
+
+def _rows():
+    return [market("uniswap", "UNI", rank=20, cap=4.7e9, circ=624.6e6, total=1e9),          # 60 % not circulating
+            market("aave", "AAVE", rank=30, cap=2.3e9, circ=15.44e6, total=16e6),            # fees zero below
+            market("binancecoin", "BNB", rank=4, cap=98e9, circ=131.5e6, total=131.5e6),
+            market("pepe", "PEPE", rank=40, cap=1.7e9, circ=420e12, total=420e12),
+            market("bonk", "BONK", rank=80, cap=2.7e8, circ=88e12, total=88e12)]
 
 
 class FakeGecko:
     keyed = False
 
-    def __init__(self, rows, *, categories=None, platforms=None, charts=None):
-        self.rows, self.categories = rows, categories or {}
-        self.plats = platforms if platforms is not None else {}
-        self.charts, self.chart_calls, self.price_calls = charts or {}, [], []
-        self.quotes = {"bitcoin": 80_000.0}
+    def __init__(self, rows, *, platforms=None, charts=None):
+        self.rows, self.plats = rows, platforms if platforms is not None else dict(PLATFORMS)
+        self.charts, self.chart_calls, self.id_calls = charts or {}, [], []
 
-    def markets(self, page, *, category=None):
-        if category:
-            return [{"id": i} for i in self.categories.get(category, [])]
-        return self.rows if page == 1 else []
+    def markets_by_id(self, ids):
+        self.id_calls.append(list(ids))
+        return [r for r in self.rows if r["id"] in ids]
 
     def platforms(self):
         return self.plats
@@ -80,16 +97,10 @@ class FakeGecko:
             raise found
         return found
 
-    def prices(self, ids):
-        self.price_calls.append(list(ids))
-        return {i: p for i, p in self.quotes.items() if i in ids}
-
 
 class FakeLlama:
-    def __init__(self, *, fees=None, revenue=None, holders=None, hacks=None, broken=None):
-        self.data = {"dailyFees": fees if fees is not None else [], "dailyRevenue": revenue or [],
-                     "dailyHoldersRevenue": holders or []}
-        self.hack_rows, self.broken = hacks or [], broken
+    def __init__(self, *, fees=None, hacks=None, broken=None):
+        self.fees, self.hack_rows, self.broken = fees if fees is not None else [], hacks or [], broken
 
     def lite(self):
         if self.broken == "lite":
@@ -100,7 +111,8 @@ class FakeLlama:
         return CHAINS
 
     def overview(self, data_type):
-        return self.data[data_type]
+        assert data_type == "dailyFees"
+        return self.fees
 
     def hacks(self):
         return self.hack_rows
@@ -120,27 +132,23 @@ class FakeSecurity:
         return {"token": {"freezeAuthority": None, "mintAuthority": None}}
 
 
-def _watch(tmp_path, rows, *, llama=None, size=None, **gecko_kw):
-    gecko = FakeGecko(rows, **gecko_kw)
+def default_llama(**kw):
+    fees = [fee("Uniswap", did="u1", d30=4e6), fee("Aave V3", did="a1", d30=0.0), fee("Aave V2", did="a2", d30=0.0),
+            fee("BSC", did="chain#bsc", chain=True, d30=5e6)]
+    return FakeLlama(fees=kw.get("fees", fees), hacks=kw.get("hacks"), broken=kw.get("broken"))
+
+
+def _watch(tmp_path, rows=None, *, llama=None, register=None, **gecko_kw):
+    gecko = FakeGecko(rows if rows is not None else _rows(), **gecko_kw)
     security = FakeSecurity()
     watch = aw.AltcoinWatch(gecko, llama or default_llama(), security, Ledger(tmp_path / "ledger.jsonl"),
-                            universe_size=size or len(rows), sleep=lambda s: None)
+                            register=register or _register(), sleep=lambda s: None)
     return watch, gecko, security
 
 
-def default_llama(**kw):
-    fees = [fee("Lend V1", did="11", d30=4e6, monthly=2e6), fee("Lend V2", did="12", d30=1e6, monthly=1e6),
-            fee("Dex", did="21", d30=2e6, monthly=2e6), fee("Chainone", did="chain#chainone", chain=True),
-            fee("Rollup", did="chain#rollup", chain=True, d30=0.0)]
-    revenue = [fee("Lend V1", did="11", y1=1e8), fee("Dex", did="21", y1=2e7), fee("Chainone", did="chain#c", chain=True,
-                                                                                     y1=5e7)]
-    holders = [fee("Lend V1", did="11", y1=4e7), fee("Chainone", did="chain#c", chain=True, y1=1e7)]
-    return FakeLlama(fees=kw.get("fees", fees), revenue=kw.get("revenue", revenue), holders=kw.get("holders", holders),
-                     hacks=kw.get("hacks"), broken=kw.get("broken"))
-
-
 def _events(tmp_path):
-    return [json.loads(line) for line in (tmp_path / "ledger.jsonl").read_text().splitlines()]
+    path = tmp_path / "ledger.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
 # ---------------------------------------------------------------------------
@@ -149,34 +157,31 @@ def _events(tmp_path):
 
 
 def test_a_market_row_needs_a_clean_id_and_a_price():
-    assert aw.parse_market(market("lendco", "LEND")).symbol == "LEND"
+    assert aw.parse_market(market("uniswap", "UNI")).symbol == "UNI"
     assert aw.parse_market(market("Bad Id", "X")) is None
     assert aw.parse_market(market("x", "X", price=0)) is None
     assert aw.parse_market({**market("x", "X"), "market_cap_rank": True}).rank is None
     assert aw.parse_market({**market("x", "X"), "circulating_supply": "nan"}).circulating is None
-    assert aw.looks_pegged(market("usdx", "USDX", price=1.0, high=1.002, low=0.999))
-    assert not aw.looks_pegged(market("one", "ONE", price=1.0, high=1.08, low=0.95))
 
 
 def test_defillama_fees_are_summed_per_coin_through_parents_chains_and_own_ids():
     index = aw.build_llama_index(LITE, CHAINS)
-    rows = [fee("Lend V1", did="11", d30=4e6, y1=None, monthly=None), fee("Lend V2", did="12", d30=1e6, y1=1.2e7),
-            fee("Chainone", did="chain#x", chain=True), fee("Nobody", did="99")]
+    rows = [fee("Aave V3", did="a1", d30=4e6, y1=None, monthly=None), fee("Aave V2", did="a2", d30=1e6, y1=1.2e7),
+            fee("BSC", did="chain#x", chain=True), fee("Nobody", did="99")]
     totals = aw.aggregate(rows, index)
-    assert set(totals) == {"lendco", "chainone"}                         # unmapped fees are dropped, never guessed
-    assert totals["lendco"].d30 == 5e6 and totals["lendco"].entries == 2
-    assert totals["lendco"].y1_known is False                           # one year unknown: the year is unknown
-    assert totals["lendco"].monthly == pytest.approx(3e6)               # monthly average falls back to 1y / 12
-    assert index.gas_tokens == frozenset({"chainone", "ethereum"})      # a rollup's governance token pays no gas
+    assert set(totals) == {"aave", "binancecoin"}                        # unmapped fees are dropped, never guessed
+    assert totals["aave"].d30 == 5e6 and totals["aave"].entries == 2
+    assert totals["aave"].y1_known is False                             # one year unknown: the year is unknown
+    assert index.gas_tokens == frozenset({"binancecoin", "ethereum"})   # a rollup's governance token pays no gas
 
 
 def test_hacks_count_what_was_not_returned():
     index = aw.build_llama_index(LITE, CHAINS)
-    hacks = aw.hacks_by_gecko([{"date": NOW - DAY, "amount": 5e6, "returnedFunds": 4.5e6, "defillamaId": "11",
+    hacks = aw.hacks_by_gecko([{"date": NOW - DAY, "amount": 5e6, "returnedFunds": 4.5e6, "defillamaId": "a1",
                                 "targetType": "DeFi Protocol"},
-                               {"date": NOW, "amount": "x", "defillamaId": "31"},
-                               {"date": NOW, "amount": 2e6, "defillamaId": "31", "targetType": "Chain"}], index)
-    assert hacks == {"lendco": [(NOW - DAY, 5e5, "defi protocol")],
+                               {"date": NOW, "amount": "x", "defillamaId": "h1"},
+                               {"date": NOW, "amount": 2e6, "defillamaId": "h1", "targetType": "Chain"}], index)
+    assert hacks == {"aave": [(NOW - DAY, 5e5, "defi protocol")],
                      "hacked": [(NOW, None, ""), (NOW, 2e6, "chain")]}      # an unknown amount is kept, not dropped
 
 
@@ -195,7 +200,7 @@ def test_a_hack_with_an_unknown_amount_or_date_is_never_read_as_no_hack():
 
 
 def _card(**kw):
-    return aw.Card(coin=aw.parse_market(market("lendco", "LEND", **kw)))
+    return aw.Card(coin=aw.parse_market(market("uniswap", "UNI", **kw)))
 
 
 @pytest.mark.parametrize("total,status", [(1.05e9, aw.PASS), (1.051e9, aw.REVIEW), (None, aw.REVIEW),
@@ -213,11 +218,17 @@ def test_supply_not_yet_circulating_must_be_small_or_the_coin_needs_review(total
         assert "veri tutarsız" in card.reasons(aw.REVIEW)[0]               # never a negative overhang
 
 
-def test_economic_activity_needs_mapped_fees():
+def test_economic_activity_needs_mapped_fees_and_does_not_apply_to_memes():
     for fees, status in ((None, aw.REVIEW), (aw.Totals(d30=0.0), aw.FAIL), (aw.Totals(d30=1.0), aw.PASS)):
         card = _card()
         aw.screen_activity(card, fees)
         assert card.gate(aw.ACTIVITY) == status
+    meme = _card()
+    aw.screen_activity(meme, None, kind=rg.MEME)
+    assert meme.gate(aw.ACTIVITY) == aw.NA                                 # not a REVIEW: the report has no such gate
+    for g in (aw.SUPPLY, aw.SECURITY, aw.LIQUIDITY):
+        meme.add(g, aw.PASS, "ok")
+    assert meme.status == aw.PASSED and meme.fails() == {}
 
 
 def test_a_recent_hack_eliminates_an_older_one_warns_and_returned_funds_count():
@@ -242,10 +253,10 @@ def test_a_chain_coin_is_eliminated_only_by_an_attack_on_the_chain_itself():
 
 def test_contracts_are_located_by_platform_and_gas_tokens_are_native():
     index = aw.build_llama_index(LITE, CHAINS)
-    plats = {"chainone": {"ethereum": "0x" + "11" * 20}, "plain": {},
+    plats = {"binancecoin": {"ethereum": "0x" + "11" * 20}, "plain": {},
              "sol-first": {"solana": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "ethereum": "0x" + "ab" * 20},
              "base-first": {"base": "0x" + "ab" * 20, "solana": "Mint"}, "tron-first": {"tron": "T1", "ethereum": "0x1"}}
-    assert aw.contract_of("chainone", plats, index) == ("native", None, None)      # its bridged copy is not it
+    assert aw.contract_of("binancecoin", plats, index) == ("native", None, None)   # its bridged copy is not it
     assert aw.contract_of("plain", plats, index) == ("native", None, None)
     assert aw.contract_of("sol-first", plats, index) == ("token", "solana",
                                                          "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263")
@@ -271,91 +282,27 @@ def test_contract_powers():
         assert card.gate(aw.SECURITY) == status, (kind, chain, payload)
 
 
-def test_the_chart_gives_liquidity_dilution_and_the_ath_day_market_cap():
-    card = _card(ath_date=NOW - 100 * DAY, ath=6.0)
-    aw.screen_chart(card, chart(growth=0.10, volume=2e7), now=NOW)
+def test_liquidity_needs_a_recent_complete_month_of_volume():
+    card = _card()
+    aw.screen_liquidity(card, chart(volume=2e7), now=NOW)
     assert card.gate(aw.LIQUIDITY) == aw.PASS and card.info["volume_median_30d"] == 2e7
-    assert card.measures["dilution"] == pytest.approx(0.10, abs=0.005)
-    assert card.info["ath_market_cap"] == pytest.approx(6.0 * 1e9 * (1 + 0.10 * 265 / 365), rel=1e-3)
     thin = _card()
-    aw.screen_chart(thin, chart(volume=9e6), now=NOW)
-    assert thin.gate(aw.LIQUIDITY) == aw.FAIL
-    short = _card()
-    aw.screen_chart(short, chart(days=200), now=NOW)
-    assert short.measures["dilution"] is None and "bir yıldan kısa" in short.info["dilution_note"]
-    assert "ath_market_cap" not in short.info                         # the ATH is older than the chart
+    aw.screen_liquidity(thin, chart(volume=9e6), now=NOW)
+    assert thin.gate(aw.LIQUIDITY) == aw.FAIL and "9.0M" in thin.fails()[aw.LIQUIDITY]
     none = _card()
-    aw.screen_chart(none, None, now=NOW)
-    assert none.gate(aw.LIQUIDITY) == aw.REVIEW and none.measures["dilution"] is None
-
-
-def test_volume_needs_recent_distinct_days():
+    aw.screen_liquidity(none, None, now=NOW)
+    assert none.gate(aw.LIQUIDITY) == aw.REVIEW
     stale = chart(volume=5e7)
     for key in ("prices", "market_caps", "total_volumes"):
         stale[key] = [p for p in stale[key] if p[0] < (NOW - 10 * DAY) * 1000]   # the newest day is 10 days old
     card = _card()
-    aw.screen_chart(card, stale, now=NOW)
+    aw.screen_liquidity(card, stale, now=NOW)
     assert card.gate(aw.LIQUIDITY) == aw.REVIEW
     repeated = chart(volume=5e7, days=12)
     repeated["total_volumes"] = [[(NOW - 5 * DAY) * 1000 + k, 5e7] for k in range(40)]   # one day, 40 points
     card = _card()
-    aw.screen_chart(card, repeated, now=NOW)
+    aw.screen_liquidity(card, repeated, now=NOW)
     assert card.gate(aw.LIQUIDITY) == aw.REVIEW
-
-
-def test_usage_is_unknown_when_part_of_its_history_is():
-    index = aw.build_llama_index(LITE, CHAINS)
-    totals = aw.aggregate([fee("Lend V1", did="11", d30=4e6, y1=None, monthly=None),
-                           fee("Lend V2", did="12", d30=1e6, y1=1.2e7, monthly=1e6)], index)
-    card = _card()
-    aw.compute_measures(card, holders=None, revenue=None, fees=totals["lendco"])
-    assert totals["lendco"].monthly_known is False and card.measures["usage"] is None
-
-
-def test_a_jump_in_implied_supply_is_not_trusted_as_dilution():
-    card = _card()
-    aw.screen_chart(card, chart(jump_at=200), now=NOW)
-    assert card.measures["dilution"] is None and "sıçrama" in card.info["dilution_note"]
-
-
-def test_measures_never_count_a_burn_twice_and_unknown_stays_unknown():
-    card = _card(cap=1e9, fdv=None)
-    card.measures["dilution"] = -0.03                                     # supply fell: burns are in holder revenue
-    aw.compute_measures(card, holders=aw.Totals(y1=2e7), revenue=aw.Totals(y1=5e7),
-                        fees=aw.Totals(d30=3e6, monthly=2e6))
-    assert card.measures["net_yield"] == pytest.approx(0.02)             # not 0.05: the burn counts once
-    assert card.measures["valuation"] == pytest.approx(20.0)             # market cap when FDV is missing
-    assert card.measures["usage"] == pytest.approx(0.5)
-    card.measures["dilution"] = 0.04
-    aw.compute_measures(card, holders=aw.Totals(y1=2e7), revenue=aw.Totals(y1=0.0), fees=None)
-    assert card.measures["net_yield"] == pytest.approx(-0.02)
-    assert card.measures["valuation"] is None and card.measures["usage"] is None
-    aw.compute_measures(card, holders=aw.Totals(y1=2e7, y1_known=False), revenue=None, fees=None)
-    assert card.measures["net_yield"] is None
-
-
-def _passed(gid, cap, **measures):
-    card = aw.Card(coin=aw.parse_market(market(gid, gid[:4].upper(), cap=cap)))
-    for g in aw.GATES:
-        card.add(g, aw.PASS, "ok")
-    card.measures.update({m: None for m in aw.MEASURES}, **measures)
-    return card
-
-
-def test_ranking_uses_equal_weights_and_an_unknown_measure_ranks_last():
-    cards = [_passed("aaa", 3e9, net_yield=0.03, valuation=10.0, usage=0.2),
-             _passed("bbb", 2e9, net_yield=0.01, valuation=30.0, usage=0.0),
-             _passed("ccc", 1e9, net_yield=None, valuation=5.0, usage=0.5),
-             _passed("ddd", 4e9, net_yield=0.02, valuation=20.0, usage=None)]
-    review = _passed("eee", 5e9, net_yield=1.0, valuation=1.0, usage=9.0)
-    review.add(aw.SUPPLY, aw.REVIEW, "x")
-    aw.rank(cards + [review])
-    assert review.position is None and review.composite is None         # only coins passing every gate are ranked
-    by_id = {c.coin.gecko_id: c for c in cards}
-    assert by_id["aaa"].composite == pytest.approx((1.0 + 2 / 3 + 0.5) / 3)
-    assert by_id["ccc"].composite == pytest.approx((0.0 + 1.0 + 1.0) / 3)   # no holder data: last there, no guess
-    assert [c.coin.gecko_id for c in sorted(cards, key=lambda c: c.position)] == ["aaa", "ccc", "ddd", "bbb"]
-    assert [by_id[g].third for g in ("aaa", "ccc", "ddd", "bbb")] == [1, 2, 2, 3]
 
 
 def test_a_gate_that_was_not_reached_keeps_the_coin_in_review():
@@ -368,98 +315,75 @@ def test_a_gate_that_was_not_reached_keeps_the_coin_in_review():
     card.add(aw.LIQUIDITY, aw.PASS, "ok")
     assert card.status == aw.PASSED
     card.add(aw.LIQUIDITY, aw.FAIL, "sığ")
-    assert card.status == aw.ELIMINATED
+    assert card.status == aw.ELIMINATED and card.fails() == {aw.LIQUIDITY: "sığ"}
 
 
 # ---------------------------------------------------------------------------
-# Refresh and forward record
+# The daily pass over the register
 # ---------------------------------------------------------------------------
 
 
-def _rows():
-    return [market("bitcoin", "BTC", rank=1, cap=1e12),
-            market("lendco", "LEND", rank=20, cap=3e9),
-            market("dexco", "DEX", rank=30, cap=2e9, circ=1e9, total=1.5e9),          # supply needs review
-            market("chainone", "ONE", rank=25, cap=2.5e9),
-            market("rollup-token", "ROLL", rank=40, cap=1e9),                        # zero fees: eliminated
-            market("usdx", "USDX", rank=5, price=1.0, high=1.001, low=0.999),        # pegged: not in the universe
-            market("wrapped", "WRAP", rank=6),                                       # category: not in the universe
-            market("usdt", "USDT", rank=3)]                                          # stable symbol
-
-
-def test_a_refresh_screens_the_universe_and_records_the_month_once(tmp_path):
-    watch, gecko, security = _watch(tmp_path, _rows(), size=4, categories={"wrapped-tokens": ["wrapped"]},
-                                    platforms={"lendco": {"ethereum": "0x" + "11" * 20}, "chainone": {}})
+def test_a_refresh_checks_only_the_register_and_records_changes_once(tmp_path):
+    watch, gecko, security = _watch(tmp_path, charts={"bonk": chart(volume=9e6)})
     snap = watch.refresh(NOW)
-    by_id = {c["id"]: c for c in snap["cards"]}
-    assert set(by_id) == {"lendco", "dexco", "chainone", "rollup-token"} and snap["can_authorize_trade"] is False
-    assert by_id["lendco"]["status"] == aw.PASSED and by_id["chainone"]["status"] == aw.PASSED
-    assert by_id["dexco"]["status"] == aw.NEEDS_REVIEW and by_id["rollup-token"]["status"] == aw.ELIMINATED
-    assert sorted(gecko.chart_calls) == ["chainone", "lendco"]                      # deep checks only for candidates
-    assert security.calls == [("ethereum", "0x" + "11" * 20)]                       # the native coin needs none
-    assert snap["counts"] == {aw.PASSED: 2, aw.NEEDS_REVIEW: 1, aw.ELIMINATED: 1}
+    assert gecko.id_calls == [["uniswap", "aave", "binancecoin", "pepe", "bonk"]]      # the register, nothing else
+    by = {c["symbol"]: c for c in snap["cards"]}
+    assert set(by) == set(SYMBOLS) and snap["can_authorize_trade"] is False
+    assert snap["schema"] == aw.SCHEMA and snap["superseded_trial"] == "b6e0fec86714efc2"
+    assert by["UNI"]["status"] == aw.NEEDS_REVIEW and by["UNI"]["gates"][aw.SUPPLY]["status"] == aw.REVIEW
+    assert by["UNI"]["fails"] == {} and by["UNI"]["basket"] == rg.CORE and by["UNI"]["kind"] == rg.ALTCOIN
+    assert by["AAVE"]["status"] == aw.ELIMINATED and aw.ACTIVITY in by["AAVE"]["fails"]   # zero fees
+    assert by["BNB"]["status"] == aw.PASSED and by["BNB"]["info"]["contract"] == "native"
+    assert by["PEPE"]["status"] == aw.PASSED and by["PEPE"]["gates"][aw.ACTIVITY]["status"] == aw.NA
+    assert by["BONK"]["status"] == aw.ELIMINATED and by["BONK"]["fails"] == {aw.LIQUIDITY: "30 günlük medyan hacim $9.0M"}
+    assert security.calls == [("ethereum", "0x" + "11" * 20), ("ethereum", "0x" + "22" * 20),
+                              ("ethereum", "0x" + "33" * 20),
+                              ("solana", "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263")]   # BNB is native: no call
+    assert sorted(gecko.chart_calls) == sorted(["uniswap", "aave", "binancecoin", "pepe", "bonk"])
+    assert snap["counts"] == {aw.PASSED: 2, aw.NEEDS_REVIEW: 1, aw.ELIMINATED: 2}
     events = _events(tmp_path)
-    assert [e["event"] for e in events] == ["WATCH"] * 4 + ["MONTH"]
-    assert all(e["can_authorize_trade"] is False and e["schema"] == aw.SCHEMA for e in events)
-    watch.refresh(NOW + 7 * DAY)                                                    # same month: no second cohort
+    assert len(events) == 5 and all(e["event"] == "GATE" and e["can_authorize_trade"] is False for e in events)
+    assert all(e["register_sha256"] == "test" for e in events)
+    # the same day again: nothing changed, nothing written
+    watch.refresh(NOW + 3600, previous=snap)
     assert len(_events(tmp_path)) == 5
-    watch.refresh(NOW + 20 * DAY)                                                   # next month
-    assert [e["event"] for e in _events(tmp_path)].count("MONTH") == 2
+    # the next day BONK's volume recovers: one change recorded
+    gecko.charts = {}
+    later = watch.refresh(NOW + DAY, previous=snap)
+    assert {c["symbol"]: c["status"] for c in later["cards"]}["BONK"] == aw.PASSED
+    events = _events(tmp_path)
+    assert len(events) == 6 and events[-1]["symbol"] == "BONK" and events[-1]["previous_status"] == aw.ELIMINATED
+
+
+def test_security_calls_are_skipped_only_after_a_recent_hack(tmp_path):
+    hacks = [{"date": NOW - 10 * DAY, "amount": 3e6, "defillamaId": "a1", "targetType": "DeFi Protocol"}]
+    watch, gecko, security = _watch(tmp_path, llama=default_llama(hacks=hacks))
+    snap = watch.refresh(NOW)
+    aave = {c["symbol"]: c for c in snap["cards"]}["AAVE"]
+    assert aave["status"] == aw.ELIMINATED and aw.SECURITY in aave["fails"] and "hack" in aave["fails"][aw.SECURITY]
+    assert ("ethereum", "0x" + "22" * 20) not in security.calls           # no contract call after a recent hack
+    assert "aave" in gecko.chart_calls                                     # liquidity still measured
 
 
 def test_a_core_source_failure_fails_the_refresh_instead_of_a_hollow_snapshot(tmp_path):
-    watch, _, _ = _watch(tmp_path, _rows(), size=4, llama=default_llama(broken="lite"))
+    watch, _, _ = _watch(tmp_path, llama=default_llama(broken="lite"))
     with pytest.raises(aw.AltcoinDataError):
         watch.refresh(NOW)
-    assert not (tmp_path / "ledger.jsonl").exists() or _events(tmp_path) == []
-    small, _, _ = _watch(tmp_path, _rows(), size=40)
-    with pytest.raises(aw.AltcoinDataError, match="universe too small"):
-        small.refresh(NOW)
+    assert _events(tmp_path) == []
 
 
-def test_per_coin_failures_and_the_deep_check_budget_leave_coins_in_review(tmp_path, monkeypatch):
-    watch, gecko, _ = _watch(tmp_path, _rows(), size=4, platforms={"lendco": {"ethereum": "0x" + "11" * 20},
-                                                                    "chainone": {}},
-                             charts={"chainone": aw.AltcoinDataError("coingecko http 429")})
-    monkeypatch.setattr(aw, "MAX_DEEP_CHECKS", 1)
+def test_a_coin_missing_on_coingecko_or_with_a_failed_chart_is_review_not_pass(tmp_path):
+    rows = [r for r in _rows() if r["id"] != "pepe"]
+    watch, _, _ = _watch(tmp_path, rows, charts={"uniswap": aw.AltcoinDataError("coingecko http 429")})
     snap = watch.refresh(NOW)
-    by_id = {c["id"]: c for c in snap["cards"]}
-    assert by_id["lendco"]["status"] == aw.PASSED
-    assert by_id["chainone"]["status"] == aw.NEEDS_REVIEW
-    assert "sıraya alınamadı" in by_id["chainone"]["gates"][aw.LIQUIDITY]["notes"][0]
-    monkeypatch.setattr(aw, "MAX_DEEP_CHECKS", 80)
-    snap = watch.refresh(NOW + 30 * DAY)
-    assert {c["id"]: c for c in snap["cards"]}["chainone"]["gates"][aw.LIQUIDITY]["status"] == aw.REVIEW
-
-
-def test_outcomes_are_measured_near_the_horizon_and_never_backfilled(tmp_path):
-    watch, gecko, _ = _watch(tmp_path, _rows(), size=4, platforms={"lendco": {"ethereum": "0x" + "11" * 20},
-                                                                    "chainone": {}})
-    watch.refresh(NOW)
-    assert watch.record_outcomes(NOW + 181 * DAY) == 0
-    gecko.quotes = {"bitcoin": 100_000.0, "lendco": 3.0, "chainone": 1.0}
-    assert watch.record_outcomes(NOW + 182 * DAY + 60) == 2                          # two coins priced
-    outcomes = {e["gecko_id"]: e for e in _events(tmp_path) if e["event"] == "OUTCOME"}
-    assert outcomes["lendco"]["return_pct"] == pytest.approx(50.0)
-    assert outcomes["lendco"]["btc_return_pct"] == pytest.approx(25.0)
-    assert outcomes["lendco"]["status_at_cohort"] == aw.PASSED and outcomes["lendco"]["can_authorize_trade"] is False
-    gaps = [e for e in _events(tmp_path) if e["event"] == "QUOTE_GAP"]
-    assert {e["gecko_id"] for e in gaps} == {"dexco", "rollup-token"}                 # asked, no price
-    assert watch.record_outcomes(NOW + 185 * DAY) == 2                                # window closed
-    late = {e["gecko_id"]: e for e in _events(tmp_path) if e["event"] == "OUTCOME" and e["days"] == 182}
-    assert late["dexco"]["status"] == "NO_QUOTE" and late["dexco"]["return_pct"] is None
-    gecko.quotes = {"bitcoin": 1.0, "lendco": 1.0}
-    assert watch.record_outcomes(NOW + 800 * DAY) == 8                                # the bot was down: missed
-    missed = [e for e in _events(tmp_path) if e["event"] == "OUTCOME" and e["days"] in (365, 730)]
-    assert {e["status"] for e in missed} == {"MISSED"} and all(e["price"] is None for e in missed)
-
-
-def test_an_unclosed_cohort_is_never_measured(tmp_path):
-    ledger = Ledger(tmp_path / "ledger.jsonl")
-    ledger.append({"id": "WATCH:v1:2026-10:1:lendco", "event": "WATCH", "month": "2026-10", "refresh_at": NOW,
-                   "gecko_id": "lendco", "price": 2.0, "schema": aw.SCHEMA})
-    watch = aw.AltcoinWatch(FakeGecko([]), default_llama(), FakeSecurity(), ledger, sleep=lambda s: None)
-    assert watch.record_outcomes(NOW + 400 * DAY) == 0                               # no MONTH record closed it
+    by = {c["symbol"]: c for c in snap["cards"]}
+    assert by["PEPE"]["status"] == aw.NEEDS_REVIEW and by["PEPE"]["price"] is None
+    assert all(v["status"] == aw.REVIEW for v in by["PEPE"]["gates"].values())
+    assert by["UNI"]["gates"][aw.LIQUIDITY]["status"] == aw.REVIEW and "alınamadı" in by["UNI"]["gates"][aw.LIQUIDITY]["notes"][0]
+    gates = aw.gates_of(snap)
+    assert gates["PEPE"] == {"status": aw.NEEDS_REVIEW, "fails": {}, "at": NOW}
+    assert gates["AAVE"]["fails"] == {aw.ACTIVITY: "son 30 günde ücret geliri yok"}
+    assert aw.gates_of(None) is None and aw.gates_of({"cards": "x"}) is None
 
 
 # ---------------------------------------------------------------------------
@@ -492,10 +416,10 @@ def test_the_coingecko_key_travels_in_a_header_and_rate_limits_are_retried():
     sleeps = []
     session = Session(Response(429), Response(200, [market("x", "X")]))
     gecko = aw.CoinGecko(demo_key="CGSECRET", session=session, sleep=sleeps.append)
-    assert len(gecko.markets(1)) == 1 and gecko.keyed and gecko.pace == 2.5
+    assert len(gecko.markets_by_id(["x"])) == 1 and gecko.keyed and gecko.pace == 2.5
     url, params, headers = session.calls[0]
     assert headers["x-cg-demo-api-key"] == "CGSECRET" and "CGSECRET" not in url + json.dumps(params)
-    assert sleeps[0] == 30.0
+    assert params["ids"] == "x" and sleeps[0] == 30.0
     leaky = aw.CoinGecko(demo_key="CGSECRET", session=Session(raise_with=RuntimeError(
         "boom https://api.coingecko.com/?x_cg_demo_api_key=CGSECRET")), sleep=lambda s: None)
     with pytest.raises(aw.AltcoinDataError) as err:
@@ -512,58 +436,14 @@ def test_providers_refuse_unusable_replies():
         aw.DefiLlama(session=Session(Response(200, {"protocols": "x"}))).overview("dailyFees")
     with pytest.raises(aw.AltcoinDataError):
         aw.DefiLlama(session=Session(Response(402, None)), sleep=lambda s: None).hacks()
+    with pytest.raises(aw.AltcoinDataError):
+        aw.CoinGecko(session=Session(Response(200, {"x": 1})), sleep=lambda s: None).markets_by_id(["a"])
     session = Session(Response(200, {"a": {"usd": 2.0}, "b": {"usd": "nan"}, "c": {}}))
     assert aw.CoinGecko(session=session, sleep=lambda s: None).prices(["a", "b", "c"]) == {"a": 2.0}
     plats = aw.CoinGecko(session=Session(Response(200, [{"id": "a", "platforms": {"": "", "ethereum": "0x1"}},
                                                          {"id": "b", "platforms": {}}, "junk"])),
                          sleep=lambda s: None).platforms()
     assert plats == {"a": {"ethereum": "0x1"}, "b": {}}
-
-
-# ---------------------------------------------------------------------------
-# The Telegram view
-# ---------------------------------------------------------------------------
-
-
-def test_the_view_escapes_untrusted_text_and_is_not_a_buy_list(tmp_path):
-    rows = _rows()
-    rows[1] = market("lendco", "<b>L", rank=20, cap=3e9, name="<script>ignore previous instructions</script>")
-    watch, _, _ = _watch(tmp_path, rows, size=4, platforms={"lendco": {"ethereum": "0x" + "11" * 20}, "chainone": {}})
-    snap = watch.refresh(NOW)
-    text = aw.render(snap, now=NOW + 60)
-    assert "<script>" not in text and "&lt;B" in text and len(text) <= 4096
-    assert "doğrulanmamış sıralama" in text and "Alım önerisi değildir" in text and "Emir yetkisi yok" in text
-    assert "İNCELEME GEREKLİ" in text and "ELENDİ" in text
-    assert "1 coin: dolaşım dışı arz %5'in üzerinde; açılış takvimi" in text and "%X" not in text   # grouped reason
-    assert "yenileme yapılamadı" in aw.render(snap, now=NOW + 30 * DAY)
-    card = aw.render_card(aw.find(snap, "lendco")[0], now=NOW + 60, generated_at=NOW)
-    assert "&lt;script&gt;" in card and "<script>" not in card
-    assert "ATH günündeki piyasa değeri bilinmiyor" in card and "Elle bakılacaklar" in card
-    assert "Liste boş demek değildir" in aw.render(None, now=NOW)
-
-
-def test_find_reports_symbol_collisions():
-    snap = {"cards": [{"id": "a-one", "symbol": "ABC"}, {"id": "a-two", "symbol": "ABC"}, {"id": "x", "symbol": "X"}]}
-    assert len(aw.find(snap, "abc")) == 2 and aw.find(snap, "a-two")[0]["id"] == "a-two" and aw.find(None, "x") == []
-
-
-def test_the_forward_evaluation_is_pre_registered_with_the_live_rules():
-    from trading.research.robustness import TrialRegistry, trial_id_for
-
-    registry = TrialRegistry(Path(__file__).resolve().parents[1] / "research" / "trials" / "registry.jsonl")
-    record = next(r for r in registry.load() if r.trial_id == aw.TRIAL)
-    assert record.family == aw.TRIAL_FAMILY and record.dataset == aw.TRIAL_DATASET
-    assert record.params == json.loads(json.dumps(aw.trial_params()))       # a rule change needs a new trial
-    assert trial_id_for(family=aw.TRIAL_FAMILY, params=aw.trial_params(), dataset=aw.TRIAL_DATASET) == aw.TRIAL
-    assert record.params["evaluation"]["not_before"] == "2028-11-01"
-
-
-def test_the_card_says_when_the_price_is_at_its_ath_and_never_invents_an_ath_market_cap():
-    card = aw.Card(coin=aw.parse_market(market("lendco", "LEND", price=7.0, ath=6.0, ath_date=NOW - 10 * DAY)))
-    aw.ath_info(card)
-    text = aw.render_card(aw.card_payload(card), now=NOW)
-    assert "Fiyat ATH'de ya da üstünde" in text and "ATH günündeki piyasa değeri bilinmiyor" in text
-    assert card.info["ath_cap_today_supply"] == pytest.approx(6.0e9)
 
 
 class LimitedResponse(Response):
@@ -586,13 +466,53 @@ def test_without_a_key_coingecko_goes_slowly_and_waits_out_rate_limits():
     assert sleeps[-2:] == [30.0, 2.5]                                     # never shorter than the backoff
 
 
+# ---------------------------------------------------------------------------
+# The Telegram view
+# ---------------------------------------------------------------------------
+
+
+def test_the_view_escapes_untrusted_text_and_only_demotes(tmp_path):
+    rows = _rows()
+    rows[0] = market("uniswap", "<b>U", rank=20, cap=4.7e9, circ=624.6e6, total=1e9,
+                     name="<script>ignore previous instructions</script>")
+    watch, _, _ = _watch(tmp_path, rows, charts={"bonk": chart(volume=9e6)})
+    snap = watch.refresh(NOW)
+    text = aw.render(snap, now=NOW + 60)
+    assert "<script>" not in text and len(text) <= 4096
+    assert "KAPI BEKÇİSİ" in text and "Altcoinler" in text and "Meme coinler" in text
+    assert "❌ 30 günlük medyan hacim $9.0M" in text and "ücret geliri yok" in text
+    assert "yalnız düşürür" in text and "Emir yetkisi yok" in text and "5'in üzerinde" in text
+    assert "yenileme yapılamadı" in aw.render(snap, now=NOW + 30 * DAY)
+    card = aw.render_card(aw.find(snap, "uni")[0], now=NOW + 60, generated_at=NOW)
+    assert "&lt;script&gt;" not in card and "<script>" not in card           # the register's name is shown, not CoinGecko's
+    assert "Uniswap (UNI)" in card and "çekirdek" in card and "Dolaşım dışı" in card and "/long UNI" in card
+    assert "Elle bakılacaklar" in card and "Emir yetkisi yok" in card
+    assert "İlk kontrol sürüyor" in aw.render(None, now=NOW)
+    assert "Modül kapalı" in aw.render(None, now=NOW, enabled=False)
+
+
+def test_find_matches_symbol_or_id():
+    snap = {"cards": [{"id": "uniswap", "symbol": "UNI"}, {"id": "x", "symbol": "X"}]}
+    assert aw.find(snap, "uni")[0]["id"] == "uniswap" and aw.find(snap, "UNISWAP")[0]["symbol"] == "UNI"
+    assert aw.find(None, "x") == []
+
+
 def test_a_failed_refresh_says_why_and_when_it_is_retried():
     assert [aw.next_attempt(k, NOW) - NOW for k in (1, 2, 3, 4, 5, 9)] == [1800, 3600, 7200, 14400, 21600, 21600]
     error = "AltcoinDataError: coingecko http 429"
     text = aw.render(None, now=NOW, error=error, retry_at=NOW + 1800, keyed=False)
-    assert "İlk tarama yapılamadı" in text and "Sonraki deneme 12:30 UTC" in text
-    assert "COINGECKO_DEMO_API_KEY" in text and "Liste boş demek değildir" in text
+    assert "İlk kontrol yapılamadı" in text and "Sonraki deneme 12:30 UTC" in text
+    assert "COINGECKO_DEMO_API_KEY" in text
     assert "COINGECKO_DEMO_API_KEY" not in aw.render(None, now=NOW, error=error, keyed=True)
-    assert "İlk tarama sürüyor" in aw.render(None, now=NOW)
     assert "CoinGecko anahtarı yok" in aw.status_line(None, now=NOW, enabled=True, error=error, keyed=False)
     assert "anahtarı yok" not in aw.status_line(None, now=NOW, enabled=True, error=None, keyed=True)
+    assert aw.status_line(None, now=NOW, enabled=False, error=None) == "Kapı bekçisi: kapalı"
+
+
+def test_status_line_and_freshness(tmp_path):
+    watch, _, _ = _watch(tmp_path)
+    snap = watch.refresh(NOW)
+    line = aw.status_line(snap, now=NOW + 3600, enabled=True, error=None)
+    assert line.startswith("Kapı bekçisi: 5 coin") and "1 sa önce" in line and "anahtarı yok" in line
+    assert aw.fresh(snap, now=NOW + DAY, max_age=3 * DAY) and not aw.fresh(snap, now=NOW + 4 * DAY, max_age=3 * DAY)
+    assert not aw.fresh(None, now=NOW, max_age=DAY) and not aw.fresh({"generated_at": "x"}, now=NOW, max_age=DAY)

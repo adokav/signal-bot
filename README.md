@@ -9,10 +9,9 @@ Signal Bot bir araştırma botudur. Dört menüsü vardır; hiçbiri emir vermez
    sezonu payı), MEXC vadeli fitil dipleri ve likidasyonu onların %20 altında tutan kaldıraç sınırı
    (≤ 2×), 90 günlük funding, OI/piyasa değeri ve perp/spot, 10 haftalık kanal; eksik koşullar
    adıyla yazılır. Bot listeyi seçmez. `docs/POSITION_LONG.md` §13–§14.
-1. **Altcoin izleme** (`/altcoin`) — ilk 150 altcoinin haftalık temel taraması: arz, DefiLlama
-   ücret ve geliri, hack ve kontrat yetkileri, likidite. Ön-kayıtlı ileriye dönük kayıt.
-   `docs/ALTCOIN_WATCH.md`. Daraltılacak: tarama kalkar, kontroller yalnız kayıt coinlerinde
-   çalışır (aşağıdaki yön notu).
+1. **Kapı bekçisi** (`/altcoin`, `/altcoin <sembol>`) — aynı listenin günlük kapı kontrolü: arz,
+   DefiLlama ücreti, hack ve kontrat yetkileri, 30 günlük spot hacim. Kapılar yalnız düşürür: ❌,
+   `/long`'daki sinyali keser. `docs/ALTCOIN_WATCH.md`.
 2. **Yeni coinler ve kontrat kontrolü** (`/new`, `/check <adres>`) — CoinMarketCap'in yeni
    coinleri ve istenen herhangi bir kontrat için dolandırıcılık taraması (honeypot, yetkiler,
    cüzdan yoğunlaşması, havuz kilidi). `docs/NEW_COINS.md`.

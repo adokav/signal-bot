@@ -1,27 +1,28 @@
-"""Altcoin watch: a long-horizon fundamental screen of the largest altcoins (docs/ALTCOIN_WATCH.md).
+"""Gate guard for the register's coins: supply, activity, security and liquidity, checked daily.
 
-The design is the synthesis of two selection models the user supplied
-(2026-10-16). Both models scored supply pressure, value accrual, usage and
-valuation with hand-picked weights. This module keeps what can be measured
-from free, reproducible data and drops what cannot:
+v2 (2026-10-23). The user's v3.2 report selected the coins; the list lives in
+``research/register`` (``acce_unified.register``). This module no longer
+screens a 150-coin universe, ranks anything or keeps a forward record. It
+runs the mechanical gates the report's thesis-invalidation rules need
+(docs/POSITION_LONG.md §5.1) on the register's coins only:
 
-- hard gates first (supply not yet in circulation, recent hacks and contract
-  powers, liquidity, measurable economic activity);
-- then three measures that do not repeat each other, ranked with equal
-  weight: net holder yield (holder revenue minus dilution), valuation (FDV
-  over revenue) and usage momentum (recent fees against the year's average);
-- the ATH arithmetic of both models as information, never as a score.
+- supply: minted-but-not-circulating share (information: the unlock schedule
+  is not in free data, so a large share is REVIEW, never a verdict);
+- activity: DefiLlama fees in the last 30 days (altcoins only; meme coins
+  have no revenue gate in the report);
+- security: DefiLlama hacks (net of returned funds) and the contract's powers
+  on the coin's primary chain (GoPlus / RugCheck);
+- liquidity: 30-day median daily spot volume on CoinGecko against the
+  report's 10 M$ gate.
 
-Fail closed: missing, unverifiable or unmapped data never passes a gate. It
-leaves the coin "İNCELEME GEREKLİ", and a missing measure ranks last. Names
-and symbols are untrusted external text: they are escaped for display and
-never interpreted. Every lookup error carries its type only, never a URL,
-header or provider message.
+The gates only demote. A ❌ reaches ``/long`` as a thesis-invalidation block;
+a ❔ is information (the report evaluated those fields by hand). Missing or
+failed data is REVIEW, never PASS. No order authority anywhere
+(``can_authorize_trade`` is always False).
 
-The ranking is not evidence: the weights are not learned from data and no
-accuracy has been measured. A pre-registered forward record (the ledger)
-measures it. Research only; no order authority (``can_authorize_trade`` is
-False).
+v1's pre-registered forward test of the 150-coin ranking (trial
+``b6e0fec86714efc2``) is SUPERSEDED by this change: its universe, ranking and
+outcome rules no longer run; its ledger records stay; no result was read.
 """
 
 from __future__ import annotations
@@ -34,8 +35,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
-from .cex import is_stable_or_synthetic
-
+from . import register as rg
+from .text import esc
 
 COINGECKO_URL = "https://api.coingecko.com/api/v3"
 COINGECKO_PRO_URL = "https://pro-api.coingecko.com/api/v3"
@@ -43,44 +44,29 @@ LLAMA_URL = "https://api.llama.fi"
 
 HOUR = 3_600
 DAY = 86_400
-UNIVERSE_SIZE = 150               # altcoins by market cap; BTC is the benchmark, not a member
-MARKET_PAGES = 3                  # 250 rows each, until the universe is full
-# CoinGecko categories that are claims on another asset, not ordinary crypto assets.
-EXCLUDED_CATEGORIES = ("stablecoins", "wrapped-tokens", "liquid-staking-tokens", "liquid-restaking-tokens",
-                       "bridged-tokens", "tokenized-gold", "tokenized-products", "synthetic-dollar")
 
-# Gates (rules of thumb from the two models; not learned from data)
+# Gates (the report's thresholds; not learned from data)
 LOCKED_MAX = 0.05                 # minted but not circulating, as a share of circulating supply
 SUPPLY_TOLERANCE = 0.005          # total below circulating by more than this is inconsistent data
-VOLUME_MIN_USD = 10_000_000.0     # 30-day median daily volume
+VOLUME_MIN_USD = 10_000_000.0     # 30-day median daily spot volume (report G1 / M3)
 VOLUME_MIN_DAYS = 20              # distinct complete days among the last 31
 VOLUME_MAX_STALE_DAYS = 3         # the newest complete day must be this recent
 HACK_MIN_USD = 1_000_000.0        # stolen minus returned
 HACK_FAIL_DAYS = 180
 HACK_WARN_DAYS = 730
-MAX_DEEP_CHECKS = 80              # coins that reach the per-coin look-ups in one refresh
-# Measures
-DILUTION_JUMP = 0.15              # a one-day move in implied supply this large is not trusted
-CHART_MIN_DAYS = 330
-CHART_MIN_POINTS = 300
-CHART_EDGE_POINTS = 7
-# Schedule and forward record
-REFRESH_SECONDS = 7 * DAY
+# Schedule
+REFRESH_SECONDS = DAY             # §5.1: the hack check is daily; the other gates ride along (22 coins)
 RETRY_DELAYS = (30 * 60, HOUR, 2 * HOUR, 4 * HOUR, 6 * HOUR)   # after a failed refresh: 30 min, then doubling
 MAX_RETRY_WAIT = 600              # longest Retry-After honoured within one request
-OUTCOME_DAYS = (182, 365, 730)
-OUTCOME_TOLERANCE_SECONDS = 2 * DAY
-SCHEMA = "altcoin-watch/v1"
-SCHEMA_TAG = "v1"
+SCHEMA = "altcoin-watch/v2"
+SUPERSEDED_TRIAL = "b6e0fec86714efc2"   # v1 forward test of the 150-coin ranking; closed unread (docs/ALTCOIN_WATCH.md)
 
-PASS, WARN, FAIL, REVIEW, SKIP = "PASS", "WARN", "FAIL", "REVIEW", "SKIP"
-ICON = {PASS: "✅", WARN: "⚠️", FAIL: "❌", REVIEW: "❔", SKIP: "·"}
+PASS, WARN, FAIL, REVIEW, SKIP, NA = "PASS", "WARN", "FAIL", "REVIEW", "SKIP", "NA"
+ICON = {PASS: "✅", WARN: "⚠️", FAIL: "❌", REVIEW: "❔", SKIP: "·", NA: "—"}
 PASSED, NEEDS_REVIEW, ELIMINATED = "KAPILARI_GECTI", "INCELEME_GEREKLI", "ELENDI"
 STATUS_LABEL = {PASSED: "KAPILARI GEÇTİ", NEEDS_REVIEW: "İNCELEME GEREKLİ", ELIMINATED: "ELENDİ"}
 SUPPLY, ACTIVITY, SECURITY, LIQUIDITY = "Arz", "Faaliyet", "Güvenlik", "Likidite"
 GATES = (SUPPLY, ACTIVITY, SECURITY, LIQUIDITY)
-MEASURES = ("net_yield", "valuation", "usage")
-HIGHER_IS_BETTER = {"net_yield": True, "valuation": False, "usage": True}
 
 # CoinGecko platform key -> the chain key acce_unified.new_coins uses for GoPlus / RugCheck
 PLATFORMS = (("ethereum", "ethereum"), ("binance-smart-chain", "bsc"), ("base", "base"),
@@ -92,88 +78,6 @@ EVM_FAIL = (("is_honeypot", "honeypot"), ("owner_change_balance", "sahip bakiyel
 EVM_WARN = (("is_mintable", "basım fonksiyonu var (yönetişim denetimi doğrulanamadı)"),
             ("is_proxy", "kod değiştirilebilir (proxy)"), ("transfer_pausable", "transfer durdurulabilir"),
             ("is_blacklisted", "kara liste yetkisi var"))
-
-# Forward evaluation, pre-registered before the module produced any record (research/trials/registry.jsonl).
-# A change to the universe, a gate, a measure, the ranking or the outcome rule needs a new SCHEMA and trial.
-TRIAL_FAMILY = "altcoin_watch_forward"
-TRIAL_DATASET = {"source": "CoinGecko markets, categories, coins/list platforms, 365-day market_chart and "
-                           "simple/price; DefiLlama lite/protocols2, v2/chains, overview/fees (dailyFees, "
-                           "dailyRevenue, dailyHoldersRevenue), hacks; GoPlus token_security (EVM), RugCheck "
-                           "report (Solana)",
-                 "forward_from": "2026-10-16", "kind": "live forward record (/data/altcoin_watch_ledger.jsonl)"}
-TRIAL = "b6e0fec86714efc2"
-
-
-def trial_params() -> dict[str, Any]:
-    return {
-        "schema": SCHEMA,
-        "universe": {"size": UNIVERSE_SIZE, "order": "CoinGecko market_cap_desc", "benchmark": "bitcoin",
-                     "excluded_categories": list(EXCLUDED_CATEGORIES),
-                     "excluded_other": "stable symbol rule; price within 3% of $1 with a 24h range under 0.5%"},
-        "gates": {
-            "supply": f"(total_supply - circulating) / circulating <= {LOCKED_MAX}; above it REVIEW (unlock "
-                      "schedules are not in free data); missing supply REVIEW; total below circulating by more "
-                      f"than {SUPPLY_TOLERANCE} REVIEW (inconsistent data)",
-            "activity": "DefiLlama fees mapped to the coin (chain gas token, protocol or parent) with 30-day "
-                        "fees > 0; zero fees FAIL; not mapped REVIEW",
-            "security": f"DefiLlama hack with stolen minus returned >= {HACK_MIN_USD:.0f} USD within "
-                        f"{HACK_FAIL_DAYS} days FAIL, within {HACK_WARN_DAYS} days WARN; a hack with an unknown "
-                        f"amount within {HACK_FAIL_DAYS} days or an unknown date REVIEW, an unknown amount within "
-                        f"{HACK_WARN_DAYS} days WARN (a chain's own coin counts only hacks whose target type is "
-                        "Chain); contract on the primary CoinGecko "
-                        "platform only (listed first): GoPlus honeypot, balance change, hidden owner, "
-                        "selfdestruct, take-back ownership FAIL, mint/proxy/pause/blacklist WARN, a missing FAIL "
-                        "field REVIEW, a missing WARN field WARN; Solana freeze authority FAIL, mint authority "
-                        "WARN; gas tokens and coins without "
-                        "a contract PASS; a primary platform on another chain REVIEW",
-            "liquidity": f"median daily CoinGecko volume over the complete UTC days of the last 31 (one point "
-                         f"per day) >= {VOLUME_MIN_USD:.0f} USD else FAIL; fewer than {VOLUME_MIN_DAYS} days, the "
-                         f"newest older than {VOLUME_MAX_STALE_DAYS} days, or no chart REVIEW",
-            "deep_checks": f"security contract check, liquidity and dilution only for coins passing supply and "
-                           f"activity without a hack FAIL, at most {MAX_DEEP_CHECKS} by market cap; the rest "
-                           "REVIEW",
-        },
-        "measures": {
-            "net_yield": "DefiLlama holders revenue 1y / market cap - max(0, 12-month dilution)",
-            "dilution": f"implied supply (market cap / price, 365-day daily chart, one point per UTC day): "
-                        f"median of the last "
-                        f"{CHART_EDGE_POINTS} points / median of the first {CHART_EDGE_POINTS} - 1; unknown "
-                        f"when the chart spans < {CHART_MIN_DAYS} days or < {CHART_MIN_POINTS} points or any "
-                        f"one-day move in implied supply exceeds {DILUTION_JUMP}",
-            "valuation": "FDV (market cap when FDV is missing) / DefiLlama revenue 1y; revenue <= 0 unknown",
-            "usage": "DefiLlama fees 30d / fees monthly average over 1y - 1; unknown when any contributing "
-                     "entry has no 1-year history",
-            "ranking": "coins passing every gate; percentile rank per measure (ties averaged), unknown measure "
-                       "ranks 0; composite = mean of the three; position by composite desc, then market cap "
-                       "desc, then CoinGecko id; thirds: top floor(n/3), bottom floor(n/3), rest middle",
-        },
-        "cohort": "one per UTC month: the first complete refresh of the month, every universe coin recorded, "
-                  "closed by a MONTH record",
-        "outcome_days": list(OUTCOME_DAYS),
-        "outcome_rule": "CoinGecko price and bitcoin price within 2 days after the horizon; past that MISSED, or "
-                        "NO_QUOTE if CoinGecko was asked inside the window and had no price; never backfilled",
-        "outcome_tolerance_seconds": OUTCOME_TOLERANCE_SECONDS,
-        "refresh_seconds": REFRESH_SECONDS,
-        "evaluation": {
-            "not_before": "2028-11-01",
-            "cohorts": "every cohort whose 365-day outcome is due by not_before (expected 2026-10..2027-10)",
-            "primary": "per cohort: mean 365-day return minus bitcoin's of the top third minus the same for "
-                       "the bottom third; statistic = mean over cohorts",
-            "ci": "95% moving block bootstrap over cohorts, block 3, 2000 draws, seed 0",
-            "no_quote": "a NO_QUOTE outcome counts as a -100% return",
-            "decisions": {"SEPARATES": "mean > 0 and the interval excludes 0",
-                          "NO_SEPARATION": "the interval includes 0",
-                          "REVERSED": "mean < 0 and the interval excludes 0",
-                          "INCOMPLETE_DATA": "fewer than 9 cohorts with at least 3 coins in each third, or more "
-                                             "than 20% of due 365-day outcomes MISSED"},
-            "secondary": ["passing coins (equal weight) minus the whole universe, against bitcoin",
-                          "eliminated coins minus the whole universe, against bitcoin",
-                          "the same at 182 and 730 days"],
-            "power": "13 monthly cohorts with overlapping 12-month windows are about one market cycle: low "
-                     "power; no result changes the module automatically",
-            "live_effect": "none automatic; any change goes through a separate PR and the user's approval",
-        },
-    }
 
 
 class AltcoinDataError(RuntimeError):
@@ -208,10 +112,6 @@ def _epoch(value: Any) -> int | None:
     except ValueError:
         return None
     return int(parsed.timestamp()) if parsed.tzinfo is not None else None
-
-
-def month_of(ts: int) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m")
 
 
 @dataclass(frozen=True)
@@ -251,13 +151,6 @@ def parse_market(row: Any) -> Coin | None:
         max_supply=_positive(row.get("max_supply")), ath=_positive(row.get("ath")),
         ath_date=_epoch(row.get("ath_date")), volume_24h=_finite(row.get("total_volume")),
     )
-
-
-def looks_pegged(row: Mapping[str, Any]) -> bool:
-    """A dollar-pegged token the categories missed: price near $1 and almost no 24-hour range."""
-
-    price, high, low = (_positive(row.get(k)) for k in ("current_price", "high_24h", "low_24h"))
-    return bool(price and high and low and 0.97 <= price <= 1.03 and high / low <= 1.005)
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +236,18 @@ class CoinGecko:
             raise AltcoinDataError("coingecko markets payload is not a list")
         return data
 
+    def markets_by_id(self, ids: Sequence[str]) -> list[Any]:
+        """Market rows for the given CoinGecko ids (the register's), 200 per request."""
+
+        rows: list[Any] = []
+        for k in range(0, len(ids), 200):
+            data = self._get("/coins/markets", {"vs_currency": "usd", "ids": ",".join(ids[k:k + 200]),
+                                                "per_page": 250, "page": 1, "sparkline": "false"})
+            if not isinstance(data, list):
+                raise AltcoinDataError("coingecko markets payload is not a list")
+            rows += data
+        return rows
+
     def platforms(self) -> dict[str, dict[str, str]]:
         data = self._get("/coins/list", {"include_platform": "true"})
         if not isinstance(data, list):
@@ -377,7 +282,7 @@ class CoinGecko:
 
 
 class DefiLlama:
-    """DefiLlama's free API: protocol and chain mapping, fees, revenue, holders revenue, hacks."""
+    """DefiLlama's free API: protocol and chain mapping, fees, hacks."""
 
     def __init__(self, *, timeout: int = 60, session: Any = None, sleep: Callable[[float], None] = time.sleep):
         self.http = _Http(timeout=timeout, session=session, sleep=sleep, retries=2, backoff=20.0)
@@ -529,7 +434,7 @@ def hacks_by_gecko(rows: Sequence[Any], index: LlamaIndex
 
 
 # ---------------------------------------------------------------------------
-# The screen (pure: data in, gates, measures and a status out)
+# The gates (pure: data in, gate findings and a status out)
 # ---------------------------------------------------------------------------
 
 
@@ -537,23 +442,21 @@ def hacks_by_gecko(rows: Sequence[Any], index: LlamaIndex
 class Card:
     coin: Coin
     gates: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
-    measures: dict[str, float | None] = field(default_factory=dict)
     info: dict[str, Any] = field(default_factory=dict)
-    composite: float | None = None
-    position: int | None = None
-    third: int | None = None
 
     def add(self, gate: str, status: str, text: str) -> None:
         self.gates.setdefault(gate, []).append((status, text))
 
     def gate(self, gate: str) -> str:
-        found = [s for s, _ in self.gates.get(gate, [])]
-        if not found:
-            return SKIP
+        """FAIL beats REVIEW beats WARN beats PASS; NA when the gate does not apply; SKIP when it never ran."""
+
+        statuses = [s for s, _ in self.gates.get(gate, [])]
+        if NA in statuses:
+            return NA
         for level in (FAIL, REVIEW, WARN, SKIP):
-            if level in found:
+            if level in statuses:
                 return level
-        return PASS
+        return PASS if statuses else SKIP
 
     @property
     def status(self) -> str:
@@ -566,6 +469,9 @@ class Card:
 
     def reasons(self, *levels: str) -> list[str]:
         return [text for g in GATES for status, text in self.gates.get(g, []) if status in levels]
+
+    def fails(self) -> dict[str, str]:
+        return {g: next(t for s, t in self.gates[g] if s == FAIL) for g in GATES if self.gate(g) == FAIL}
 
 
 def screen_supply(card: Card) -> None:
@@ -587,8 +493,10 @@ def screen_supply(card: Card) -> None:
         card.add(SUPPLY, REVIEW, f"dolaşım dışı arz %{locked * 100:.0f}; açılış takvimi ücretsiz veride yok")
 
 
-def screen_activity(card: Card, fees: Totals | None) -> None:
-    if fees is None:
+def screen_activity(card: Card, fees: Totals | None, *, kind: str = rg.ALTCOIN) -> None:
+    if kind == rg.MEME:
+        card.add(ACTIVITY, NA, "meme coin: gelir kapısı yok (rapor M1–M3)")
+    elif fees is None:
         card.add(ACTIVITY, REVIEW, "DefiLlama'da ücret verisi eşleşmedi")
     elif fees.d30 <= 0:
         card.add(ACTIVITY, FAIL, "son 30 günde ücret geliri yok")
@@ -698,186 +606,69 @@ def _series(chart: Mapping[str, Any], key: str) -> list[tuple[int, float]]:
     return [by_day[d] for d in sorted(by_day)]
 
 
-def screen_chart(card: Card, chart: Mapping[str, Any] | None, *, now: int) -> None:
-    """Liquidity gate, 12-month dilution and the ATH-day market cap from one 365-day daily chart."""
+def screen_liquidity(card: Card, chart: Mapping[str, Any] | None, *, now: int) -> None:
+    """The liquidity gate from one 365-day daily chart: 30-day median of complete UTC days."""
 
     if not isinstance(chart, Mapping):
         card.add(LIQUIDITY, REVIEW, "hacim verisi alınamadı")
-        card.measures["dilution"] = None
         return
     days = [(ts, v) for ts, v in _series(chart, "total_volumes")
             if now - 31 * DAY <= ts < now - DAY and v >= 0]          # complete days of the last month
     volumes = [v for _, v in days]
     if len(volumes) < VOLUME_MIN_DAYS or now - days[-1][0] > VOLUME_MAX_STALE_DAYS * DAY:
         card.add(LIQUIDITY, REVIEW, "30 günlük hacim verisi eksik ya da eski")
-    else:
-        median = statistics.median(volumes)
-        card.info["volume_median_30d"] = median
-        status = PASS if median >= VOLUME_MIN_USD else FAIL
-        card.add(LIQUIDITY, status, f"30 günlük medyan hacim ${median / 1e6:,.1f}M")
-    prices = dict(_series(chart, "prices"))
-    supply = [(ts, cap / prices[ts]) for ts, cap in _series(chart, "market_caps")
-              if cap > 0 and prices.get(ts, 0) > 0]
-    card.measures["dilution"] = _dilution(card, supply)
-    coin = card.coin
-    if coin.ath_date is not None and supply and supply[0][0] - DAY <= coin.ath_date and coin.ath:
-        nearest = min(supply, key=lambda p: abs(p[0] - coin.ath_date))
-        if abs(nearest[0] - coin.ath_date) <= 2 * DAY:
-            card.info["ath_market_cap"] = coin.ath * nearest[1]
-
-
-def _dilution(card: Card, supply: Sequence[tuple[int, float]]) -> float | None:
-    if len(supply) < CHART_MIN_POINTS or supply[-1][0] - supply[0][0] < CHART_MIN_DAYS * DAY:
-        card.info["dilution_note"] = "arz serisi bir yıldan kısa"
-        return None
-    for (_, a), (_, b) in zip(supply, supply[1:]):
-        if a > 0 and abs(b / a - 1) > DILUTION_JUMP:
-            card.info["dilution_note"] = f"arz serisinde tek günde %{abs(b / a - 1) * 100:.0f} sıçrama"
-            return None
-    start = statistics.median(v for _, v in supply[:CHART_EDGE_POINTS])
-    end = statistics.median(v for _, v in supply[-CHART_EDGE_POINTS:])
-    return end / start - 1 if start > 0 else None
-
-
-def compute_measures(card: Card, *, holders: Totals | None, revenue: Totals | None, fees: Totals | None) -> None:
-    coin = card.coin
-    dilution = card.measures.get("dilution")
-    holder_yield = holders.y1 / coin.market_cap if holders is not None and holders.y1_known else None
-    card.measures["holder_yield"] = holder_yield
-    card.measures["net_yield"] = (holder_yield - max(0.0, dilution)
-                                  if holder_yield is not None and dilution is not None else None)
-    value = coin.fdv or coin.market_cap
-    card.measures["valuation"] = (value / revenue.y1 if revenue is not None and revenue.y1_known
-                                  and revenue.y1 > 0 else None)
-    card.measures["usage"] = (fees.d30 / fees.monthly - 1 if fees is not None and fees.monthly_known
-                              and fees.monthly > 0 else None)
-
-
-def ath_info(card: Card) -> None:
-    """The ATH arithmetic both models asked for: information only, never a score."""
-
-    coin, info = card.coin, card.info
-    if not coin.ath:
         return
-    info["ath_multiple"] = coin.ath / coin.price
-    if coin.circulating:
-        info["ath_cap_today_supply"] = coin.ath * coin.circulating
-        dilution = card.measures.get("dilution")
-        if dilution is not None and dilution > -1:
-            info["ath_cap_24m_supply"] = coin.ath * coin.circulating * (1 + dilution) ** 2
-        if info.get("ath_market_cap"):
-            info["price_for_ath_cap"] = info["ath_market_cap"] / coin.circulating
-    supply = max(coin.total_supply or 0.0, coin.max_supply or 0.0)
-    if supply:
-        info["ath_fdv"] = coin.ath * supply
-
-
-def _percentiles(values: Sequence[float | None], higher_is_better: bool) -> list[float]:
-    known = sorted({v for v in values if v is not None})
-    if not known:
-        return [0.0 for _ in values]
-    ordered = sorted(v for v in values if v is not None)
-    if not higher_is_better:
-        ordered = ordered[::-1]
-    n = len(ordered)
-    out = []
-    for value in values:
-        if value is None:
-            out.append(0.0)                            # unknown ranks last: no optimistic assumption
-            continue
-        places = [i for i, v in enumerate(ordered) if v == value]
-        out.append((sum(places) / len(places)) / (n - 1) if n > 1 else 1.0)
-    return out
-
-
-def rank(cards: Sequence[Card]) -> None:
-    passed = [c for c in cards if c.status == PASSED]
-    if not passed:
-        return
-    scores = [0.0] * len(passed)
-    for measure in MEASURES:
-        for i, p in enumerate(_percentiles([c.measures.get(measure) for c in passed], HIGHER_IS_BETTER[measure])):
-            scores[i] += p / len(MEASURES)
-    for card, score in zip(passed, scores):
-        card.composite = round(score, 6)
-    ordered = sorted(passed, key=lambda c: (-(c.composite or 0.0), -c.coin.market_cap, c.coin.gecko_id))
-    third = len(ordered) // 3
-    for position, card in enumerate(ordered, 1):
-        card.position = position
-        card.third = None if third == 0 else 1 if position <= third else 3 if position > len(ordered) - third else 2
+    median = statistics.median(volumes)
+    card.info["volume_median_30d"] = median
+    card.add(LIQUIDITY, PASS if median >= VOLUME_MIN_USD else FAIL, f"30 günlük medyan hacim ${median / 1e6:,.1f}M")
 
 
 # ---------------------------------------------------------------------------
-# The watcher: refresh (universe -> gates -> deep checks -> ranking) and forward record
+# The guard: the register's coins -> gates, daily
 # ---------------------------------------------------------------------------
 
 
 class AltcoinWatch:
     def __init__(self, gecko: CoinGecko, llama: DefiLlama, security: Any, ledger: Any, *,
-                 universe_size: int = UNIVERSE_SIZE, sleep: Callable[[float], None] = time.sleep) -> None:
+                 register: rg.Register, sleep: Callable[[float], None] = time.sleep) -> None:
         self.gecko, self.llama, self.security, self.ledger = gecko, llama, security, ledger
-        self.universe_size, self.sleep = universe_size, sleep
+        self.register, self.sleep = register, sleep
 
-    def universe(self) -> list[Coin]:
-        excluded: set[str] = set()
-        for category in EXCLUDED_CATEGORIES:
-            excluded |= {r["id"] for r in self.gecko.markets(1, category=category)
-                         if isinstance(r, Mapping) and isinstance(r.get("id"), str)}
-        coins: list[Coin] = []
-        for page in range(1, MARKET_PAGES + 1):
-            for row in self.gecko.markets(page):
-                coin = parse_market(row)
-                if (coin is None or coin.gecko_id == "bitcoin" or coin.gecko_id in excluded
-                        or is_stable_or_synthetic(coin.symbol) or looks_pegged(row)):
-                    continue
-                if all(c.gecko_id != coin.gecko_id for c in coins):
-                    coins.append(coin)
-                if len(coins) >= self.universe_size:
-                    return coins
-        if len(coins) < self.universe_size * 0.9:
-            raise AltcoinDataError(f"coingecko universe too small ({len(coins)})")
-        return coins
+    def refresh(self, now: int, previous: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """One pass over the register's coins. Raises when a core source fails; a coin whose own look-ups
+        fail is REVIEW. Status changes against the previous snapshot are written to the ledger."""
 
-    def refresh(self, now: int) -> dict[str, Any]:
-        """One full screen. Raises when a core source fails; per-coin failures leave that coin REVIEW."""
-
-        coins = self.universe()
+        coins_by_id = {c.gecko_id: c for c in self.register.coins}
+        rows = {c.gecko_id: c for c in (parse_market(r) for r in self.gecko.markets_by_id(list(coins_by_id)))
+                if c is not None}
         index = build_llama_index(self.llama.lite(), self.llama.chains())
         fees = aggregate(self.llama.overview("dailyFees"), index)
-        revenue = aggregate(self.llama.overview("dailyRevenue"), index)
-        holders = aggregate(self.llama.overview("dailyHoldersRevenue"), index)
         hacks = hacks_by_gecko(self.llama.hacks(), index)
         platforms = self.gecko.platforms()
-        btc = self.gecko.prices(["bitcoin"]).get("bitcoin")
-        if btc is None:
-            raise AltcoinDataError("coingecko has no bitcoin price")
-        cards: list[Card] = []
-        deep = 0
-        for coin in coins:
+        cards: list[dict[str, Any]] = []
+        for entry in self.register.coins:
+            coin = rows.get(entry.gecko_id)
+            if coin is None:                                   # unpriced or missing on CoinGecko: everything unknown
+                cards.append(_unknown_card(entry, "CoinGecko piyasa verisi yok"))
+                continue
             card = Card(coin=coin)
             contract = contract_of(coin.gecko_id, platforms, index)
             screen_supply(card)
-            screen_activity(card, fees.get(coin.gecko_id))
+            screen_activity(card, fees.get(coin.gecko_id), kind=entry.kind)
             hacked = screen_hacks(card, hacks.get(coin.gecko_id, ()), now=now, native=contract[0] == "native")
-            if card.gate(SUPPLY) == PASS and card.gate(ACTIVITY) == PASS and not hacked:
-                if deep < MAX_DEEP_CHECKS:
-                    deep += 1
-                    self._deep(card, contract, now)
-                else:
-                    card.add(LIQUIDITY, REVIEW, "bu taramada sıraya alınamadı")
-            compute_measures(card, holders=holders.get(coin.gecko_id), revenue=revenue.get(coin.gecko_id),
-                             fees=fees.get(coin.gecko_id))
-            ath_info(card)
-            cards.append(card)
-        rank(cards)
-        counts = {s: sum(1 for c in cards if c.status == s) for s in (PASSED, NEEDS_REVIEW, ELIMINATED)}
-        snapshot = {"generated_at": now, "schema": SCHEMA, "trial": TRIAL, "universe": len(cards),
-                    "counts": counts, "btc_price": btc, "coingecko_keyed": self.gecko.keyed,
-                    "cards": [card_payload(c) for c in cards], "can_authorize_trade": False}
-        self._record_cohort(snapshot, now)
+            if not hacked:
+                self._contract(card, contract)
+            self._liquidity(card, now)
+            card.info["contract"] = contract[0] if contract[0] != "token" else f"token:{contract[1]}"
+            cards.append(card_payload(card, entry))
+        counts = {s: sum(1 for c in cards if c["status"] == s) for s in (PASSED, NEEDS_REVIEW, ELIMINATED)}
+        snapshot = {"generated_at": now, "schema": SCHEMA, "register": self.register.summary(),
+                    "superseded_trial": SUPERSEDED_TRIAL, "counts": counts, "coingecko_keyed": self.gecko.keyed,
+                    "cards": cards, "can_authorize_trade": False}
+        self._record_changes(snapshot, previous)
         return snapshot
 
-    def _deep(self, card: Card, contract: tuple[str, str | None, str | None], now: int) -> None:
+    def _contract(self, card: Card, contract: tuple[str, str | None, str | None]) -> None:
         kind, chain, address = contract
         payload, error = None, False
         if kind == "token" and chain and address:
@@ -888,159 +679,102 @@ class AltcoinWatch:
                 error = True
             self.sleep(1.0)
         screen_contract(card, kind, chain, payload, error=error)
+
+    def _liquidity(self, card: Card, now: int) -> None:
         try:
             chart: Mapping[str, Any] | None = self.gecko.chart(card.coin.gecko_id)
         except AltcoinDataError:
             chart = None
-        screen_chart(card, chart, now=now)
+        screen_liquidity(card, chart, now=now)
 
-    def _record_cohort(self, snapshot: Mapping[str, Any], now: int) -> bool:
-        """The month's cohort: the first complete refresh of each UTC month, closed by a MONTH record."""
+    def _record_changes(self, snapshot: Mapping[str, Any], previous: Mapping[str, Any] | None) -> int:
+        """A GATE event when a coin's status or its set of ❌ gates differs from the previous snapshot
+        (the first snapshot records every coin once). Append-only; ids carry the day."""
 
-        month = month_of(now)
-        if f"MONTH:{SCHEMA_TAG}:{month}" in self.ledger.ids():
-            return False
-        for c in snapshot["cards"]:
-            self.ledger.append({
-                "id": f"WATCH:{SCHEMA_TAG}:{month}:{now}:{c['id']}", "event": "WATCH", "month": month,
-                "refresh_at": now, "gecko_id": c["id"], "symbol": c["symbol"], "status": c["status"],
-                "gates": {g: v["status"] for g, v in c["gates"].items()}, "measures": c["measures"],
-                "composite": c["composite"], "position": c["position"], "third": c["third"], "price": c["price"],
-                "market_cap": c["market_cap"], "schema": SCHEMA, "trial": TRIAL, "can_authorize_trade": False})
-        self.ledger.append({"id": f"MONTH:{SCHEMA_TAG}:{month}", "event": "MONTH", "month": month, "refresh_at": now,
-                            "coins": len(snapshot["cards"]), "counts": snapshot["counts"],
-                            "btc_price": snapshot["btc_price"], "schema": SCHEMA, "trial": TRIAL,
-                            "can_authorize_trade": False})
-        return True
-
-    def record_outcomes(self, now: int) -> int:
-        """Price and bitcoin's price 182, 365 and 730 days after each cohort, within 2 days of the horizon.
-
-        A horizon is never filled with a later price: past its tolerance it is
-        MISSED, or NO_QUOTE when CoinGecko was asked inside the window and had
-        no price (a QUOTE_GAP record proves the attempt).
-        """
-
-        records = self.ledger.records()
-        months = {r["month"]: r for r in records if r.get("event") == "MONTH" and r.get("schema") == SCHEMA}
-        done = {(r["month"], r["gecko_id"], r["days"]) for r in records
-                if r.get("event") == "OUTCOME" and r.get("schema") == SCHEMA}
-        gaps = {(r["month"], r["gecko_id"], r["days"]) for r in records
-                if r.get("event") == "QUOTE_GAP" and r.get("schema") == SCHEMA}
-        watch = [r for r in records if r.get("event") == "WATCH" and r.get("schema") == SCHEMA
-                 and r.get("month") in months and r.get("refresh_at") == months[r["month"]]["refresh_at"]]
-        due = [(r, d) for r in watch for d in OUTCOME_DAYS
-               if (r["month"], r["gecko_id"], d) not in done and now >= int(r["refresh_at"]) + d * DAY]
-        if not due:
-            return 0
-        open_ids = sorted({r["gecko_id"] for r, d in due
-                           if now - (int(r["refresh_at"]) + d * DAY) <= OUTCOME_TOLERANCE_SECONDS})
-        prices = self.gecko.prices(open_ids + ["bitcoin"]) if open_ids else {}
-        btc = prices.get("bitcoin")
-        recorded = 0
-        for r, days in due:
-            key = (r["month"], r["gecko_id"], days)
-            horizon = int(r["refresh_at"]) + days * DAY
-            late = now - horizon
-            price = prices.get(r["gecko_id"])
-            if late <= OUTCOME_TOLERANCE_SECONDS:
-                if price is None or btc is None:
-                    self.ledger.append({"id": f"QUOTE_GAP:{SCHEMA_TAG}:{r['month']}:{r['gecko_id']}:{days}",
-                                        "event": "QUOTE_GAP", "month": r["month"], "gecko_id": r["gecko_id"],
-                                        "days": days, "at": now, "schema": SCHEMA, "trial": TRIAL,
-                                        "can_authorize_trade": False})
-                    continue                           # ask again until the window closes
-                status = "OK"
-            else:
-                status, price = ("NO_QUOTE" if key in gaps else "MISSED"), None
-            start_btc = months[r["month"]].get("btc_price")
-            recorded += 1
-            self.ledger.append({
-                "id": f"OUTCOME:{SCHEMA_TAG}:{r['month']}:{r['gecko_id']}:{days}", "event": "OUTCOME",
-                "month": r["month"], "gecko_id": r["gecko_id"], "days": days, "at": now, "horizon_at": horizon,
-                "late_hours": round(late / HOUR, 1), "status": status, "price": price,
-                "btc_price": btc if status == "OK" else None,
-                "return_pct": (price / r["price"] - 1) * 100 if status == "OK" and r.get("price") else None,
-                "btc_return_pct": (btc / start_btc - 1) * 100 if status == "OK" and btc and start_btc else None,
-                "status_at_cohort": r.get("status"), "third_at_cohort": r.get("third"), "schema": SCHEMA,
-                "trial": TRIAL, "can_authorize_trade": False})
-        return recorded
+        before = {c["symbol"]: c for c in (previous or {}).get("cards") or [] if isinstance(c, Mapping)}
+        day = datetime.fromtimestamp(int(snapshot["generated_at"]), tz=timezone.utc).strftime("%Y-%m-%d")
+        written = 0
+        for card in snapshot["cards"]:
+            old = before.get(card["symbol"])
+            if old is not None and old.get("status") == card["status"] and old.get("fails") == card["fails"]:
+                continue
+            event = {"id": f"GATE:{SCHEMA}:{day}:{card['symbol']}", "event": "GATE", "day": day,
+                     "at": snapshot["generated_at"], "symbol": card["symbol"], "gecko_id": card["id"],
+                     "status": card["status"], "fails": card["fails"],
+                     "gates": {g: v["status"] for g, v in card["gates"].items()},
+                     "previous_status": old.get("status") if old else None,
+                     "register_sha256": snapshot["register"]["sha256"], "schema": SCHEMA,
+                     "can_authorize_trade": False}
+            if self.ledger.append(event):
+                written += 1
+        return written
 
 
-def card_payload(card: Card) -> dict[str, Any]:
+def _unknown_card(entry: rg.Coin, reason: str) -> dict[str, Any]:
+    return {"id": entry.gecko_id, "symbol": entry.symbol, "name": entry.name, "kind": entry.kind,
+            "basket": entry.basket, "basket_label": entry.basket_label, "rank": entry.rank,
+            "price": None, "market_cap": None, "fdv": None, "status": NEEDS_REVIEW, "fails": {},
+            "gates": {g: {"status": REVIEW, "notes": [reason]} for g in GATES}, "info": {}}
+
+
+def card_payload(card: Card, entry: rg.Coin) -> dict[str, Any]:
     coin = card.coin
 
     def rounded(value: Any) -> Any:
         return round(value, 6) if isinstance(value, float) else value
 
     return {
-        "id": coin.gecko_id, "symbol": coin.symbol, "name": coin.name, "rank": coin.rank, "price": coin.price,
-        "market_cap": coin.market_cap, "fdv": coin.fdv, "ath": coin.ath, "ath_date": coin.ath_date,
-        "status": card.status, "composite": card.composite, "position": card.position, "third": card.third,
+        "id": coin.gecko_id, "symbol": entry.symbol, "name": entry.name, "kind": entry.kind, "basket": entry.basket,
+        "basket_label": entry.basket_label, "rank": entry.rank, "price": coin.price, "market_cap": coin.market_cap,
+        "fdv": coin.fdv, "status": card.status, "fails": card.fails(),
         "gates": {g: {"status": card.gate(g), "notes": [t for _, t in card.gates.get(g, [])][:3]} for g in GATES},
-        "measures": {k: rounded(v) for k, v in card.measures.items()},
         "info": {k: rounded(v) for k, v in card.info.items()},
     }
+
+
+def gates_of(snapshot: Mapping[str, Any] | None) -> dict[str, dict[str, Any]] | None:
+    """What ``/long`` reads: per symbol the status, the ❌ gates with their reasons and the check time.
+    None when there is no snapshot (the long watch then treats the gates as unknown)."""
+
+    if not snapshot or not isinstance(snapshot.get("cards"), list):
+        return None
+    at = int(snapshot.get("generated_at") or 0)
+    out: dict[str, dict[str, Any]] = {}
+    for card in snapshot["cards"]:
+        if isinstance(card, Mapping) and isinstance(card.get("symbol"), str):
+            out[card["symbol"].upper()] = {"status": card.get("status"), "fails": dict(card.get("fails") or {}),
+                                           "at": at}
+    return out
+
+
+def next_attempt(failures: int, failed_at: int) -> int:
+    """When to retry after the n-th consecutive failed refresh: 30 min, then doubling up to 6 hours."""
+
+    return failed_at + RETRY_DELAYS[min(max(failures, 1), len(RETRY_DELAYS)) - 1]
+
+
+def explain(error: str | None, *, keyed: bool) -> str:
+    if error and "429" in error and not keyed:
+        return ("CoinGecko hız sınırı: anahtarsız genel API paylaşılan IP'de sık sık 429 verir. "
+                "COINGECKO_DEMO_API_KEY (ücretsiz Demo anahtarı) eklenince sınır ayrı ve tarama hızlı olur.")
+    return ""
 
 
 # ---------------------------------------------------------------------------
 # Telegram view (HTML; every external value escaped)
 # ---------------------------------------------------------------------------
 
-DISCLAIMER = ("Uzun vadeli araştırma listesidir. Sıralama kanıtlanmadı: ağırlıklar veriden öğrenilmedi ve "
-              "isabeti ileriye dönük kayıtla ölçülüyor. Alım önerisi değildir.")
-
-
-def _pct(value: Any, digits: int = 1) -> str:
-    number = _finite(value)
-    return "?" if number is None else f"{number * 100:+.{digits}f}%"
-
-
-def _usd(value: Any) -> str:
-    amount = _finite(value)
-    if amount is None:
-        return "?"
-    for threshold, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
-        if abs(amount) >= threshold:
-            return f"${amount / threshold:.1f}{suffix}"
-    return f"${amount:,.0f}"
-
-
-def _multiple(value: Any) -> str:
-    number = _finite(value)
-    if number is None:
-        return "?"
-    return f"{number:.1f}x" if abs(number) < 100 else f"{number:,.0f}x"
-
-
-def _share(value: Any) -> str:
-    number = _finite(value)
-    return "?" if number is None else f"%{number * 100:.1f}"
+DISCLAIMER = ("Kapılar yalnız düşürür: ❌ /long'daki dilim sinyalini keser (tez geçersizliği); ❔ bilgidir, rapor o "
+              "alanları elle değerlendirdi. Liste rapordan gelir; bot seçmez ve yükseltmez.")
 
 
 def _age(seconds: int) -> str:
+    seconds = max(0, int(seconds))
     if seconds < HOUR:
         return f"{seconds // 60} dk"
-    if seconds < 2 * DAY:
-        return f"{seconds // HOUR} saat"
+    if seconds < DAY:
+        return f"{seconds // HOUR} sa"
     return f"{seconds // DAY} gün"
-
-
-def next_attempt(failures: int, now: int) -> int:
-    """When to try a failed refresh again: 30 minutes, then doubling up to 6 hours."""
-
-    return now + RETRY_DELAYS[min(max(failures, 1), len(RETRY_DELAYS)) - 1]
-
-
-def explain(error: str | None, *, keyed: bool) -> str:
-    """A plain reason for a refresh error the user can act on; empty when there is nothing to add."""
-
-    if error and "coingecko http 429" in error and not keyed:
-        return ("CoinGecko hız sınırı: anahtarsız genel API, Render'ın paylaşılan IP adresinde sık kısıtlanıyor. "
-                "Çözüm: Render paneline ücretsiz COINGECKO_DEMO_API_KEY ekleyin.")
-    if error and "coingecko http 429" in error:
-        return "CoinGecko hız sınırı: kısa süre sonra yeniden denenecek."
-    return ""
 
 
 def _retry_text(retry_at: int | None, now: int) -> str:
@@ -1049,81 +783,73 @@ def _retry_text(retry_at: int | None, now: int) -> str:
     return f" Sonraki deneme {datetime.fromtimestamp(retry_at, tz=timezone.utc):%H:%M} UTC."
 
 
-def render(snapshot: Mapping[str, Any] | None, *, now: int, error: str | None = None, enabled: bool = True,
-           max_age: int = 2 * REFRESH_SECONDS, retry_at: int | None = None, keyed: bool = True) -> str:
-    from .text import esc
+def _share(value: Any) -> str:
+    number = _finite(value)
+    return "?" if number is None else f"%{number * 100:,.1f}"
 
-    head = "🔭 <b>ALTCOIN İZLEME · uzun vade (24–36 ay) · araştırma</b>"
+
+def _usd(value: Any) -> str:
+    amount = _finite(value)
+    if amount is None:
+        return "?"
+    for unit, div in (("Mr", 1e9), ("M", 1e6), ("K", 1e3)):
+        if abs(amount) >= div:
+            return f"${amount / div:,.1f}{unit}"
+    return f"${amount:,.0f}"
+
+
+def _icons(card: Mapping[str, Any]) -> str:
+    return "".join(ICON.get(str(((card.get("gates") or {}).get(g) or {}).get("status")), "·") for g in GATES)
+
+
+def render(snapshot: Mapping[str, Any] | None, *, now: int, error: str | None = None, enabled: bool = True,
+           max_age: int = 3 * REFRESH_SECONDS, retry_at: int | None = None, keyed: bool = True) -> str:
+    head = "🛡 <b>KAPI BEKÇİSİ · v3.2 listesi · günlük kontrol</b>"
     if not enabled:
         return head + "\n" + esc("Modül kapalı (ALTCOIN_WATCH_ENABLED=0).")
     if not snapshot:
         if not error:
-            return head + "\n" + esc("İlk tarama sürüyor (anahtarla birkaç dakika, anahtarsız 20 dakikaya kadar). "
-                                     "Liste boş demek değildir.")
-        lines = [head, esc(f"İlk tarama yapılamadı. Hata: {error}.{_retry_text(retry_at, now)}")]
+            return head + "\n" + esc("İlk kontrol sürüyor (anahtarla birkaç dakika, anahtarsız 10 dakikaya kadar).")
+        lines = [head, esc(f"İlk kontrol yapılamadı. Hata: {error}.{_retry_text(retry_at, now)}")]
         if explain(error, keyed=keyed):
             lines.append(esc(explain(error, keyed=keyed)))
-        lines.append(esc("Liste boş demek değildir."))
         return "\n".join(lines)
     cards = [c for c in snapshot.get("cards") or [] if isinstance(c, Mapping)]
     counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), Mapping) else {}
+    reg = snapshot.get("register") if isinstance(snapshot.get("register"), Mapping) else {}
     age = max(0, now - int(snapshot.get("generated_at") or 0))
-    lines = [head, esc(f"İlk {snapshot.get('universe', len(cards))} altcoin (BTC, stabil, sarılı ve tokenize "
-                       f"varlıklar hariç) · tarama {_age(age)} önce"),
-             esc(f"✅ kapıları geçen {counts.get(PASSED, 0)} · ❔ inceleme gerekli {counts.get(NEEDS_REVIEW, 0)} · "
-                 f"❌ elenen {counts.get(ELIMINATED, 0)}")]
+    lines = [head, esc(f"Kayıt {reg.get('version')} ({reg.get('report_date')}) · {len(cards)} coin · kontrol "
+                       f"{_age(age)} önce · ✅ {counts.get(PASSED, 0)} ❔ {counts.get(NEEDS_REVIEW, 0)} "
+                       f"❌ {counts.get(ELIMINATED, 0)}")]
     if age > max_age or error:
-        lines.append(esc(f"⚠️ Son tarama gösteriliyor; yenileme yapılamadı. Hata: {error or 'yok'}."
+        lines.append(esc(f"⚠️ Son kontrol gösteriliyor; yenileme yapılamadı. Hata: {error or 'yok'}."
                          f"{_retry_text(retry_at, now)}"))
         if explain(error, keyed=keyed):
             lines.append(esc(explain(error, keyed=keyed)))
-    passed = sorted((c for c in cards if c.get("status") == PASSED), key=lambda c: c.get("position") or 10**6)
-    lines += ["", "✅ <b>KAPILARI GEÇENLER</b> <i>(doğrulanmamış sıralama)</i>"]
-    if passed:
-        rows = [f"{'#':>2} {'Coin':<7}{'NetGetiri':>10}{'FDV/Gelir':>10}{'Kullanım':>9}{'ATH':>8}"]
-        for c in passed[:10]:
-            m, info = c.get("measures") or {}, c.get("info") or {}
-            rows.append(f"{c.get('position') or '-':>2} {str(c.get('symbol'))[:6]:<7}{_pct(m.get('net_yield')):>10}"
-                        f"{_multiple(m.get('valuation')):>10}{_pct(m.get('usage'), 0):>9}"
-                        f"{_multiple(info.get('ath_multiple')):>8}")
-        lines.append("<pre>" + esc("\n".join(rows)) + "</pre>")
-        lines.append(esc("NetGetiri: token sahibine giden gelir − seyrelme (yıllık). FDV/Gelir: düşük daha ucuz. "
-                         "Kullanım: son 30 günün ücreti, yıllık aylık ortalamaya göre. ATH: zirveye kaç kat."))
-    else:
-        lines.append(esc("Bu taramada yok."))
-    review = [c for c in cards if c.get("status") == NEEDS_REVIEW]
-    lines += ["", f"❔ <b>{STATUS_LABEL[NEEDS_REVIEW]}</b> <i>(veri eksik ya da doğrulanamıyor; geçti sayılmaz)</i>"]
-    reasons: dict[str, int] = {}
-    for c in review:
+    for kind, title in ((rg.ALTCOIN, "Altcoinler"), (rg.MEME, "Meme coinler")):
+        rows = [f"{'Coin':<8}{'A F G L':<9}{'Sepet / ❌ nedeni'}"]
+        for c in [c for c in cards if c.get("kind") == kind]:
+            fails = c.get("fails") or {}
+            tail = ("❌ " + "; ".join(str(v) for v in fails.values())[:40]) if fails else str(c.get("basket_label"))[:22]
+            rows.append(f"{str(c.get('symbol'))[:7]:<8}{_icons(c):<9}{tail}")
+        lines += ["", f"<b>{title}</b>", "<pre>" + esc("\n".join(rows)) + "</pre>"]
+    review: dict[str, int] = {}
+    for c in cards:
         for g in GATES:
             info = (c.get("gates") or {}).get(g) or {}
             if info.get("status") == REVIEW:
-                # The only REVIEW note that carries a number is the supply overhang; coins are grouped by
-                # the threshold they crossed, not by their own figure, so the line reads as a rule.
                 key = re.sub(r"%\d+(\.\d+)?", f"%{LOCKED_MAX * 100:.0f}'in üzerinde", (info.get("notes") or ["?"])[-1])
-                reasons[key] = reasons.get(key, 0) + 1
-                break
-    for text, n in sorted(reasons.items(), key=lambda kv: -kv[1])[:4]:
-        lines.append(esc(f"• {n} coin: {text}"))
-    lines.append(esc("Örnek: " + ", ".join(str(c.get("symbol"))[:8] for c in review[:12]) if review else "Yok."))
-    eliminated = [c for c in cards if c.get("status") == ELIMINATED]
-    lines += ["", f"❌ <b>{STATUS_LABEL[ELIMINATED]}</b>"]
-    for c in eliminated[:6]:
-        fails = [n for g in GATES for n in ((c.get("gates") or {}).get(g) or {}).get("notes") or []
-                 if ((c.get("gates") or {}).get(g) or {}).get("status") == FAIL]
-        lines.append(f"• {esc(str(c.get('symbol'))[:10])}: {esc('; '.join(fails[:1])[:90])}")
-    if len(eliminated) > 6:
-        lines.append(esc(f"… ve {len(eliminated) - 6} coin daha"))
-    if not eliminated:
-        lines.append(esc("Yok."))
-    lines += ["", esc("Tek coin kartı: /altcoin <sembol>"), f"<i>{esc(DISCLAIMER)}</i>",
-              esc("Emir yetkisi yok, karar senin.")]
+                review[key] = review.get(key, 0) + 1
+    if review:
+        lines.append(esc("❔ " + " · ".join(f"{n} coin: {t}" for t, n in sorted(review.items(), key=lambda kv: -kv[1])[:4])))
+    lines += ["", esc("A arz · F faaliyet (meme'de yok) · G güvenlik (hack, kontrat) · L likidite (30 gün medyan ≥ 10 M$). "
+                      "Tek coin: /altcoin <sembol>"), f"<i>{esc(DISCLAIMER)}</i>", esc("Emir yetkisi yok, karar senin.")]
     text = "\n".join(lines)
     return text if len(text) <= 4000 else text[:3990] + "\n…"
 
 
 def find(snapshot: Mapping[str, Any] | None, query: str) -> list[Mapping[str, Any]]:
-    """Cards whose symbol or CoinGecko id equals the query (case-insensitive); symbols can collide."""
+    """Cards whose symbol or CoinGecko id equals the query (case-insensitive)."""
 
     q = query.strip().lower()
     return [c for c in (snapshot or {}).get("cards") or [] if isinstance(c, Mapping)
@@ -1131,56 +857,37 @@ def find(snapshot: Mapping[str, Any] | None, query: str) -> list[Mapping[str, An
 
 
 def render_card(card: Mapping[str, Any], *, now: int, generated_at: int | None = None) -> str:
-    from .text import _num, esc
+    from .text import _num
 
-    m, info = card.get("measures") or {}, card.get("info") or {}
+    info = card.get("info") or {}
     status = str(card.get("status"))
     icon = {PASSED: "✅", NEEDS_REVIEW: "❔", ELIMINATED: "❌"}.get(status, "❔")
-    position = f" · sıra {card['position']}" if card.get("position") else ""
-    lines = [f"🔭 <b>{esc(str(card.get('name'))[:28])} ({esc(str(card.get('symbol'))[:12])})</b> · "
-             f"{esc(str(card.get('id'))[:40])}",
-             f"{icon} <b>{STATUS_LABEL.get(status, status)}</b>{esc(position)}"]
+    lines = [f"🛡 <b>{esc(str(card.get('name'))[:28])} ({esc(str(card.get('symbol'))[:12])})</b> · "
+             f"{esc(str(card.get('basket_label')))}" + (f" · rapor sırası {card['rank']}" if card.get("rank") else ""),
+             f"{icon} <b>{STATUS_LABEL.get(status, status)}</b>"]
     rows = []
     for g in GATES:
         info_g = (card.get("gates") or {}).get(g) or {}
-        notes = info_g.get("notes") or ["değerlendirilmedi (önceki kapı)"]
+        notes = info_g.get("notes") or ["değerlendirilmedi"]
         rows.append(f"{g:<10}{ICON.get(str(info_g.get('status')), '·')} {notes[0][:80]}")
         rows += [f"{'':<12}{n[:80]}" for n in notes[1:3]]
     lines.append("<pre>" + esc("\n".join(rows)) + "</pre>")
-    measure_rows = [
-        f"Net getiri     {_pct(m.get('net_yield'))}  (sahip geliri {_pct(m.get('holder_yield'), 2)}, "
-        f"seyrelme {_pct(m.get('dilution'))})",
-        f"FDV / gelir    {_multiple(m.get('valuation'))}",
-        f"Kullanım       {_pct(m.get('usage'), 0)} (son 30 gün / yıllık ortalama)",
-    ]
-    if info.get("dilution_note"):
-        measure_rows.append(f"Seyrelme notu  {info['dilution_note']}")
+    extra = []
     if info.get("locked_share") is not None:
-        measure_rows.append(f"Dolaşım dışı   {_share(info.get('locked_share'))} (basılmış, dolaşımda değil)")
+        extra.append(f"Dolaşım dışı   {_share(info.get('locked_share'))} (basılmış, dolaşımda değil)")
     if info.get("unminted_share") is not None:
-        measure_rows.append(f"Basılmamış     {_share(info.get('unminted_share'))} (maksimum arza kadar)")
-    lines.append("<pre>" + esc("\n".join(measure_rows)) + "</pre>")
-    price, ath = card.get("price"), card.get("ath")
-    ath_rows = [f"Fiyat ${_num(price) if price else '?'} · ATH ${_num(ath) if ath else '?'}"
-                + (f" ({datetime.fromtimestamp(card['ath_date'], tz=timezone.utc):%Y-%m-%d})"
-                   if card.get("ath_date") else "")]
-    if info.get("ath_multiple") and info["ath_multiple"] > 1:
-        ath_rows.append(f"ATH'ye dönüş için %{(info['ath_multiple'] - 1) * 100:,.0f} artış gerekir")
-    elif info.get("ath_multiple"):
-        ath_rows.append("Fiyat ATH'de ya da üstünde")
-    ath_rows.append(f"ATH fiyatı bugünkü dolaşımla: {_usd(info.get('ath_cap_today_supply'))} piyasa değeri")
-    ath_rows.append(f"ATH fiyatı 24 ay sonraki tahmini arzla: {_usd(info.get('ath_cap_24m_supply'))} "
-                    "(son 12 ayın seyrelme hızıyla)")
-    ath_rows.append(f"ATH fiyatı tam seyreltilmiş arzla: {_usd(info.get('ath_fdv'))}")
-    if info.get("ath_market_cap"):
-        ath_rows.append(f"ATH günündeki piyasa değeri {_usd(info['ath_market_cap'])}; bugünkü arzla bu değere "
-                        f"denk fiyat ${_num(info.get('price_for_ath_cap'))}")
-    else:
-        ath_rows.append("ATH günündeki piyasa değeri bilinmiyor (ATH 365 günden eski; ücretsiz veride yok)")
-    lines += [esc(r) for r in ath_rows]
-    lines.append(esc(f"Piyasa değeri {_usd(card.get('market_cap'))} · FDV {_usd(card.get('fdv'))}"
-                     + (f" · tarama {_age(max(0, now - generated_at))} önce" if generated_at else "")))
-    lines += [esc("Elle bakılacaklar: ekip, ortaklıklar, yol haritası, yönetişim. Bot bunları puanlamaz."),
+        extra.append(f"Basılmamış     {_share(info.get('unminted_share'))} (maksimum arza kadar)")
+    if info.get("volume_median_30d") is not None:
+        extra.append(f"Spot hacim     {_usd(info.get('volume_median_30d'))} (30 gün medyan, CoinGecko)")
+    if info.get("contract"):
+        extra.append(f"Kontrat        {str(info['contract'])[:30]}")
+    price = card.get("price")
+    extra.append(f"Fiyat          ${_num(price) if price else '?'} · piyasa değeri {_usd(card.get('market_cap'))} · "
+                 f"FDV {_usd(card.get('fdv'))}")
+    lines.append("<pre>" + esc("\n".join(extra)) + "</pre>")
+    if generated_at:
+        lines.append(esc(f"Kontrol {_age(max(0, now - generated_at))} önce. Pozisyon tarafı: /long {card.get('symbol')}"))
+    lines += [esc("Elle bakılacaklar: ekip, ortaklıklar, yol haritası, yönetişim, kilit takvimi. Bot bunları okumaz."),
               f"<i>{esc(DISCLAIMER)}</i>", esc("Emir yetkisi yok, karar senin.")]
     text = "\n".join(lines)
     return text if len(text) <= 4000 else text[:3990] + "\n…"
@@ -1189,15 +896,16 @@ def render_card(card: Mapping[str, Any], *, now: int, generated_at: int | None =
 def status_line(snapshot: Mapping[str, Any] | None, *, now: int, enabled: bool, error: str | None,
                 keyed: bool | None = None) -> str:
     if not enabled:
-        return "Altcoin izleme: kapalı"
+        return "Kapı bekçisi: kapalı"
     keyed = bool(snapshot.get("coingecko_keyed")) if keyed is None and snapshot else keyed
     key = " · CoinGecko anahtarı yok (yavaş)" if keyed is False else ""
     if not snapshot:
-        return f"Altcoin izleme: henüz tarama yok{key}{' · hata ' + error if error else ''}"
+        return f"Kapı bekçisi: henüz kontrol yok{key}{' · hata ' + error if error else ''}"
     counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), Mapping) else {}
     age = max(0, now - int(snapshot.get("generated_at") or 0))
-    return (f"Altcoin izleme: ✅ {counts.get(PASSED, 0)} ❔ {counts.get(NEEDS_REVIEW, 0)} "
-            f"❌ {counts.get(ELIMINATED, 0)} · {_age(age)} önce{key}" + (f" · hata {error}" if error else ""))
+    return (f"Kapı bekçisi: {len(snapshot.get('cards') or [])} coin · ✅ {counts.get(PASSED, 0)} "
+            f"❔ {counts.get(NEEDS_REVIEW, 0)} ❌ {counts.get(ELIMINATED, 0)} · {_age(age)} önce{key}"
+            + (f" · hata {error}" if error else ""))
 
 
 def fresh(snapshot: Mapping[str, Any] | None, *, now: int, max_age: int) -> bool:
