@@ -24,7 +24,8 @@ Signal Bot bir araştırma botudur. Dört menüsü vardır; hiçbiri emir vermez
 > gelir ve depoda kayıtlıdır (`research/register/`; altcoin çekirdek UNI, PENDLE, AAVE,
 > RENDER + koşullu BNB, INJ; meme çekirdek PEPE, BONK, DOGE, WIF, MOODENG; izleme ve
 > havuzlar). Bot seçmez ve yükseltmez; bu coinler için rejim dilimi, vadeli fitil diplerine
-> göre stop/kaldıraç, 2×/4× kısmi satış ve tez geçersizliği çıkışları üretir. Tasarım `docs/POSITION_LONG.md`; kanıt durumu ve elenen
+> göre stop/kaldıraç, 2×/4× kısmi satış ve tez geçersizliği çıkışları üretir. Tek sayfalık özet:
+> `docs/DECISION_SUMMARY.md`. Tasarım `docs/POSITION_LONG.md`; kanıt durumu ve elenen
 > stratejiler `docs/EVOLUTION_ROADMAP.md`; silinen modüller `docs/DEAD_CODE_AUDIT.md`.
 
 ## Güvenlik sınırı

@@ -24,6 +24,7 @@ it reads as BİLİNMİYOR and the coin has no signal that week.
 from __future__ import annotations
 
 import math
+import re
 import statistics
 import time
 from dataclasses import dataclass
@@ -69,6 +70,9 @@ DERIVATIVE_MARKETS = ("Binance (Futures)", "Bybit (Futures)", "OKX (Futures)", "
                       "Hyperliquid (Futures)", "MEXC (Futures)", "KuCoin Futures", "HTX Futures")
 REGISTER_MAX_AGE_DAYS = 180        # an older report is stale: shown with a warning, no new slice (§3.5)
 GATES_MAX_AGE = 3 * DAY            # a gate check (altcoin_watch) older than this is unknown: no slice
+PREMIUM_DAYS = 90                  # perp premium over the index, mean of daily closes (information only)
+MIN_PREMIUM_DAYS = 60
+VIX_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS"   # keyless CSV; information only
 UNKNOWN = "BİLİNMİYOR"
 SLICE_1, SLICE_2, REDUCE, WAIT = "DİLİM 1", "DİLİM 2", "AZALT", "BEKLE"
 UP, DOWN = "YUKARI", "AŞAĞI"
@@ -276,6 +280,52 @@ def funding_90(settlements: Iterable[tuple[int, float]], *, now: int) -> dict[st
     return {"annual": statistics.fmean(rates) * SETTLEMENTS_PER_YEAR, "count": len(rates)}
 
 
+def premium_90(candles: Sequence[Candle], index_closes: Mapping[int, float], *, now: int) -> dict[str, Any]:
+    """Mean daily premium of the perp close over the index close in the last 90 days, in percent.
+
+    Information only: in a perpetual the sustained premium is paid as funding (FUND90 is the gate);
+    this is the instantaneous basis averaged. Unknown below MIN_PREMIUM_DAYS paired days."""
+
+    start = day_start(now) - PREMIUM_DAYS * DAY
+    pairs = [c.close / index_closes[c.day0] - 1 for c in candles
+             if c.day0 >= start and index_closes.get(c.day0, 0) > 0]
+    if len(pairs) < MIN_PREMIUM_DAYS:
+        return {"mean": None, "days": len(pairs)}
+    return {"mean": statistics.fmean(pairs) * 100, "days": len(pairs)}
+
+
+def parse_vix_csv(text: str) -> dict[str, Any]:
+    """FRED's VIXCLS CSV (observation_date,VIXCLS): the last dated numeric row. Missing days are '.'."""
+
+    last: dict[str, Any] | None = None
+    for line in text.splitlines():
+        parts = line.strip().split(",")
+        if len(parts) != 2 or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", parts[0]):
+            continue
+        value = _positive(parts[1])
+        if value is not None:
+            last = {"value": value, "date": parts[0]}
+    if last is None:
+        raise LongDataError("vix csv without a numeric row")
+    return last
+
+
+def fetch_vix(*, session: Any = None, timeout: int = 20) -> dict[str, Any]:
+    """The latest VIX close from FRED (keyless). Errors carry a type or status, never a URL."""
+
+    if session is None:
+        import requests
+
+        session = requests.Session()
+    try:
+        response = session.get(VIX_URL, timeout=timeout)
+    except Exception as exc:
+        raise LongDataError(f"vix transport {type(exc).__name__}") from None
+    if response.status_code != 200:
+        raise LongDataError(f"vix http {response.status_code}")
+    return parse_vix_csv(response.text)
+
+
 def leverage_buildup(*, oi_usd: float | None, market_cap: float | None, perp_volume: float | None,
                      spot_volume: float | None, thresholds: Mapping[str, float]) -> dict[str, Any]:
     """The report's trigger: OI/market cap > 20 % and perp/spot > 6. Unknown inputs give an unknown verdict."""
@@ -429,6 +479,27 @@ class MexcContract:
         payload = self._get(f"/kline/{symbol}", {"interval": "Day1", "start": start, "end": now})
         return parse_mexc_klines(payload, now=now)
 
+    def index_daily(self, symbol: str, *, now: int) -> dict[int, float]:
+        """Daily index-price closes (day0 -> close), closed days only, venue units."""
+
+        start = day_start(now) - (PREMIUM_DAYS + 10) * DAY
+        payload = self._get(f"/kline/index_price/{symbol}", {"interval": "Day1", "start": start, "end": now})
+        data = payload.get("data") if isinstance(payload, Mapping) else None
+        if not isinstance(data, Mapping) or not isinstance(data.get("time"), list) or not isinstance(data.get("close"), list):
+            raise LongDataError("mexc index kline payload malformed")
+        if len(data["time"]) != len(data["close"]):
+            raise LongDataError("mexc index kline columns differ in length")
+        today0 = day_start(now)
+        out: dict[int, float] = {}
+        for ts, close in zip(data["time"], data["close"]):
+            t, c = _finite(ts), _positive(close)
+            if t is None or c is None:
+                raise LongDataError("mexc index kline value malformed")
+            day0 = day_start(int(t))
+            if day0 + DAY <= today0:
+                out[day0] = c
+        return out
+
     def funding(self, symbol: str, *, since: int, pages: int = 6) -> list[tuple[int, float]]:
         out: list[tuple[int, float]] = []
         for page in range(1, pages + 1):
@@ -457,7 +528,8 @@ class MexcContract:
         if not isinstance(data, Mapping):
             raise LongDataError("mexc ticker payload malformed")
         return {"price": _positive(data.get("lastPrice")), "oi_contracts": _finite(data.get("holdVol")),
-                "volume_usdt_24h": _finite(data.get("amount24")), "funding_rate": _finite(data.get("fundingRate"))}
+                "volume_usdt_24h": _finite(data.get("amount24")), "funding_rate": _finite(data.get("fundingRate")),
+                "index_price": _positive(data.get("indexPrice"))}
 
     def detail(self, symbol: str) -> dict[str, float | None]:
         data = self._get("/detail", {"symbol": symbol}).get("data")
@@ -599,8 +671,9 @@ class LongWatch:
 
     def __init__(self, register: rg.Register, mexc: Any, gecko: Any, ledger: Any, *,
                  maintenance: float = MAINTENANCE_MARGIN, fund_max: float = FUND_MAX,
-                 loss_budget: Mapping[str, float] | None = None) -> None:
+                 loss_budget: Mapping[str, float] | None = None, vix: Callable[[], Mapping[str, Any]] | None = fetch_vix) -> None:
         self.register, self.mexc, self.gecko, self.ledger = register, mexc, gecko, ledger
+        self.vix = vix
         self.maintenance = max(0.0, float(maintenance))
         self.fund_max = float(fund_max)
         self.loss_budget = dict(loss_budget or LOSS_BUDGET)
@@ -633,6 +706,13 @@ class LongWatch:
                 errors.append("alt90: " + _safe(exc))
         result = regime(btc_d=week_value, btc_d_then=then, alt90=alt.get("share"))
         result["alt90_known"], result["alt90_universe"] = alt.get("known"), alt.get("universe")
+        result["vix"], result["vix_date"] = None, None
+        if self.vix is not None:                                   # information only: never a condition
+            try:
+                vix = self.vix()
+                result["vix"], result["vix_date"] = _round(vix.get("value"), 2), vix.get("date")
+            except Exception as exc:
+                result["vix_note"] = "VIX alınamadı: " + _safe(exc)
         return result, archive, errors
 
     # -- one coin -----------------------------------------------------------
@@ -653,6 +733,7 @@ class LongWatch:
         chan: dict[str, Any] = channel([])
         perp_price = None
         mult = coin.mexc_price_multiplier
+        candles: list[Candle] = []
         try:
             candles = self.mexc.daily(coin.mexc_symbol, now=now)
             if mult != 1:                                              # quote per coin, not per 1000 coins
@@ -664,6 +745,13 @@ class LongWatch:
             chan = channel(closes)
         except Exception as exc:
             card["errors"].append("mum: " + _safe(exc))
+        premium: dict[str, Any] = {"mean": None, "days": 0}
+        if candles:                                                    # information only: the premium over the index
+            try:
+                index = {d: v / mult for d, v in self.mexc.index_daily(coin.mexc_symbol, now=now).items()}
+                premium = premium_90(candles, index, now=now)
+            except Exception as exc:
+                card["notes"] = card.get("notes", []) + ["prim: " + _safe(exc)]
         maintenance = self.maintenance
         margin_known = False                                        # the rule needs the exchange's rate: max(rate, floor)
         contract_size = coin.mexc_contract_size
@@ -685,6 +773,8 @@ class LongWatch:
                 venue_oi_usd = ticker["oi_contracts"] * contract_size * perp_price * mult   # contracts quote the venue unit
             venue_volume = ticker.get("volume_usdt_24h")
             card["funding_now"] = _round(ticker.get("funding_rate"))
+            if ticker.get("price") and ticker.get("index_price"):
+                card["premium_now"] = _round(ticker["price"] / ticker["index_price"] - 1)
         except Exception as exc:
             card["errors"].append("ticker: " + _safe(exc))
         fund = {"annual": None, "count": 0}
@@ -719,6 +809,7 @@ class LongWatch:
                                  if perp_price and l_max and l_max >= 1 else None),
             "protection_stop": _sig(protection_stop(ref)) if ref and l_max and l_max > 1 else None,
             "fund90": {"annual": _round(fund["annual"]), "count": fund["count"]},
+            "premium90": {"mean_pct": _round(premium["mean"], 4), "days": premium["days"]},
             "venue_oi_usd": _round(venue_oi_usd, 0), "venue_volume_usd": _round(venue_volume, 0),
             "aggregate": {"oi_usd": _round(agg["oi_usd"], 0) if agg else None,
                           "perp_volume_usd": _round(agg["perp_volume_usd"], 0) if agg else None,
@@ -835,6 +926,12 @@ def _pct(value: Any, digits: int = 0) -> str:
     return f"{value * 100:+.{digits}f}%" if isinstance(value, (int, float)) and math.isfinite(value) else "?"
 
 
+def _signed(value: Any, digits: int = 2) -> str:
+    """A percentage that is already in percent units (e.g. 0.012 -> +0.012%)."""
+
+    return f"{value:+.{digits}f}%" if isinstance(value, (int, float)) and math.isfinite(value) else "?"
+
+
 def _mult(value: Any, digits: int = 1) -> str:
     return f"{value:.{digits}f}×" if isinstance(value, (int, float)) and math.isfinite(value) else "?"
 
@@ -874,6 +971,7 @@ def _regime_line(snapshot: Mapping[str, Any]) -> str:
     return (f"Rejim: {slice_} · BTC.D {btc:.1f}" if isinstance(btc, (int, float)) else f"Rejim: {slice_} · BTC.D ?") + \
            (f" ({reg.get('direction')})" if reg.get("direction") else "") + \
            (f" · ALT90 {alt:.0f}" if isinstance(alt, (int, float)) else " · ALT90 ?") + \
+           (f" · VIX {reg['vix']:.1f} ({reg.get('vix_date')})" if isinstance(reg.get("vix"), (int, float)) else " · VIX ?") + \
            (f" — {reg.get('reason')}" if reg.get("reason") else "")
 
 
@@ -911,6 +1009,8 @@ def render(snapshot: Mapping[str, Any] | None, *, now: int, enabled: bool = True
     if others:
         lines += ["", esc("İzleme ve havuzlar (sinyal yok): " + ", ".join(
             f"{c.get('symbol')} ({c.get('basket_label')})" for c in others))]
+    if (snapshot.get("regime") or {}).get("vix_note"):
+        lines.append(esc("ℹ️ " + str(snapshot["regime"]["vix_note"]) + " (bilgi satırı; karara etkisi yok)"))
     failed = [str(c.get("symbol")) for c in cards if c.get("errors")]
     if failed or snapshot.get("errors"):
         lines.append(esc("⚠️ Eksik veri: " + ", ".join(failed[:12] + [str(e) for e in snapshot.get("errors") or []][:3])))
@@ -955,6 +1055,9 @@ def render_card(card: Mapping[str, Any], *, now: int, snapshot: Mapping[str, Any
     rows += [
         f"{'FUND90':<14}{_pct(fund.get('annual'))} yıllık ({fund.get('count') or 0} ödeme)",
         f"{'Funding şimdi':<14}{_pct(card.get('funding_now'), 4)}",
+        f"{'Prim şimdi':<14}{_pct(card.get('premium_now'), 3)}  (perp / endeks; bilgi)",
+        f"{'Prim 90g':<14}{_signed((card.get('premium90') or {}).get('mean_pct'), 3)}  "
+        f"ort. ({(card.get('premium90') or {}).get('days') or 0} gün; bilgi, koşul değil)",
         f"{'OI / pd':<14}{_pct(card.get('oi_mcap'))}  ({(card.get('aggregate') or {}).get('tickers') or 0} sözleşme, {(card.get('aggregate') or {}).get('markets')} borsa)",
         f"{'Perp / spot':<14}{_mult(card.get('perp_spot'))}",
         f"{'Kaldıraç bir.':<14}{'EVET' if card.get('buildup') else 'hayır' if card.get('buildup') is False else '?'}",

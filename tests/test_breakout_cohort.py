@@ -259,6 +259,26 @@ def _cohort(origin, *, top_hits, bottom_hits, n=20, indicator="X", seed=0):
     return bc.Cohort(origin, "annual", rows, {}, {})
 
 
+def test_premium_index_parsing_and_the_90_day_mean():
+    origin = bc.day_of(2024, 9, 1)
+    header = "open_time,open,high,low,close,volume,close_time,quote_volume,count,taker_buy_volume,taker_buy_quote_volume,ignore"
+    rows = [header]
+    for k in range(100, 0, -1):
+        day = origin - k
+        rows.append(f"{day * bc.DAY * 1000},0,0.001,-0.001,{0.0002 if k % 2 else -0.0001},0,{(day + 1) * bc.DAY * 1000 - 1},0,17280,0,0,0")
+    rows.append(f"{origin * bc.DAY * 1000},0,0,0,0.5,0,{(origin + 1) * bc.DAY * 1000 - 1},0,1,0,0,0")   # forming / after decision
+    rows.append("junk,row")
+    closes = bc.parse_premium_csv("\n".join(rows), decision_at=origin * bc.DAY)
+    assert len(closes) == 100 and all(d < origin for d, _ in closes)                   # the row after the decision is out
+    prem = bc.premium_90(closes, origin)
+    assert prem == pytest.approx(((45 * 0.0002) + (45 * -0.0001)) / 90 * 100, rel=1e-6)   # percent units
+    assert bc.premium_90(closes[:50], origin) is None                                  # fewer than 60 days: unknown
+    assert bc.premium_90(None, origin) is None
+    assert bc.BUCKETS["PREM90"].of(prem) == 1 and bc.BUCKETS["PREM90"].of(0.05) == 2 and bc.BUCKETS["PREM90"].of(-0.05) == 0
+    assert "PREM90" in bc.PERP_INDICATORS and "PREM90" in bc.trial_params([])["descriptive_only"]
+    assert bc.premium_url("UNIUSDT", 2026, 9).endswith("/premiumIndexKlines/UNIUSDT/1d/UNIUSDT-1d-2026-09.zip")
+
+
 def test_within_cohort_lift_pooling_and_the_candidate_rule():
     cohorts = [_cohort(bc.day_of(y, 9), top_hits=0.9, bottom_hits=0.1, seed=y) for y in bc.DISCOVERY_YEARS]
     stats = bc.indicator_stats(cohorts, "X")
